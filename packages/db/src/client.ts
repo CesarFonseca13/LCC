@@ -39,6 +39,8 @@ export interface DbContext {
   signToken?: string;
   /** Página pública de orçamento: resolve pelo token (política quote_resolve). */
   quoteToken?: string;
+  /** Página pública de agendamento: resolve a clínica pelo slug (política booking_resolve). */
+  bookingSlug?: string;
 }
 
 /** Transação com contexto de tenant/usuário aplicado via set_config (lido pelas políticas RLS). */
@@ -46,7 +48,14 @@ export async function withContext<T>(
   ctx: DbContext,
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
-  if (!ctx.clinicId && !ctx.userId && !ctx.webhookToken && !ctx.signToken && !ctx.quoteToken) {
+  if (
+    !ctx.clinicId &&
+    !ctx.userId &&
+    !ctx.webhookToken &&
+    !ctx.signToken &&
+    !ctx.quoteToken &&
+    !ctx.bookingSlug
+  ) {
     throw new Error("withContext exige clinicId, userId ou um token público.");
   }
   return getDb().transaction(async (tx) => {
@@ -66,6 +75,9 @@ export async function withContext<T>(
     }
     if (ctx.quoteToken) {
       await tx.execute(sql`SELECT set_config('app.quote_token', ${ctx.quoteToken}, true)`);
+    }
+    if (ctx.bookingSlug) {
+      await tx.execute(sql`SELECT set_config('app.booking_slug', ${ctx.bookingSlug}, true)`);
     }
     return fn(tx);
   });

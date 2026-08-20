@@ -5,6 +5,7 @@ import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { AiCard } from "./ai-card";
+import { BookingCard } from "./booking-card";
 import { WhatsAppCard } from "./whatsapp-card";
 
 export const metadata = { title: "Configurações" };
@@ -24,7 +25,7 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const { instance, aiSettings } = await withTenant(
+  const { instance, aiSettings, booking } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const instance =
@@ -41,7 +42,12 @@ export default async function ConfiguracoesPage() {
         )[0] ?? null;
       const clinic = (
         await tx
-          .select({ settings: schema.clinics.settings })
+          .select({
+            settings: schema.clinics.settings,
+            bookingSlug: schema.clinics.bookingSlug,
+            onlineBookingEnabled: schema.clinics.onlineBookingEnabled,
+            name: schema.clinics.name,
+          })
           .from(schema.clinics)
           .where(eq(schema.clinics.id, auth.clinicId!))
           .limit(1)
@@ -58,6 +64,17 @@ export default async function ConfiguracoesPage() {
               ? ai.assistantName
               : "Ana",
           tone: typeof ai?.tone === "string" ? ai.tone : "acolhedora",
+        },
+        booking: {
+          enabled: clinic?.onlineBookingEnabled ?? false,
+          slug:
+            clinic?.bookingSlug ??
+            (clinic?.name ?? "clinica")
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[̀-ͯ]/g, "")
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/(^-|-$)/g, ""),
         },
       };
     },
@@ -79,6 +96,11 @@ export default async function ConfiguracoesPage() {
         />
 
         <AiCard hasApiKey={Boolean(process.env.ANTHROPIC_API_KEY)} initial={aiSettings} />
+
+        <BookingCard
+          appUrl={process.env.APP_URL ?? "http://localhost:3000"}
+          initial={booking}
+        />
 
         <section className="rounded-xl border border-stone-200 bg-white p-6">
           <h2 className="text-sm font-semibold text-stone-700">Dados da clínica</h2>

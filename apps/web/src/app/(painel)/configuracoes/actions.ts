@@ -125,6 +125,37 @@ export const pollWhatsApp = authAction({
   },
 });
 
+// ── Agendamento online ───────────────────────────────────────────────
+
+const bookingSchema = z.object({
+  enabled: z.boolean(),
+  slug: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9-]{3,40}$/, "Use só letras minúsculas, números e hífen (3–40)"),
+});
+
+export const saveBookingSettings = authAction({
+  permission: "settings.manage",
+  schema: bookingSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    try {
+      await tx
+        .update(schema.clinics)
+        .set({ onlineBookingEnabled: input.enabled, bookingSlug: input.slug })
+        .where(eq(schema.clinics.id, auth.clinicId));
+    } catch (err) {
+      if (String(err).includes("clinics_booking_slug")) {
+        return { ok: false, error: "Esse endereço já está em uso — escolha outro." };
+      }
+      throw err;
+    }
+    revalidatePath("/configuracoes");
+    return { ok: true };
+  },
+});
+
 // ── Assistente virtual (persona da IA) ───────────────────────────────
 
 const aiSettingsSchema = z.object({
