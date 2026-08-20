@@ -1,0 +1,15 @@
+# Substituir app.exemplo.com.br pelo domínio real.
+# Caddy emite e renova TLS (Let's Encrypt) automaticamente.
+
+app.exemplo.com.br {
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+# Evolution API nunca é exposta publicamente — o web/worker falam com ela
+# pela rede interna do compose. Se um dia precisar de acesso externo
+# (debug), proteger com basic_auth e IP allowlist.
+
+status.exemplo.com.br {
+	reverse_proxy uptime-kuma:3001
+}

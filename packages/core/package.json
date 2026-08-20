@@ -1,0 +1,23 @@
+{
+  "name": "@clinicaos/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./time": "./src/time.ts",
+    "./permissions": "./src/permissions.ts",
+    "./appointment-fsm": "./src/appointment-fsm.ts",
+    "./template-render": "./src/template-render.ts",
+    "./crypto": "./src/crypto.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

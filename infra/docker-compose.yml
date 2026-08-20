@@ -1,0 +1,129 @@
+# Compose de PRODUÇÃO (VPS única). Requer .env ao lado com as variáveis referenciadas.
+# Serviços de fase futura (evolution, gotenberg, whisper) já mapeados; ativar por milestone.
+name: clinicaos
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.worker
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - app_storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - pg_wal_archive:/wal_archive
+      - ./postgres-prod-init:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /wal_archive/%f && cp %p /wal_archive/%f
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+
+  # ── Milestone WhatsApp (Fase 1, item 5) ────────────────────────────
+  # evolution:
+  #   image: atendai/evolution-api:v2.2.0        # PIN — upgrade via canário
+  #   restart: unless-stopped
+  #   environment:
+  #     AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?}
+  #     DATABASE_ENABLED: "true"
+  #     DATABASE_PROVIDER: postgresql
+  #     DATABASE_CONNECTION_URI: ${EVOLUTION_DATABASE_URL:?}
+  #     CACHE_REDIS_ENABLED: "true"
+  #     CACHE_REDIS_URI: redis://redis:6379/1
+  #   expose: ["8080"]
+  #   volumes:
+  #     - evolution_instances:/evolution/instances
+
+  # ── Milestone Termos/PDF (Fase 2) ──────────────────────────────────
+  # gotenberg:
+  #   image: gotenberg/gotenberg:8
+  #   restart: unless-stopped
+  #   expose: ["3000"]
+
+  # ── Milestone áudio (Fase 2) ───────────────────────────────────────
+  # whisper: (faster-whisper server)
+
+  backup:
+    image: alpine:3.20
+    restart: unless-stopped
+    volumes:
+      - app_storage:/data/storage:ro
+      - pg_wal_archive:/wal_archive:ro
+      - evolution_instances:/evolution_instances:ro
+      - ./backup:/backup:ro
+    env_file: .env
+    entrypoint: ["/bin/sh", "/backup/entrypoint.sh"]
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    restart: unless-stopped
+    expose:
+      - "3001"
+    volumes:
+      - kuma_data:/app/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  pg_wal_archive:
+  redis_data:
+  app_storage:
+  evolution_instances:
+  kuma_data:

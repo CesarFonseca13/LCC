@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://clinicaos_app:app_dev_password@localhost:5432/clinicaos
+      DATABASE_URL_MIGRATOR: postgres://clinicaos_migrator:migrator_dev_password@localhost:5432/clinicaos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Instalar dependências
+        run: pnpm install --frozen-lockfile
+
+      - name: Criar roles e banco (espelha infra/postgres-init)
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -f infra/postgres-init/01-roles.sql
+
+      - name: Migrar banco
+        run: pnpm db:migrate
+
+      - name: Typecheck
+        run: pnpm turbo run typecheck
+
+      - name: Testes (unitários + isolamento RLS)
+        run: pnpm turbo run test
+
+      - name: Build
+        run: pnpm turbo run build
