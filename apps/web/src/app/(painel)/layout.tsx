@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { schema, withTenant } from "@clinicaos/db";
 import { Sidebar } from "@/components/sidebar";
 import { Topbar } from "@/components/topbar";
@@ -12,25 +12,33 @@ export default async function PainelLayout({
   const auth = await requireAuth();
 
   let whatsappStatus: string | null = null;
+  let approvalsCount = 0;
   if (auth.clinicId) {
-    const instance = await withTenant(
+    const info = await withTenant(
       auth.clinicId,
-      async (tx) =>
-        (
+      async (tx) => {
+        const instance = (
           await tx
             .select({ status: schema.whatsappInstances.status })
             .from(schema.whatsappInstances)
             .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
             .limit(1)
-        )[0] ?? null,
+        )[0];
+        const pending = await tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(schema.approvals)
+          .where(eq(schema.approvals.status, "pending"));
+        return { status: instance?.status ?? null, pending: pending[0]?.count ?? 0 };
+      },
       auth.userId,
     );
-    whatsappStatus = instance?.status ?? null;
+    whatsappStatus = info.status;
+    approvalsCount = info.pending;
   }
 
   return (
     <div className="flex h-screen bg-stone-50">
-      <Sidebar />
+      <Sidebar approvalsCount={approvalsCount} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar auth={auth} whatsappStatus={whatsappStatus} />
         <main className="flex-1 overflow-y-auto">{children}</main>

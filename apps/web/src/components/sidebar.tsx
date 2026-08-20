@@ -75,7 +75,7 @@ const GROUPS: NavGroup[] = [
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({ approvalsCount = 0 }: { approvalsCount?: number }) {
   const pathname = usePathname();
 
   return (
@@ -111,7 +111,12 @@ export function Sidebar() {
                       }
                     >
                       <Icon className="h-4 w-4 shrink-0" />
-                      {item.label}
+                      <span className="flex-1">{item.label}</span>
+                      {item.href === "/aprovacoes" && approvalsCount > 0 ? (
+                        <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+                          {approvalsCount}
+                        </span>
+                      ) : null}
                     </Link>
                   </li>
                 );

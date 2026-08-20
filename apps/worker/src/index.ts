@@ -10,6 +10,7 @@ import { evolutionFromEnv } from "@clinicaos/whatsapp";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
+import { expireApprovals, processAutomationTick } from "./automations";
 import { processEvents, processOutbound, reconcileStuckSending } from "./whatsapp";
 
 /**
@@ -34,7 +35,8 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("events-sweep", { every: 3_000 });
   await schedulerQueue.upsertJobScheduler("outbound-sweep", { every: 3_000 });
   await schedulerQueue.upsertJobScheduler("sending-reconcile", { every: 60_000 });
-  await schedulerQueue.upsertJobScheduler("automations-tick", { every: 60_000 });
+  await schedulerQueue.upsertJobScheduler("automations-tick", { every: 15_000 });
+  await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
 
   const worker = new Worker(
     "q-scheduler",
@@ -50,8 +52,10 @@ async function main() {
           await reconcileStuckSending(logger);
           break;
         case "automations-tick":
-          // TODO(cadências): varrer automation_runs.next_run_at <= now()
-          logger.debug({ now: clock.now().toISOString() }, "tick");
+          await processAutomationTick(logger);
+          break;
+        case "approvals-expire":
+          await expireApprovals(logger);
           break;
       }
     },

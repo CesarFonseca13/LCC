@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, inArray, lt } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import Link from "next/link";
 import { todayISO, utcToZoned, zonedToUtc, addDaysISO } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
@@ -76,6 +76,31 @@ export default async function InicioPage() {
         .select({ id: schema.procedures.id, name: schema.procedures.name })
         .from(schema.procedures);
 
+      // "O que as automações fizeram hoje"
+      const sentToday = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.author, "automation"),
+            inArray(schema.messages.status, ["sent", "delivered", "read"]),
+            gte(schema.messages.sentAt, dayStart),
+          ),
+        );
+      const pendingApprovals = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.approvals)
+        .where(eq(schema.approvals.status, "pending"));
+      const confirmedByCadence = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.automationRuns)
+        .where(
+          and(
+            eq(schema.automationRuns.status, "goal_reached"),
+            gte(schema.automationRuns.finishedAt, dayStart),
+          ),
+        );
+
       const now = new Date();
       const appointments = rows.map((r) => ({
         id: r.id,
@@ -90,12 +115,21 @@ export default async function InicioPage() {
 
       const horaLocal = utcToZoned(now, tz).minutesOfDay / 60;
 
-      return { appointments, horaLocal, tz };
+      return {
+        appointments,
+        horaLocal,
+        tz,
+        automationsToday: {
+          sent: sentToday[0]?.count ?? 0,
+          pending: pendingApprovals[0]?.count ?? 0,
+          confirmed: confirmedByCadence[0]?.count ?? 0,
+        },
+      };
     },
     auth.userId,
   );
 
-  const { appointments } = data;
+  const { appointments, automationsToday } = data;
   const total = appointments.length;
   const confirmados = appointments.filter((a) => a.status === "confirmed").length;
   const aguardando = appointments.filter((a) => a.status === "scheduled").length;
@@ -195,10 +229,35 @@ export default async function InicioPage() {
         <h2 className="text-sm font-medium text-stone-700">
           O que as automações fizeram hoje
         </h2>
-        <p className="mt-4 text-center text-sm text-stone-500">
-          Quando o WhatsApp estiver conectado, este bloco mostra lembretes enviados,
-          confirmações recebidas e faltas em recuperação — tudo sozinho.
-        </p>
+        {automationsToday.sent + automationsToday.pending + automationsToday.confirmed ===
+        0 ? (
+          <p className="mt-4 text-center text-sm text-stone-500">
+            Nada ainda por hoje. Com o WhatsApp conectado e as automações ligadas, os
+            lembretes de amanhã aparecem aqui sozinhos.
+          </p>
+        ) : (
+          <div className="mt-4 flex flex-wrap gap-6 text-sm">
+            <p className="text-stone-700">
+              <span className="text-lg font-semibold text-teal-700">
+                {automationsToday.sent}
+              </span>{" "}
+              lembrete{automationsToday.sent === 1 ? "" : "s"} enviado
+              {automationsToday.sent === 1 ? "" : "s"}
+            </p>
+            <p className="text-stone-700">
+              <span className="text-lg font-semibold text-emerald-600">
+                {automationsToday.confirmed}
+              </span>{" "}
+              confirmaç{automationsToday.confirmed === 1 ? "ão" : "ões"} sem esforço
+            </p>
+            {automationsToday.pending > 0 ? (
+              <Link href="/aprovacoes" className="text-teal-700 hover:underline">
+                <span className="text-lg font-semibold">{automationsToday.pending}</span>{" "}
+                aguardando sua aprovação →
+              </Link>
+            ) : null}
+          </div>
+        )}
       </section>
     </div>
   );

@@ -3,7 +3,7 @@ import { AESTHETIC_ANAMNESIS_V1 } from "@clinicaos/core/anamnesis";
 import { addDaysISO, todayISO, zonedToUtc } from "@clinicaos/core/timezone";
 import argon2 from "argon2";
 import { config as loadEnv } from "dotenv";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql as sqlRaw } from "drizzle-orm";
 import { closeDb, unsafeGlobalDb, withContext, withTenant } from "./client";
 import {
   anamnesisTemplates,
@@ -363,6 +363,17 @@ async function main() {
       mk(maria.id, carla.id, drenagem, amanha, "11:00", "scheduled"),
     ]);
     console.log("Criados agendamentos demo (hoje 10h/14h, amanhã 11h).");
+  });
+
+  // ── Automações: liga as cadências de confirmação (modo supervisionado) ──
+  await withTenant(finalClinicId, async (tx) => {
+    for (const automationId of ["reminder_24h", "confirm_2h"]) {
+      await tx.execute(sqlRaw`
+        INSERT INTO automation_settings (clinic_id, automation_id, enabled, requires_approval)
+        VALUES (${finalClinicId}, ${automationId}, true, true)
+        ON CONFLICT (clinic_id, automation_id) DO NOTHING
+      `);
+    }
   });
 
   console.log("Seed em dia:");

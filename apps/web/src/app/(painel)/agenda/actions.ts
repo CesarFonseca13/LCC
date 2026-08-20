@@ -51,6 +51,78 @@ function detectConflict(err: unknown): "professional" | "room" | null {
   return null;
 }
 
+/**
+ * Materializa as runs da cadência de confirmação (24h/2h) de um agendamento.
+ * next_run_at é a fila real; o worker revalida tudo na execução.
+ */
+async function materializeConfirmationRuns(
+  tx: Tx,
+  clinicId: string,
+  appointmentId: string,
+  customerId: string,
+  startsAt: Date,
+): Promise<void> {
+  const enabled = await tx
+    .select({ automationId: schema.automationSettings.automationId })
+    .from(schema.automationSettings)
+    .where(
+      and(
+        eq(schema.automationSettings.clinicId, clinicId),
+        eq(schema.automationSettings.enabled, true),
+        sql`${schema.automationSettings.automationId} IN ('reminder_24h','confirm_2h')`,
+      ),
+    );
+  const enabledSet = new Set(enabled.map((e) => e.automationId));
+  const now = Date.now();
+  const untilStart = startsAt.getTime() - now;
+
+  const plan: { automationId: string; offsetMs: number; minGapMs: number }[] = [
+    { automationId: "reminder_24h", offsetMs: 24 * 3_600_000, minGapMs: 2 * 3_600_000 },
+    { automationId: "confirm_2h", offsetMs: 2 * 3_600_000, minGapMs: 20 * 60_000 },
+  ];
+
+  for (const item of plan) {
+    if (!enabledSet.has(item.automationId)) continue;
+    const idealAt = startsAt.getTime() - item.offsetMs;
+    // Marco já passou: dispara agora se ainda houver folga útil; senão pula
+    if (idealAt <= now && untilStart < item.minGapMs) continue;
+    const nextRunAt = new Date(Math.max(idealAt, now));
+    await tx
+      .insert(schema.automationRuns)
+      .values({
+        clinicId,
+        automationId: item.automationId,
+        customerId,
+        appointmentId,
+        nextRunAt,
+      })
+      .onConflictDoNothing();
+  }
+}
+
+/** Encerra as runs pendentes de um agendamento (cancelou/remarcou/compareceu/confirmou). */
+async function stopConfirmationRuns(
+  tx: Tx,
+  appointmentId: string,
+  outcome: "cancelled" | "goal_reached",
+  reason: string,
+): Promise<void> {
+  await tx
+    .update(schema.automationRuns)
+    .set({
+      status: outcome,
+      stopReason: reason,
+      nextRunAt: null,
+      finishedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.automationRuns.appointmentId, appointmentId),
+        eq(schema.automationRuns.status, "active"),
+      ),
+    );
+}
+
 // ── Criação rápida ───────────────────────────────────────────────────
 
 const createSchema = z.object({
@@ -153,6 +225,13 @@ export const createAppointment = authAction({
           toStatus: "scheduled",
           changedByUserId: auth.userId,
         });
+        await materializeConfirmationRuns(
+          tx,
+          auth.clinicId,
+          created.id,
+          customerId,
+          startsAt,
+        );
       }
 
       revalidatePath("/agenda");
@@ -221,6 +300,13 @@ export const changeAppointmentStatus = authAction({
       changedByUserId: auth.userId,
       reason: input.reason ?? null,
     });
+
+    // Cadência de confirmação: confirmou → objetivo atingido; demais → cancela
+    if (input.to === "confirmed") {
+      await stopConfirmationRuns(tx, input.id, "goal_reached", "cliente confirmou");
+    } else {
+      await stopConfirmationRuns(tx, input.id, "cancelled", `status ${input.to}`);
+    }
 
     // Efeitos de "showed"/"no_show" (financeiro, pós-atendimento, recuperação
     // de falta) entram na Fase 2 — o gancho é a FSM em packages/core.
@@ -296,6 +382,16 @@ export const rescheduleAppointment = authAction({
         .update(schema.appointments)
         .set({ rescheduledToId: created.id })
         .where(eq(schema.appointments.id, input.id));
+
+      // Cadência antiga morre; a nova nasce para o novo horário
+      await stopConfirmationRuns(tx, input.id, "cancelled", "remarcado");
+      await materializeConfirmationRuns(
+        tx,
+        auth.clinicId,
+        created.id,
+        original.customerId,
+        startsAt,
+      );
 
       await tx.insert(schema.appointmentStatusHistory).values([
         {
