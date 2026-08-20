@@ -161,6 +161,32 @@ export default async function RelatoriosPage({
           )
       )[0];
 
+      // CMV: materiais consumidos nos atendimentos do período × custo unitário
+      const hasStock = (
+        await tx
+          .select({ id: schema.stockItems.id })
+          .from(schema.stockItems)
+          .limit(1)
+      )[0];
+      const cmv = (
+        await tx
+          .select({
+            total: sql<string | null>`sum(-${schema.stockMovements.quantity} * COALESCE(${schema.stockItems.cost}, 0))`,
+          })
+          .from(schema.stockMovements)
+          .innerJoin(
+            schema.stockItems,
+            eq(schema.stockItems.id, schema.stockMovements.stockItemId),
+          )
+          .where(
+            and(
+              eq(schema.stockMovements.kind, "procedure_use"),
+              gte(schema.stockMovements.createdAt, new Date(startTs)),
+              lte(schema.stockMovements.createdAt, new Date(endTs)),
+            ),
+          )
+      )[0];
+
       const reactivations = await tx
         .select({
           customerId: schema.customerScores.customerId,
@@ -188,6 +214,8 @@ export default async function RelatoriosPage({
         cancelled: appts?.cancelled ?? 0,
         upcoming: appts?.upcoming ?? 0,
         showedValue: appts?.showedValue ?? "0",
+        cmv: cmv?.total ?? "0",
+        hasStock: Boolean(hasStock),
         topProcedures,
         quotesSent: quotes?.sent ?? 0,
         quotesAccepted: quotes?.accepted ?? 0,
@@ -251,6 +279,13 @@ export default async function RelatoriosPage({
           value={ticket === null ? "—" : formatBRL(ticket)}
           hint="por atendimento realizado"
         />
+        {data.hasStock ? (
+          <Card
+            label="Custo de materiais"
+            value={formatBRL(data.cmv)}
+            hint="consumo dos atendimentos, pelo custo atual dos itens"
+          />
+        ) : null}
       </div>
 
       <div className="mt-4 grid max-w-4xl gap-4 lg:grid-cols-2">

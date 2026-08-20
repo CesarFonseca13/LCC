@@ -6,11 +6,12 @@ import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
+import { DeleteRuleButton, PayCommissionsButton, RuleButton } from "./commissions-client";
 import { PayableFormButton, PayButton, ReceiveButton } from "./finance-client";
 
 export const metadata = { title: "Financeiro" };
 
-type Tab = "geral" | "receber" | "despesas";
+type Tab = "geral" | "receber" | "despesas" | "comissoes";
 
 function monthRange(monthISO: string): { start: string; end: string } {
   const [y, m] = monthISO.split("-").map(Number);
@@ -44,7 +45,14 @@ export default async function FinanceiroPage({
   }
 
   const sp = await searchParams;
-  const tab: Tab = sp.tab === "receber" ? "receber" : sp.tab === "despesas" ? "despesas" : "geral";
+  const tab: Tab =
+    sp.tab === "receber"
+      ? "receber"
+      : sp.tab === "despesas"
+        ? "despesas"
+        : sp.tab === "comissoes"
+          ? "comissoes"
+          : "geral";
   const hoje = todayISO("America/Sao_Paulo");
   const monthISO = /^\d{4}-\d{2}$/.test(sp.m ?? "") ? sp.m! : hoje.slice(0, 7);
   const { start, end } = monthRange(monthISO);
@@ -113,6 +121,63 @@ export default async function FinanceiroPage({
         .orderBy(desc(schema.payables.dueDate))
         .limit(100);
 
+      // Comissões: regime "atendimentos realizados no período"
+      const commissionEntries = await tx
+        .select({
+          id: schema.commissionEntries.id,
+          professionalId: schema.commissionEntries.professionalId,
+          professionalName: schema.professionals.name,
+          commissionAmount: schema.commissionEntries.commissionAmount,
+          baseAmount: schema.commissionEntries.baseAmount,
+          ruleSource: schema.commissionEntries.ruleSource,
+          status: schema.commissionEntries.status,
+          appointmentStatus: schema.appointments.status,
+          startsAt: schema.appointments.startsAt,
+          customerName: schema.customers.fullName,
+          procedureName: sql<string | null>`(SELECT name FROM procedures p WHERE p.id = commission_entries.procedure_id)`,
+        })
+        .from(schema.commissionEntries)
+        .innerJoin(
+          schema.professionals,
+          eq(schema.professionals.id, schema.commissionEntries.professionalId),
+        )
+        .innerJoin(
+          schema.appointments,
+          eq(schema.appointments.id, schema.commissionEntries.appointmentId),
+        )
+        .leftJoin(
+          schema.customers,
+          eq(schema.customers.id, schema.commissionEntries.customerId),
+        )
+        .where(
+          and(
+            gte(schema.appointments.startsAt, new Date(`${start}T00:00:00-03:00`)),
+            lte(schema.appointments.startsAt, new Date(`${addDaysISO(end, 1)}T00:00:00-03:00`)),
+          ),
+        )
+        .orderBy(desc(schema.appointments.startsAt));
+      const commissionRules = await tx
+        .select({
+          id: schema.commissionRules.id,
+          professionalName: schema.professionals.name,
+          procedureName: sql<string | null>`(SELECT name FROM procedures p WHERE p.id = commission_rules.procedure_id)`,
+          value: schema.commissionRules.value,
+          kind: schema.commissionRules.kind,
+        })
+        .from(schema.commissionRules)
+        .innerJoin(
+          schema.professionals,
+          eq(schema.professionals.id, schema.commissionRules.professionalId),
+        );
+      const professionals = await tx
+        .select({ id: schema.professionals.id, name: schema.professionals.name })
+        .from(schema.professionals)
+        .where(eq(schema.professionals.active, true));
+      const proceduresList = await tx
+        .select({ id: schema.procedures.id, name: schema.procedures.name })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.active, true));
+
       return {
         received: received?.total ?? "0",
         pendingTotal: pending?.total ?? "0",
@@ -120,12 +185,17 @@ export default async function FinanceiroPage({
         expenses: expensesPaid?.total ?? "0",
         receivablesList,
         payablesList,
+        commissionEntries,
+        commissionRules,
+        professionals,
+        proceduresList,
       };
     },
     auth.userId,
   );
 
   const canWrite = can(auth.role, "finance.write");
+  const canCommissions = can(auth.role, "commissions.manage");
   const saldo = Number(data.received ?? 0) - Number(data.expenses ?? 0);
   const [y, m] = monthISO.split("-").map(Number);
   const prevMonth = m === 1 ? `${y! - 1}-12` : `${y}-${String(m! - 1).padStart(2, "0")}`;
@@ -192,6 +262,7 @@ export default async function FinanceiroPage({
               ["geral", "Visão geral"],
               ["receber", "A receber"],
               ["despesas", "Despesas"],
+              ["comissoes", "Comissões"],
             ] as const
           ).map(([key, label]) => (
             <Link
@@ -208,10 +279,19 @@ export default async function FinanceiroPage({
           ))}
         </div>
         {tab === "despesas" && canWrite ? <PayableFormButton /> : null}
+        {tab === "comissoes" && canCommissions ? (
+          <RuleButton professionals={data.professionals} procedures={data.proceduresList} />
+        ) : null}
       </div>
 
       <div className="mt-6">
-        {tab === "despesas" ? (
+        {tab === "comissoes" ? (
+          <CommissionsTab
+            entries={data.commissionEntries}
+            rules={data.commissionRules}
+            canManage={canCommissions}
+          />
+        ) : tab === "despesas" ? (
           data.payablesList.length === 0 ? (
             <EmptyState
               title="Lance suas despesas fixas (aluguel, materiais...) para enxergar o saldo real do mês."
@@ -288,6 +368,160 @@ export default async function FinanceiroPage({
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function CommissionsTab({
+  entries,
+  rules,
+  canManage,
+}: {
+  entries: {
+    id: string;
+    professionalId: string;
+    professionalName: string;
+    commissionAmount: string;
+    baseAmount: string;
+    ruleSource: string;
+    status: string;
+    appointmentStatus: string;
+    startsAt: Date;
+    customerName: string | null;
+    procedureName: string | null;
+  }[];
+  rules: {
+    id: string;
+    professionalName: string;
+    procedureName: string | null;
+    value: string;
+    kind: string;
+  }[];
+  canManage: boolean;
+}) {
+  if (!canManage) {
+    return <EmptyState title="As comissões são visíveis apenas para a administradora e a gestora." />;
+  }
+
+  const byProfessional = new Map<string, typeof entries>();
+  for (const entry of entries) {
+    byProfessional.set(entry.professionalId, [
+      ...(byProfessional.get(entry.professionalId) ?? []),
+      entry,
+    ]);
+  }
+
+  return (
+    <div className="space-y-6">
+      {entries.length === 0 ? (
+        <EmptyState title='As comissões nascem sozinhas quando você marca "Compareceu" na agenda — configure as regras em "Nova regra" ou o percentual padrão em Serviços.' />
+      ) : (
+        [...byProfessional.entries()].map(([profId, list]) => {
+          const pending = list.filter((e) => e.status === "pending");
+          const pendingTotal = pending.reduce((s, e) => s + Number(e.commissionAmount), 0);
+          const paidTotal = list
+            .filter((e) => e.status === "paid")
+            .reduce((s, e) => s + Number(e.commissionAmount), 0);
+          return (
+            <section key={profId} className="rounded-xl border border-stone-200 bg-white p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-stone-800">
+                    {list[0]!.professionalName}
+                  </h2>
+                  <p className="text-xs text-stone-500">
+                    {list.length} atendimento{list.length === 1 ? "" : "s"} no mês
+                    {pending.length > 0 ? (
+                      <span className="font-medium text-amber-700">
+                        {" "}
+                        · {formatBRL(pendingTotal)} a pagar
+                      </span>
+                    ) : null}
+                    {paidTotal > 0 ? (
+                      <span className="text-emerald-700"> · {formatBRL(paidTotal)} pago</span>
+                    ) : null}
+                  </p>
+                </div>
+                {pending.length > 0 ? (
+                  <PayCommissionsButton
+                    professionalId={profId}
+                    professionalName={list[0]!.professionalName}
+                    total={formatBRL(pendingTotal)}
+                    entryIds={pending.map((e) => e.id)}
+                  />
+                ) : null}
+              </div>
+              <ul className="mt-3 divide-y divide-stone-100 text-sm">
+                {list.map((e) => (
+                  <li key={e.id} className="flex items-center justify-between py-2">
+                    <span className="min-w-0 truncate text-stone-700">
+                      {e.procedureName ?? "Atendimento"}
+                      {e.customerName ? ` · ${e.customerName}` : ""}
+                      <span className="ml-2 text-xs text-stone-400">
+                        {new Intl.DateTimeFormat("pt-BR", {
+                          day: "2-digit",
+                          month: "2-digit",
+                          timeZone: "America/Sao_Paulo",
+                        }).format(new Date(e.startsAt))}{" "}
+                        · {e.ruleSource} · base {formatBRL(e.baseAmount)}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      {e.appointmentStatus !== "showed" ? (
+                        <span
+                          className="rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+                          title="O atendimento foi corrigido depois do pagamento — confira se essa comissão ainda vale."
+                        >
+                          ⚠ atendimento corrigido
+                        </span>
+                      ) : null}
+                      <span className="font-medium text-stone-800">
+                        {formatBRL(e.commissionAmount)}
+                      </span>
+                      {e.status === "paid" ? (
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                          Paga
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+                          A pagar
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          );
+        })
+      )}
+
+      <section className="rounded-xl border border-stone-200 bg-white p-5">
+        <h2 className="text-sm font-semibold text-stone-700">Regras de comissão</h2>
+        <p className="mt-0.5 text-xs text-stone-500">
+          A regra específica (profissional + procedimento) vence a geral; sem regra, vale o
+          percentual padrão cadastrado no procedimento.
+        </p>
+        {rules.length === 0 ? (
+          <p className="mt-3 text-sm text-stone-500">Nenhuma regra própria ainda.</p>
+        ) : (
+          <ul className="mt-3 divide-y divide-stone-100 text-sm">
+            {rules.map((r) => (
+              <li key={r.id} className="flex items-center justify-between py-2">
+                <span className="text-stone-700">
+                  {r.professionalName} · {r.procedureName ?? "todos os procedimentos"} ·{" "}
+                  <span className="font-medium">
+                    {r.kind === "fixed"
+                      ? `${formatBRL(r.value)} por atendimento`
+                      : `${Number(r.value)}%`}
+                  </span>
+                </span>
+                <DeleteRuleButton id={r.id} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

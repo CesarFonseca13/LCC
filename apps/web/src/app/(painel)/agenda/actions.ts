@@ -165,12 +165,114 @@ async function ensureCategory(
 
 type AppointmentRow = typeof schema.appointments.$inferSelect;
 
+/** Compareceu: debita o consumo de materiais do procedimento (fonte: procedure_supplies). */
+async function applyStockConsumption(
+  tx: Tx,
+  clinicId: string,
+  appointment: AppointmentRow,
+): Promise<void> {
+  if (!appointment.procedureId) return;
+  const supplies = await tx
+    .select({
+      stockItemId: schema.procedureSupplies.stockItemId,
+      quantity: schema.procedureSupplies.quantityPerSession,
+    })
+    .from(schema.procedureSupplies)
+    .where(eq(schema.procedureSupplies.procedureId, appointment.procedureId));
+  for (const supply of supplies) {
+    // Índice único parcial (appointment, item) garante idempotência do débito
+    await tx
+      .insert(schema.stockMovements)
+      .values({
+        clinicId,
+        stockItemId: supply.stockItemId,
+        kind: "procedure_use",
+        quantity: String(-Number(supply.quantity)),
+        appointmentId: appointment.id,
+      })
+      .onConflictDoNothing();
+  }
+}
+
+/** Compareceu: apura a comissão da profissional (regra específica > geral > padrão). */
+async function applyCommission(
+  tx: Tx,
+  clinicId: string,
+  appointment: AppointmentRow,
+): Promise<void> {
+  // Base: sessão de pacote vale preço_pago/total_de_sessões; avulso vale o preço
+  let base = appointment.price ? Number(appointment.price) : 0;
+  if (appointment.customerPackageId) {
+    const pkg = (
+      await tx
+        .select({
+          pricePaid: schema.customerPackages.pricePaid,
+          sessionsTotal: schema.customerPackages.sessionsTotal,
+        })
+        .from(schema.customerPackages)
+        .where(eq(schema.customerPackages.id, appointment.customerPackageId))
+        .limit(1)
+    )[0];
+    if (pkg && pkg.sessionsTotal > 0) base = Number(pkg.pricePaid) / pkg.sessionsTotal;
+  }
+
+  const rules = await tx
+    .select()
+    .from(schema.commissionRules)
+    .where(eq(schema.commissionRules.professionalId, appointment.professionalId));
+  const specific = appointment.procedureId
+    ? rules.find((r) => r.procedureId === appointment.procedureId)
+    : undefined;
+  const general = rules.find((r) => r.procedureId === null);
+
+  let amount = 0;
+  let source = "";
+  if (specific) {
+    amount = specific.kind === "fixed" ? Number(specific.value) : (base * Number(specific.value)) / 100;
+    source = "regra específica";
+  } else if (general) {
+    amount = general.kind === "fixed" ? Number(general.value) : (base * Number(general.value)) / 100;
+    source = "regra geral";
+  } else if (appointment.procedureId) {
+    const proc = (
+      await tx
+        .select({ pct: schema.procedures.commissionDefaultPct })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.id, appointment.procedureId))
+        .limit(1)
+    )[0];
+    if (proc?.pct) {
+      amount = (base * Number(proc.pct)) / 100;
+      source = "padrão do procedimento";
+    }
+  }
+  if (amount <= 0) return;
+
+  await tx
+    .insert(schema.commissionEntries)
+    .values({
+      clinicId,
+      professionalId: appointment.professionalId,
+      appointmentId: appointment.id,
+      customerId: appointment.customerId,
+      procedureId: appointment.procedureId,
+      baseAmount: base.toFixed(2),
+      commissionAmount: amount.toFixed(2),
+      ruleSource: source,
+    })
+    .onConflictDoNothing();
+}
+
 /** Efeitos do Compareceu: debita sessão de pacote OU cria a conta a receber. */
 async function applyShowedEffects(
   tx: Tx,
   clinicId: string,
   appointment: AppointmentRow,
 ): Promise<void> {
+  // Independentes da cobrança: materiais consumidos e comissão da profissional
+  await applyStockConsumption(tx, clinicId, appointment);
+  await applyCommission(tx, clinicId, appointment);
+
   if (appointment.customerPackageId) {
     // Sessão de pacote (pré-paga): debita, nunca cobra de novo
     const inserted = await tx
@@ -255,6 +357,24 @@ async function revertShowedEffects(
   appointment: AppointmentRow,
 ): Promise<void> {
   void clinicId;
+  // Materiais voltam ao estoque; comissão pendente morre (paga fica — decisão humana)
+  await tx
+    .delete(schema.stockMovements)
+    .where(
+      and(
+        eq(schema.stockMovements.appointmentId, appointment.id),
+        eq(schema.stockMovements.kind, "procedure_use"),
+      ),
+    );
+  await tx
+    .delete(schema.commissionEntries)
+    .where(
+      and(
+        eq(schema.commissionEntries.appointmentId, appointment.id),
+        eq(schema.commissionEntries.status, "pending"),
+      ),
+    );
+
   if (appointment.customerPackageId) {
     const reverted = await tx
       .update(schema.packageSessionUses)
