@@ -13,6 +13,7 @@ export type Permission =
   | "customers.write"
   | "customers.clinical.read"
   | "customers.clinical.write"
+  | "catalog.manage"
   | "funnel.manage"
   | "quotes.manage"
   | "terms.manage"
@@ -33,7 +34,7 @@ export type Permission =
 const ALL: readonly Permission[] = [
   "agenda.read.all", "agenda.read.own", "agenda.write",
   "customers.read", "customers.write", "customers.clinical.read", "customers.clinical.write",
-  "funnel.manage", "quotes.manage", "terms.manage",
+  "catalog.manage", "funnel.manage", "quotes.manage", "terms.manage",
   "approvals.review", "inbox.access",
   "finance.read", "finance.write", "commissions.read.own", "commissions.manage",
   "stock.read", "stock.manage",
@@ -46,7 +47,7 @@ const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission>> = {
   manager: new Set<Permission>([
     "agenda.read.all", "agenda.read.own", "agenda.write",
     "customers.read", "customers.write", "customers.clinical.read", "customers.clinical.write",
-    "funnel.manage", "quotes.manage", "terms.manage",
+    "catalog.manage", "funnel.manage", "quotes.manage", "terms.manage",
     "approvals.review", "inbox.access",
     "finance.read", "finance.write", "commissions.manage",
     "stock.read", "stock.manage",
