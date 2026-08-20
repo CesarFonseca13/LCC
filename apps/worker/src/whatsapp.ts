@@ -2,6 +2,7 @@ import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { jidToPhone, normalizeEvent, type EvolutionClient } from "@clinicaos/whatsapp";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { clinicHasAiEnabled, scheduleAiTurn } from "./ai-agent";
 import { classifyInbound } from "./classify-inbound";
 
 /**
@@ -93,19 +94,25 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
         })
         .where(eq(schema.conversations.id, conversationId));
 
-      // Classificação (Fase 1): só mensagens de texto novas (dedupe não reclassifica)
+      // Roteamento (só mensagens de texto novas; dedupe não reprocessa):
+      // IA conversacional ligada → agenda o turno com debounce;
+      // senão → classificador de palavras-chave (Fase 1).
       if (
         (inserted.rowCount ?? 0) > 0 &&
         normalized.messageType === "text" &&
         normalized.body
       ) {
-        await classifyInbound(
-          event.clinicId,
-          conversationId,
-          customerId,
-          normalized.body,
-          logger,
-        );
+        if (await clinicHasAiEnabled(event.clinicId)) {
+          await scheduleAiTurn(conversationId);
+        } else {
+          await classifyInbound(
+            event.clinicId,
+            conversationId,
+            customerId,
+            normalized.body,
+            logger,
+          );
+        }
       }
       return;
     }

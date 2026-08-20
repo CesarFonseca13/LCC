@@ -83,6 +83,8 @@ export const conversations = pgTable(
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
     lastInboundAt: timestamp("last_inbound_at", { withTimezone: true }),
     aiContextSummary: text("ai_context_summary"),
+    /** Debounce da IA: turno processa quando now() >= ai_turn_after (Postgres é a verdade). */
+    aiTurnAfter: timestamp("ai_turn_after", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }),
   },

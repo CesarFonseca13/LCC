@@ -1,7 +1,7 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { evolutionFromEnv } from "@clinicaos/whatsapp";
@@ -122,6 +122,31 @@ export const pollWhatsApp = authAction({
       qrCode: instance.qrCode,
       phone: instance.phoneE164,
     };
+  },
+});
+
+// ── Assistente virtual (persona da IA) ───────────────────────────────
+
+const aiSettingsSchema = z.object({
+  enabled: z.boolean(),
+  assistantName: z.string().trim().min(2, "Dê um nome à assistente").max(30),
+  tone: z.enum(["acolhedora", "elegante", "animada"]),
+});
+
+export const saveAiSettings = authAction({
+  permission: "settings.manage",
+  schema: aiSettingsSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    await tx.execute(sql`
+      UPDATE clinics SET settings = settings || jsonb_build_object('ai', jsonb_build_object(
+        'enabled', ${input.enabled}::boolean,
+        'assistantName', ${input.assistantName}::text,
+        'tone', ${input.tone}::text
+      ))
+      WHERE id = ${auth.clinicId}
+    `);
+    revalidatePath("/configuracoes");
+    return { ok: true };
   },
 });
 

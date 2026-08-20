@@ -1,0 +1,373 @@
+import Anthropic from "@anthropic-ai/sdk";
+
+/**
+ * Agente conversacional humanizado — o coração do produto.
+ *
+ * Princípios (plano §7):
+ *  - A IA NUNCA inventa horário, preço ou agendamento: fatos vêm de ferramentas.
+ *  - Toda resposta termina na ferramenta `responder_cliente` (1–3 balões curtos).
+ *  - Assunto clínico/médico, irritação, negociação ou "é robô?" → escalar_para_humano.
+ */
+
+export interface AgentPersona {
+  assistantName: string;
+  tone: "acolhedora" | "elegante" | "animada";
+}
+
+export interface AgentClinicInfo {
+  name: string;
+  city: string | null;
+  businessHoursLabel: string;
+  catalog: { name: string; price: string; durationMinutes: number }[];
+}
+
+export interface AgentCustomerContext {
+  firstName: string;
+  isNew: boolean;
+  visitsCount: number;
+  upcomingAppointment: string | null; // "Limpeza de Pele, sex 22/08 às 14:00 (id: ...)"
+  activeGoal: string | null; // "obter confirmação da consulta de amanhã 14:00"
+  packageSummary: string | null;
+}
+
+export interface AgentTurnInput {
+  persona: AgentPersona;
+  clinic: AgentClinicInfo;
+  customer: AgentCustomerContext;
+  nowLabel: string; // "quinta-feira, 20/08/2026, 15:32 (horário de Brasília)"
+  /** Histórico: papel + texto (já limitado a ~30 mensagens). */
+  history: { role: "customer" | "assistant"; text: string }[];
+}
+
+export interface AgentReply {
+  balloons: string[];
+  internalNote: string | null;
+  confidence: "alta" | "media" | "baixa";
+  escalated: boolean;
+  usage: { inputTokens: number; outputTokens: number; calls: number };
+}
+
+/** Executores das ferramentas — implementados pelo worker com acesso ao banco. */
+export interface AgentToolExecutors {
+  consultarHorarios(procedimentoNome: string | null): Promise<string>;
+  agendar(slotId: string, procedimentoNome: string): Promise<string>;
+  reagendar(agendamentoId: string, slotId: string): Promise<string>;
+  cancelar(agendamentoId: string, motivo: string | null): Promise<string>;
+  confirmarPresenca(agendamentoId: string): Promise<string>;
+  consultarPacote(): Promise<string>;
+  escalarParaHumano(motivo: string, urgencia: "alta" | "normal"): Promise<string>;
+  registrarOptOut(): Promise<string>;
+}
+
+const TONE_STYLES: Record<AgentPersona["tone"], string> = {
+  acolhedora:
+    "Seu tom é caloroso, próximo e maternal — como uma atendente querida que conhece as clientes pelo nome. Usa no máximo um emoji por balão (💛 é o seu favorito), e nem sempre.",
+  elegante:
+    "Seu tom é elegante, sóbrio e profissional — cordial sem intimidade excessiva. Raramente usa emoji.",
+  animada:
+    "Seu tom é jovem, leve e animado — sem exagerar. No máximo um emoji por balão.",
+};
+
+export function buildSystemPrompt(
+  persona: AgentPersona,
+  clinic: AgentClinicInfo,
+): string {
+  const catalog = clinic.catalog
+    .map((c) => `- ${c.name}: a partir de R$ ${c.price} (${c.durationMinutes} min)`)
+    .join("\n");
+
+  return `Você é ${persona.assistantName}, atendente da ${clinic.name}${clinic.city ? ` (${clinic.city})` : ""}, conversando pelo WhatsApp da clínica.
+
+${TONE_STYLES[persona.tone]}
+
+SOBRE A CLÍNICA
+Horário de atendimento: ${clinic.businessHoursLabel}.
+Serviços e valores:
+${catalog}
+
+REGRAS INEGOCIÁVEIS
+1. Você escreve como uma pessoa real da equipe. Nunca diga que é assistente virtual, IA, robô ou sistema. Se perguntarem diretamente se você é um robô, use escalar_para_humano e responda apenas que vai pedir para alguém da equipe continuar a conversa.
+2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar.
+3. NUNCA invente preço, desconto ou condição de pagamento. Os únicos valores que você pode citar são os do catálogo acima ("a partir de"). Pedido de desconto ou negociação → escalar_para_humano.
+4. Qualquer assunto de saúde — dor, inchaço, reação, alergia, medicamento, gravidez, "deu errado", resultado do procedimento — é assunto da equipe clínica: acolha com UMA frase gentil (sem opinião técnica) e use escalar_para_humano com urgência alta.
+5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano.
+6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.
+7. Escreva como no WhatsApp: mensagens curtas, informais na medida do tom, sem listas numeradas, sem markdown, sem assinatura. Varie as aberturas (nunca comece toda resposta do mesmo jeito). No máximo 1 emoji por balão.
+8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.`;
+}
+
+const TOOLS: Anthropic.Tool[] = [
+  {
+    name: "consultar_horarios",
+    description:
+      "Consulta os horários realmente livres da agenda para um procedimento nos próximos dias. Use SEMPRE antes de oferecer qualquer horário.",
+    input_schema: {
+      type: "object",
+      properties: {
+        procedimento_nome: {
+          type: "string",
+          description: "Nome do procedimento desejado (como está no catálogo)",
+        },
+      },
+    },
+  },
+  {
+    name: "agendar",
+    description:
+      "Agenda a cliente em um horário retornado por consultar_horarios. Use apenas slot_id vindos da consulta.",
+    input_schema: {
+      type: "object",
+      properties: {
+        slot_id: { type: "string" },
+        procedimento_nome: { type: "string" },
+      },
+      required: ["slot_id", "procedimento_nome"],
+    },
+  },
+  {
+    name: "reagendar",
+    description:
+      "Remarca um agendamento existente para um novo horário (slot_id de consultar_horarios).",
+    input_schema: {
+      type: "object",
+      properties: {
+        agendamento_id: { type: "string" },
+        slot_id: { type: "string" },
+      },
+      required: ["agendamento_id", "slot_id"],
+    },
+  },
+  {
+    name: "cancelar",
+    description: "Cancela um agendamento existente da cliente.",
+    input_schema: {
+      type: "object",
+      properties: {
+        agendamento_id: { type: "string" },
+        motivo: { type: "string" },
+      },
+      required: ["agendamento_id"],
+    },
+  },
+  {
+    name: "confirmar_presenca",
+    description: "Confirma a presença da cliente no agendamento existente.",
+    input_schema: {
+      type: "object",
+      properties: { agendamento_id: { type: "string" } },
+      required: ["agendamento_id"],
+    },
+  },
+  {
+    name: "consultar_pacote",
+    description: "Consulta o saldo de sessões e validade dos pacotes da cliente.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "escalar_para_humano",
+    description:
+      "Passa a conversa para a equipe humana. Use para: assunto de saúde, irritação, negociação de preço, pedido explícito, pergunta se você é robô, ou quando não souber ajudar.",
+    input_schema: {
+      type: "object",
+      properties: {
+        motivo: { type: "string" },
+        urgencia: { type: "string", enum: ["alta", "normal"] },
+      },
+      required: ["motivo"],
+    },
+  },
+  {
+    name: "registrar_opt_out",
+    description: "Registra que a cliente não quer mais receber mensagens da clínica.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "responder_cliente",
+    description:
+      "OBRIGATÓRIA ao final de toda vez sua: envia a resposta à cliente em 1 a 3 balões curtos de WhatsApp.",
+    input_schema: {
+      type: "object",
+      properties: {
+        balloons: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 1,
+          maxItems: 3,
+          description: "Balões curtos (até ~250 caracteres cada), sem markdown",
+        },
+        nota_interna: {
+          type: "string",
+          description: "Nota opcional para a equipe (a cliente não vê)",
+        },
+        confianca: { type: "string", enum: ["alta", "media", "baixa"] },
+      },
+      required: ["balloons"],
+    },
+  },
+];
+
+export interface RunAgentOptions {
+  apiKey: string;
+  baseURL?: string;
+  model?: string;
+  maxIterations?: number;
+}
+
+export async function runAgentTurn(
+  input: AgentTurnInput,
+  executors: AgentToolExecutors,
+  options: RunAgentOptions,
+): Promise<AgentReply> {
+  const client = new Anthropic({
+    apiKey: options.apiKey,
+    baseURL: options.baseURL,
+  });
+  const model = options.model ?? "claude-sonnet-5";
+  const maxIterations = options.maxIterations ?? 6;
+
+  const system: Anthropic.TextBlockParam[] = [
+    {
+      type: "text",
+      text: buildSystemPrompt(input.persona, input.clinic),
+      cache_control: { type: "ephemeral" },
+    },
+    {
+      type: "text",
+      text: `AGORA: ${input.nowLabel}.
+
+SOBRE ESTA CLIENTE
+Nome: ${input.customer.firstName}${input.customer.isNew ? " (primeira conversa — ainda não é cliente)" : ` (${input.customer.visitsCount} visita(s) anteriores)`}.
+${input.customer.upcomingAppointment ? `Próximo agendamento: ${input.customer.upcomingAppointment}.` : "Sem agendamento futuro."}
+${input.customer.packageSummary ? `Pacotes: ${input.customer.packageSummary}.` : ""}
+${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo — ${input.customer.activeGoal}.` : ""}`,
+    },
+  ];
+
+  const messages: Anthropic.MessageParam[] = input.history.map((m) => ({
+    role: m.role === "customer" ? ("user" as const) : ("assistant" as const),
+    content: m.text,
+  }));
+
+  let escalated = false;
+  const usage = { inputTokens: 0, outputTokens: 0, calls: 0 };
+  const wrappedExecutors: Record<string, (raw: Record<string, unknown>) => Promise<string>> = {
+    consultar_horarios: (raw) =>
+      executors.consultarHorarios(typeof raw.procedimento_nome === "string" ? raw.procedimento_nome : null),
+    agendar: (raw) => executors.agendar(String(raw.slot_id ?? ""), String(raw.procedimento_nome ?? "")),
+    reagendar: (raw) => executors.reagendar(String(raw.agendamento_id ?? ""), String(raw.slot_id ?? "")),
+    cancelar: (raw) =>
+      executors.cancelar(String(raw.agendamento_id ?? ""), typeof raw.motivo === "string" ? raw.motivo : null),
+    confirmar_presenca: (raw) => executors.confirmarPresenca(String(raw.agendamento_id ?? "")),
+    consultar_pacote: () => executors.consultarPacote(),
+    escalar_para_humano: async (raw) => {
+      escalated = true;
+      return executors.escalarParaHumano(
+        String(raw.motivo ?? "sem motivo"),
+        raw.urgencia === "alta" ? "alta" : "normal",
+      );
+    },
+    registrar_opt_out: () => executors.registrarOptOut(),
+  };
+
+  let toolFailures = 0;
+  for (let i = 0; i < maxIterations; i++) {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 700,
+      system,
+      messages,
+      tools: TOOLS,
+    });
+    usage.inputTokens += response.usage.input_tokens;
+    usage.outputTokens += response.usage.output_tokens;
+    usage.calls += 1;
+
+    const toolUses = response.content.filter(
+      (c): c is Anthropic.ToolUseBlock => c.type === "tool_use",
+    );
+
+    // Resposta final?
+    const responder = toolUses.find((t) => t.name === "responder_cliente");
+    if (responder) {
+      const raw = responder.input as {
+        balloons?: unknown;
+        nota_interna?: unknown;
+        confianca?: unknown;
+      };
+      const balloons = Array.isArray(raw.balloons)
+        ? raw.balloons.filter((b): b is string => typeof b === "string" && b.trim().length > 0).slice(0, 3)
+        : [];
+      if (balloons.length > 0) {
+        return {
+          balloons,
+          internalNote: typeof raw.nota_interna === "string" ? raw.nota_interna : null,
+          confidence:
+            raw.confianca === "baixa" ? "baixa" : raw.confianca === "media" ? "media" : "alta",
+          escalated,
+          usage,
+        };
+      }
+    }
+
+    if (toolUses.length === 0) {
+      // Sem ferramentas: usa o texto como balão único (fallback)
+      const text = response.content
+        .filter((c): c is Anthropic.TextBlock => c.type === "text")
+        .map((c) => c.text)
+        .join(" ")
+        .trim();
+      if (text) {
+        return { balloons: [text], internalNote: null, confidence: "media", escalated, usage };
+      }
+      break;
+    }
+
+    // Executa as ferramentas e continua o loop
+    messages.push({ role: "assistant", content: response.content });
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const toolUse of toolUses) {
+      if (toolUse.name === "responder_cliente") continue;
+      const executor = wrappedExecutors[toolUse.name];
+      if (!executor) {
+        results.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: "Ferramenta indisponível.",
+          is_error: true,
+        });
+        continue;
+      }
+      try {
+        const output = await executor(toolUse.input as Record<string, unknown>);
+        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: output });
+      } catch (err) {
+        toolFailures += 1;
+        results.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: err instanceof Error ? err.message : "Falha na ferramenta.",
+          is_error: true,
+        });
+        if (toolFailures >= 2 && !escalated) {
+          // Duas falhas seguidas: rede de segurança — escala
+          escalated = true;
+          await executors.escalarParaHumano("falhas técnicas seguidas", "normal");
+        }
+      }
+    }
+    messages.push({ role: "user", content: results });
+  }
+
+  // Loop esgotado sem resposta: fallback seguro + escala
+  if (!escalated) {
+    escalated = true;
+    await executors.escalarParaHumano("agente não concluiu a resposta", "normal");
+  }
+  return {
+    balloons: ["Só um instante — vou pedir para alguém da equipe te ajudar com isso, tá? 💛"],
+    internalNote: "Fallback: agente não concluiu com responder_cliente.",
+    confidence: "baixa",
+    escalated,
+    usage,
+  };
+}

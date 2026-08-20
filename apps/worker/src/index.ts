@@ -10,6 +10,7 @@ import { evolutionFromEnv } from "@clinicaos/whatsapp";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
+import { processAiTurns } from "./ai-agent";
 import { expireApprovals, processAutomationTick } from "./automations";
 import { processPdfGeneration } from "./documents";
 import { processEvents, processOutbound, reconcileStuckSending } from "./whatsapp";
@@ -39,6 +40,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("automations-tick", { every: 15_000 });
   await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("pdf-sweep", { every: 10_000 });
+  await schedulerQueue.upsertJobScheduler("ai-turns", { every: 3_000 });
 
   const worker = new Worker(
     "q-scheduler",
@@ -61,6 +63,9 @@ async function main() {
           break;
         case "pdf-sweep":
           await processPdfGeneration(logger);
+          break;
+        case "ai-turns":
+          await processAiTurns(logger);
           break;
       }
     },

@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./classify": "./src/classify.ts"
+    "./classify": "./src/classify.ts",
+    "./agent": "./src/agent.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

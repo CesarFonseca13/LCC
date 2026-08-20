@@ -4,6 +4,7 @@ import { formatPhoneBR } from "@clinicaos/core/phone";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
+import { AiCard } from "./ai-card";
 import { WhatsAppCard } from "./whatsapp-card";
 
 export const metadata = { title: "Configurações" };
@@ -23,20 +24,43 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const instance = await withTenant(
+  const { instance, aiSettings } = await withTenant(
     auth.clinicId,
-    async (tx) =>
-      (
+    async (tx) => {
+      const instance =
+        (
+          await tx
+            .select({
+              status: schema.whatsappInstances.status,
+              phoneE164: schema.whatsappInstances.phoneE164,
+              qrCode: schema.whatsappInstances.qrCode,
+            })
+            .from(schema.whatsappInstances)
+            .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
+            .limit(1)
+        )[0] ?? null;
+      const clinic = (
         await tx
-          .select({
-            status: schema.whatsappInstances.status,
-            phoneE164: schema.whatsappInstances.phoneE164,
-            qrCode: schema.whatsappInstances.qrCode,
-          })
-          .from(schema.whatsappInstances)
-          .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
+          .select({ settings: schema.clinics.settings })
+          .from(schema.clinics)
+          .where(eq(schema.clinics.id, auth.clinicId!))
           .limit(1)
-      )[0] ?? null,
+      )[0];
+      const ai = ((clinic?.settings ?? {}) as Record<string, unknown>).ai as
+        | Record<string, unknown>
+        | undefined;
+      return {
+        instance,
+        aiSettings: {
+          enabled: ai?.enabled === true,
+          assistantName:
+            typeof ai?.assistantName === "string" && ai.assistantName
+              ? ai.assistantName
+              : "Ana",
+          tone: typeof ai?.tone === "string" ? ai.tone : "acolhedora",
+        },
+      };
+    },
     auth.userId,
   );
 
@@ -53,6 +77,8 @@ export default async function ConfiguracoesPage() {
           initialQr={instance?.qrCode ?? null}
           initialPhone={instance?.phoneE164 ? formatPhoneBR(instance.phoneE164) : null}
         />
+
+        <AiCard hasApiKey={Boolean(process.env.ANTHROPIC_API_KEY)} initial={aiSettings} />
 
         <section className="rounded-xl border border-stone-200 bg-white p-6">
           <h2 className="text-sm font-semibold text-stone-700">Dados da clínica</h2>
