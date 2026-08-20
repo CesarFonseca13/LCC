@@ -1,5 +1,6 @@
 import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { todayISO, utcToZoned, zonedToUtc, addDaysISO } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
 import { requireAuth } from "@/lib/auth-action";
@@ -29,12 +30,40 @@ export default async function InicioPage() {
     async (tx) => {
       const clinic = (
         await tx
-          .select({ timezone: schema.clinics.timezone })
+          .select({ timezone: schema.clinics.timezone, settings: schema.clinics.settings })
           .from(schema.clinics)
           .where(eq(schema.clinics.id, auth.clinicId!))
           .limit(1)
       )[0];
       const tz = clinic?.timezone ?? "America/Sao_Paulo";
+      const clinicSettings = (clinic?.settings ?? {}) as Record<string, unknown>;
+
+      // Checklist de implantação (estado real, não flags)
+      const proceduresCount =
+        (
+          await tx
+            .select({ count: sql<number>`count(*)::int` })
+            .from(schema.procedures)
+            .where(eq(schema.procedures.active, true))
+        )[0]?.count ?? 0;
+      const customersCount =
+        (
+          await tx.select({ count: sql<number>`count(*)::int` }).from(schema.customers)
+        )[0]?.count ?? 0;
+      const whatsappConnected =
+        (
+          await tx
+            .select({ status: schema.whatsappInstances.status })
+            .from(schema.whatsappInstances)
+            .limit(1)
+        )[0]?.status === "connected";
+      const automationsEnabled =
+        ((
+          await tx
+            .select({ count: sql<number>`count(*)::int` })
+            .from(schema.automationSettings)
+            .where(eq(schema.automationSettings.enabled, true))
+        )[0]?.count ?? 0) > 0;
       const hoje = todayISO(tz);
       const dayStart = zonedToUtc(hoje, "00:00", tz);
       const dayEnd = zonedToUtc(addDaysISO(hoje, 1), "00:00", tz);
@@ -119,6 +148,13 @@ export default async function InicioPage() {
         appointments,
         horaLocal,
         tz,
+        onboardingDone: clinicSettings.onboarding_done === true,
+        checklist: {
+          whatsappConnected,
+          hasProcedures: proceduresCount > 0,
+          hasCustomers: customersCount > 0,
+          automationsEnabled,
+        },
         automationsToday: {
           sent: sentToday[0]?.count ?? 0,
           pending: pendingApprovals[0]?.count ?? 0,
@@ -129,7 +165,19 @@ export default async function InicioPage() {
     auth.userId,
   );
 
-  const { appointments, automationsToday } = data;
+  // Primeira entrada da administradora: implantação guiada em tela cheia
+  if (auth.role === "owner" && !data.onboardingDone) {
+    redirect("/implantacao");
+  }
+
+  const { appointments, automationsToday, checklist } = data;
+  const checklistItems = [
+    { done: checklist.whatsappConnected, label: "Conectar o WhatsApp", href: "/configuracoes" },
+    { done: checklist.hasProcedures, label: "Cadastrar procedimentos", href: "/servicos" },
+    { done: checklist.hasCustomers, label: "Importar suas clientes", href: "/clientes" },
+    { done: checklist.automationsEnabled, label: "Ligar as automações", href: "/automacoes" },
+  ];
+  const checklistPending = checklistItems.filter((i) => !i.done);
   const total = appointments.length;
   const confirmados = appointments.filter((a) => a.status === "confirmed").length;
   const aguardando = appointments.filter((a) => a.status === "scheduled").length;
@@ -160,6 +208,27 @@ export default async function InicioPage() {
       <p className="mt-0.5 text-sm text-stone-500">
         {dataDeHoje.charAt(0).toUpperCase() + dataDeHoje.slice(1)}
       </p>
+
+      {checklistPending.length > 0 && auth.role === "owner" ? (
+        <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-4">
+          <p className="text-sm font-medium text-teal-900">
+            Falta pouco para a clínica rodar sozinha:
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+            {checklistItems.map((item) => (
+              <li key={item.label}>
+                {item.done ? (
+                  <span className="text-teal-700">✅ {item.label}</span>
+                ) : (
+                  <Link href={item.href} className="text-teal-800 underline hover:text-teal-900">
+                    ⬜ {item.label}
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {semDesfecho > 0 ? (
         <div className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800">

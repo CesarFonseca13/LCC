@@ -365,6 +365,14 @@ async function main() {
     console.log("Criados agendamentos demo (hoje 10h/14h, amanhã 11h).");
   });
 
+  // ── Clínica demo já está "implantada" (não cai no wizard) ─────────
+  await withTenant(finalClinicId, async (tx) => {
+    await tx.execute(sqlRaw`
+      UPDATE clinics SET settings = settings || '{"onboarding_done": true}'::jsonb
+      WHERE id = ${finalClinicId} AND NOT (settings ? 'onboarding_done')
+    `);
+  });
+
   // ── Automações: liga as cadências de confirmação (modo supervisionado) ──
   await withTenant(finalClinicId, async (tx) => {
     for (const automationId of ["reminder_24h", "confirm_2h"]) {
