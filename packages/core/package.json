@@ -11,7 +11,8 @@
     "./template-render": "./src/template-render.ts",
     "./crypto": "./src/crypto.ts",
     "./phone": "./src/phone.ts",
-    "./anamnesis": "./src/anamnesis.ts"
+    "./anamnesis": "./src/anamnesis.ts",
+    "./timezone": "./src/timezone.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

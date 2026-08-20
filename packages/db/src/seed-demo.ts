@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AESTHETIC_ANAMNESIS_V1 } from "@clinicaos/core/anamnesis";
+import { addDaysISO, todayISO, zonedToUtc } from "@clinicaos/core/timezone";
 import argon2 from "argon2";
 import { config as loadEnv } from "dotenv";
 import { and, eq } from "drizzle-orm";
@@ -7,6 +8,7 @@ import { closeDb, unsafeGlobalDb, withContext, withTenant } from "./client";
 import {
   anamnesisTemplates,
   anamnesisTemplateVersions,
+  appointments,
   clinicMembers,
   clinics,
   customerHistoryEntries,
@@ -296,6 +298,71 @@ async function main() {
       }
       console.log(`Criada cliente demo: ${demo.fullName}`);
     }
+  });
+
+  // ── Agendamentos demo (hoje e amanhã, no fuso da clínica) ─────────
+  await withTenant(finalClinicId, async (tx) => {
+    const existing = await tx.select({ id: appointments.id }).from(appointments).limit(1);
+    if (existing.length > 0) return;
+
+    const tz = "America/Sao_Paulo";
+    const hoje = todayISO(tz);
+    const amanha = addDaysISO(hoje, 1);
+
+    const custs = await tx
+      .select({ id: customers.id, name: customers.fullName })
+      .from(customers);
+    const profs = await tx
+      .select({ id: professionals.id, name: professionals.name })
+      .from(professionals);
+    const procs = await tx
+      .select({
+        id: procedures.id,
+        name: procedures.name,
+        duration: procedures.durationMinutes,
+        price: procedures.price,
+      })
+      .from(procedures);
+
+    const byName = <T extends { name: string }>(arr: T[], name: string) =>
+      arr.find((x) => x.name.includes(name));
+
+    const maria = byName(custs, "Maria");
+    const edson = byName(custs, "Edson");
+    const paula = byName(profs, "Paula");
+    const carla = byName(profs, "Carla");
+    const limpeza = byName(procs, "Limpeza");
+    const botox = byName(procs, "Botox");
+    const drenagem = byName(procs, "Drenagem");
+    if (!maria || !edson || !paula || !carla || !limpeza || !botox || !drenagem) return;
+
+    const mk = (
+      customerId: string,
+      professionalId: string,
+      proc: { id: string; duration: number; price: string },
+      dateISO: string,
+      time: string,
+      status: "scheduled" | "confirmed",
+    ) => {
+      const startsAt = zonedToUtc(dateISO, time, tz);
+      return {
+        clinicId: finalClinicId,
+        customerId,
+        professionalId,
+        procedureId: proc.id,
+        startsAt,
+        endsAt: new Date(startsAt.getTime() + proc.duration * 60_000),
+        price: proc.price,
+        status,
+      };
+    };
+
+    await tx.insert(appointments).values([
+      mk(edson.id, paula.id, botox, hoje, "10:00", "confirmed"),
+      mk(maria.id, paula.id, limpeza, hoje, "14:00", "scheduled"),
+      mk(maria.id, carla.id, drenagem, amanha, "11:00", "scheduled"),
+    ]);
+    console.log("Criados agendamentos demo (hoje 10h/14h, amanhã 11h).");
   });
 
   console.log("Seed em dia:");
