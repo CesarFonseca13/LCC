@@ -11,6 +11,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@clinicaos/ai": "workspace:^",
     "@clinicaos/config": "workspace:*",
     "@clinicaos/core": "workspace:*",
     "@clinicaos/db": "workspace:*",

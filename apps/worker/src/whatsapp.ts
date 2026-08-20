@@ -2,6 +2,7 @@ import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { jidToPhone, normalizeEvent, type EvolutionClient } from "@clinicaos/whatsapp";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { classifyInbound } from "./classify-inbound";
 
 /**
  * Processadores WhatsApp do worker.
@@ -73,13 +74,14 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
         customerId,
       );
 
-      await db.execute(sql`
+      const inserted = await db.execute(sql`
         INSERT INTO messages (clinic_id, conversation_id, direction, author, wa_message_id,
                               type, body, status)
         VALUES (${event.clinicId}, ${conversationId}, 'inbound', 'customer',
                 ${normalized.waMessageId}, ${normalized.messageType},
                 ${normalized.body}, 'received')
         ON CONFLICT DO NOTHING
+        RETURNING id
       `);
       await db
         .update(schema.conversations)
@@ -90,6 +92,21 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
           status: "open",
         })
         .where(eq(schema.conversations.id, conversationId));
+
+      // Classificação (Fase 1): só mensagens de texto novas (dedupe não reclassifica)
+      if (
+        (inserted.rowCount ?? 0) > 0 &&
+        normalized.messageType === "text" &&
+        normalized.body
+      ) {
+        await classifyInbound(
+          event.clinicId,
+          conversationId,
+          customerId,
+          normalized.body,
+          logger,
+        );
+      }
       return;
     }
 
