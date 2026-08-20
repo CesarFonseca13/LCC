@@ -1,3 +1,6 @@
+import { config as loadEnv } from "dotenv";
+loadEnv({ path: "../../.env" });
+
 import { SystemTimeProvider } from "@clinicaos/core/time";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";

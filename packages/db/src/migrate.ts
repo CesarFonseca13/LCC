@@ -1,7 +1,10 @@
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { config as loadEnv } from "dotenv";
 import { Client } from "pg";
+
+loadEnv({ path: "../../.env" });
 
 /**
  * Migrador simples e determinístico: aplica migrations/*.sql em ordem lexicográfica,

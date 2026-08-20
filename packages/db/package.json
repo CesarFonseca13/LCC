@@ -11,6 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/migrate.ts",
+    "seed:demo": "tsx src/seed-demo.ts",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.0",
+    "argon2": "^0.41.0",
     "dotenv": "^16.4.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
