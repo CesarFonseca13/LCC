@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AESTHETIC_ANAMNESIS_V1 } from "@clinicaos/core/anamnesis";
+import { DEFAULT_CONSENT_TEMPLATE } from "@clinicaos/core/documents";
+import { extractVariables } from "@clinicaos/core/template-render";
 import { addDaysISO, todayISO, zonedToUtc } from "@clinicaos/core/timezone";
 import argon2 from "argon2";
 import { config as loadEnv } from "dotenv";
@@ -382,6 +384,33 @@ async function main() {
         ON CONFLICT (clinic_id, automation_id) DO NOTHING
       `);
     }
+  });
+
+  // ── Termos: modelo padrão + dados completos da Maria (CPF/endereço) ──
+  await withTenant(finalClinicId, async (tx) => {
+    const existing = await tx.execute(
+      sqlRaw`SELECT 1 FROM document_templates WHERE clinic_id = ${finalClinicId} LIMIT 1`,
+    );
+    if ((existing.rowCount ?? 0) === 0) {
+      const variablesLiteral = `{${extractVariables(DEFAULT_CONSENT_TEMPLATE.bodyText).join(",")}}`;
+      await tx.execute(sqlRaw`
+        INSERT INTO document_templates (clinic_id, name, body_text, variables)
+        VALUES (${finalClinicId}, ${DEFAULT_CONSENT_TEMPLATE.name},
+                ${DEFAULT_CONSENT_TEMPLATE.bodyText},
+                ${variablesLiteral}::text[])
+      `);
+      console.log("Criado modelo de termo de consentimento padrão.");
+    }
+    await tx.execute(sqlRaw`
+      UPDATE customers SET
+        cpf = COALESCE(cpf, '123.456.789-00'),
+        address_street = COALESCE(address_street, 'Rua das Flores'),
+        address_number = COALESCE(address_number, '123'),
+        address_district = COALESCE(address_district, 'Jardins'),
+        address_city = COALESCE(address_city, 'São Paulo'),
+        address_state = COALESCE(address_state, 'SP')
+      WHERE clinic_id = ${finalClinicId} AND full_name = 'Maria Silva'
+    `);
   });
 
   console.log("Seed em dia:");

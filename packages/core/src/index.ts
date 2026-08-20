@@ -6,3 +6,4 @@ export * from "./crypto";
 export * from "./phone";
 export * from "./anamnesis";
 export * from "./timezone";
+export * from "./documents";

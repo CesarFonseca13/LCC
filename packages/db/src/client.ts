@@ -35,6 +35,8 @@ export interface DbContext {
   userId?: string;
   /** Webhook da Evolution: permite resolver a instância pelo token (política webhook_resolve). */
   webhookToken?: string;
+  /** Página pública de assinatura: resolve o documento pelo token (política sign_resolve). */
+  signToken?: string;
 }
 
 /** Transação com contexto de tenant/usuário aplicado via set_config (lido pelas políticas RLS). */
@@ -42,8 +44,8 @@ export async function withContext<T>(
   ctx: DbContext,
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
-  if (!ctx.clinicId && !ctx.userId && !ctx.webhookToken) {
-    throw new Error("withContext exige clinicId, userId ou webhookToken.");
+  if (!ctx.clinicId && !ctx.userId && !ctx.webhookToken && !ctx.signToken) {
+    throw new Error("withContext exige clinicId, userId, webhookToken ou signToken.");
   }
   return getDb().transaction(async (tx) => {
     if (ctx.clinicId) {
@@ -56,6 +58,9 @@ export async function withContext<T>(
       await tx.execute(
         sql`SELECT set_config('app.webhook_token', ${ctx.webhookToken}, true)`,
       );
+    }
+    if (ctx.signToken) {
+      await tx.execute(sql`SELECT set_config('app.sign_token', ${ctx.signToken}, true)`);
     }
     return fn(tx);
   });

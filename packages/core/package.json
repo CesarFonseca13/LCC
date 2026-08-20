@@ -12,7 +12,8 @@
     "./crypto": "./src/crypto.ts",
     "./phone": "./src/phone.ts",
     "./anamnesis": "./src/anamnesis.ts",
-    "./timezone": "./src/timezone.ts"
+    "./timezone": "./src/timezone.ts",
+    "./documents": "./src/documents.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

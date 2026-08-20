@@ -29,6 +29,12 @@ services:
     volumes:
       - redis_data_dev:/data
 
+  # Geração de PDF dos termos assinados (Chromium isolado)
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    ports:
+      - "3005:3000"
+
   # Evolution API real (conectar um telefone de verdade).
   # Para testes automatizados use o mock: node infra/evolution-mock/server.mjs (porta 8099)
   # e rode web/worker com EVOLUTION_BASE_URL=http://localhost:8099

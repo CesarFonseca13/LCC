@@ -11,6 +11,7 @@ import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
 import { expireApprovals, processAutomationTick } from "./automations";
+import { processPdfGeneration } from "./documents";
 import { processEvents, processOutbound, reconcileStuckSending } from "./whatsapp";
 
 /**
@@ -37,6 +38,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("sending-reconcile", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("automations-tick", { every: 15_000 });
   await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
+  await schedulerQueue.upsertJobScheduler("pdf-sweep", { every: 10_000 });
 
   const worker = new Worker(
     "q-scheduler",
@@ -56,6 +58,9 @@ async function main() {
           break;
         case "approvals-expire":
           await expireApprovals(logger);
+          break;
+        case "pdf-sweep":
+          await processPdfGeneration(logger);
           break;
       }
     },
