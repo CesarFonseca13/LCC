@@ -26,6 +26,9 @@ importers:
       '@clinicaos/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@clinicaos/whatsapp':
+        specifier: workspace:^
+        version: link:../../packages/whatsapp
       argon2:
         specifier: ^0.41.0
         version: 0.41.1
@@ -93,12 +96,18 @@ importers:
       '@clinicaos/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@clinicaos/whatsapp':
+        specifier: workspace:^
+        version: link:../../packages/whatsapp
       bullmq:
         specifier: ^5.34.0
         version: 5.81.3
       dotenv:
         specifier: ^16.4.0
         version: 16.6.1
+      drizzle-orm:
+        specifier: ^0.38.0
+        version: 0.38.4(@types/pg@8.23.1)(@types/react@19.2.18)(pg@8.23.0)(react@19.1.0)
       ioredis:
         specifier: ^5.4.0
         version: 5.11.1

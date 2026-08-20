@@ -1,60 +1,73 @@
 import { config as loadEnv } from "dotenv";
 loadEnv({ path: "../../.env" });
+// Worker usa o role com BYPASSRLS (varreduras cross-tenant dos schedulers)
+if (process.env.DATABASE_URL_WORKER) {
+  process.env.DATABASE_URL = process.env.DATABASE_URL_WORKER;
+}
 
 import { SystemTimeProvider } from "@clinicaos/core/time";
+import { evolutionFromEnv } from "@clinicaos/whatsapp";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
+import { processEvents, processOutbound, reconcileStuckSending } from "./whatsapp";
 
 /**
- * Worker — processo persistente: filas BullMQ + schedulers.
- * Fundação: sobe a conexão, registra o tick de automações (ainda no-op) e
- * expõe shutdown limpo. Os consumidores reais entram por milestone.
+ * Worker — processo persistente: schedulers + consumidores.
+ * Regra de ouro: os jobs são INTENÇÕES; a verdade é o Postgres. Todo consumidor
+ * revalida o estado no banco; Redis pode ser perdido sem perda de dados.
  */
 const logger = pino({ name: "worker" });
 const clock = new SystemTimeProvider();
 
-const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
+const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6380";
 const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
-export const QUEUES = {
-  inbound: "q:inbound",
-  inboundDebounce: "q:inbound-debounce",
-  ai: "q:ai",
-  outbound: "q:outbound",
-  cadence: "q:cadence",
-  daily: "q:daily",
-  analysis: "q:analysis",
-} as const;
-
-const tickQueue = new Queue("q:tick", { connection });
+// BullMQ não aceita ":" em nomes de fila — padrão do projeto: prefixo "q-"
+const schedulerQueue = new Queue("q-scheduler", { connection });
 
 async function main() {
   logger.info("Worker iniciando...");
+  const evolution = evolutionFromEnv();
 
-  // Tick por minuto: varre automation_runs.next_run_at <= now() (a verdade é o Postgres).
-  await tickQueue.upsertJobScheduler("automations-tick", { every: 60_000 });
+  // Schedulers repetíveis (BullMQ é só o motor de disparo)
+  await schedulerQueue.upsertJobScheduler("events-sweep", { every: 3_000 });
+  await schedulerQueue.upsertJobScheduler("outbound-sweep", { every: 3_000 });
+  await schedulerQueue.upsertJobScheduler("sending-reconcile", { every: 60_000 });
+  await schedulerQueue.upsertJobScheduler("automations-tick", { every: 60_000 });
 
-  const tickWorker = new Worker(
-    "q:tick",
-    async () => {
-      const now = clock.now();
-      // TODO(milestone 6): varrer automation_runs e materializar envios.
-      logger.debug({ now: now.toISOString() }, "tick");
+  const worker = new Worker(
+    "q-scheduler",
+    async (job) => {
+      switch (job.name) {
+        case "events-sweep":
+          await processEvents(logger);
+          break;
+        case "outbound-sweep":
+          await processOutbound(evolution, logger);
+          break;
+        case "sending-reconcile":
+          await reconcileStuckSending(logger);
+          break;
+        case "automations-tick":
+          // TODO(cadências): varrer automation_runs.next_run_at <= now()
+          logger.debug({ now: clock.now().toISOString() }, "tick");
+          break;
+      }
     },
-    { connection },
+    { connection, concurrency: 2 },
   );
 
-  tickWorker.on("failed", (job, err) => {
-    logger.error({ jobId: job?.id, err: err.message }, "job falhou");
+  worker.on("failed", (job, err) => {
+    logger.error({ job: job?.name, err: err.message }, "job falhou");
   });
 
-  logger.info("Worker pronto.");
+  logger.info("Worker pronto (sweeps: eventos 3s, envio 3s, reconciliação 60s).");
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Encerrando worker...");
-    await tickWorker.close();
-    await tickQueue.close();
+    await worker.close();
+    await schedulerQueue.close();
     connection.disconnect();
     process.exit(0);
   };

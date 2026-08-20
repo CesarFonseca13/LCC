@@ -14,8 +14,10 @@
     "@clinicaos/config": "workspace:*",
     "@clinicaos/core": "workspace:*",
     "@clinicaos/db": "workspace:*",
+    "@clinicaos/whatsapp": "workspace:^",
     "bullmq": "^5.34.0",
     "dotenv": "^16.4.0",
+    "drizzle-orm": "^0.38.0",
     "ioredis": "^5.4.0",
     "pino": "^9.5.0"
   },

@@ -13,6 +13,7 @@
     "@clinicaos/config": "workspace:*",
     "@clinicaos/core": "workspace:*",
     "@clinicaos/db": "workspace:*",
+    "@clinicaos/whatsapp": "workspace:^",
     "argon2": "^0.41.0",
     "dotenv": "^16.4.0",
     "drizzle-orm": "^0.38.0",

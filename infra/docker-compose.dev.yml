@@ -29,25 +29,27 @@ services:
     volumes:
       - redis_data_dev:/data
 
-  # Evolution API — habilitar no milestone WhatsApp (Fase 1, item 5):
-  # evolution:
-  #   image: atendai/evolution-api:v2.2.0        # PIN de versão — upgrade só via canário
-  #   environment:
-  #     AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-change-me-evolution-global-key}
-  #     DATABASE_ENABLED: "true"
-  #     DATABASE_PROVIDER: postgresql
-  #     DATABASE_CONNECTION_URI: postgres://postgres:postgres@postgres:5432/evolution
-  #     CACHE_REDIS_ENABLED: "true"
-  #     CACHE_REDIS_URI: redis://redis:6379/1
-  #   ports:
-  #     - "8080:8080"
-  #   volumes:
-  #     - evolution_instances_dev:/evolution/instances
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
+  # Evolution API real (conectar um telefone de verdade).
+  # Para testes automatizados use o mock: node infra/evolution-mock/server.mjs (porta 8099)
+  # e rode web/worker com EVOLUTION_BASE_URL=http://localhost:8099
+  evolution:
+    image: atendai/evolution-api:v2.2.0        # PIN de versão — upgrade só via canário
+    environment:
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-change-me-evolution-global-key}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgres://postgres:postgres@postgres:5432/evolution
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/1
+    ports:
+      - "8080:8080"
+    volumes:
+      - evolution_instances_dev:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pg_data_dev:
   redis_data_dev:
-  # evolution_instances_dev:
+  evolution_instances_dev:

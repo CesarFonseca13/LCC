@@ -33,6 +33,8 @@ export interface DbContext {
   clinicId?: string;
   /** Usuário autenticado — necessário para listar as clínicas do próprio usuário. */
   userId?: string;
+  /** Webhook da Evolution: permite resolver a instância pelo token (política webhook_resolve). */
+  webhookToken?: string;
 }
 
 /** Transação com contexto de tenant/usuário aplicado via set_config (lido pelas políticas RLS). */
@@ -40,8 +42,8 @@ export async function withContext<T>(
   ctx: DbContext,
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
-  if (!ctx.clinicId && !ctx.userId) {
-    throw new Error("withContext exige clinicId e/ou userId.");
+  if (!ctx.clinicId && !ctx.userId && !ctx.webhookToken) {
+    throw new Error("withContext exige clinicId, userId ou webhookToken.");
   }
   return getDb().transaction(async (tx) => {
     if (ctx.clinicId) {
@@ -50,8 +52,18 @@ export async function withContext<T>(
     if (ctx.userId) {
       await tx.execute(sql`SELECT set_config('app.user_id', ${ctx.userId}, true)`);
     }
+    if (ctx.webhookToken) {
+      await tx.execute(
+        sql`SELECT set_config('app.webhook_token', ${ctx.webhookToken}, true)`,
+      );
+    }
     return fn(tx);
   });
+}
+
+/** Dentro de uma transação já aberta, assume o escopo de uma clínica (webhook → tenant). */
+export async function adoptClinic(tx: Tx, clinicId: string): Promise<void> {
+  await tx.execute(sql`SELECT set_config('app.clinic_id', ${clinicId}, true)`);
 }
 
 export async function withTenant<T>(
