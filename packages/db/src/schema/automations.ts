@@ -12,6 +12,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { appointments } from "./agenda";
+import { procedures } from "./catalog";
 import { customers } from "./customers";
 import { messages } from "./whatsapp";
 import { clinics, users } from "./tenancy";
@@ -74,11 +75,14 @@ export const automationRuns = pgTable(
     appointmentId: uuid("appointment_id").references(() => appointments.id, {
       onDelete: "cascade",
     }),
+    /** Reativação: procedimento-alvo (a run não nasce de um agendamento). */
+    procedureId: uuid("procedure_id").references(() => procedures.id),
     currentStep: integer("current_step").notNull().default(0),
     status: text("status", {
       enum: [
         "active",
         "processing",
+        "paused",
         "completed",
         "goal_reached",
         "cancelled",
@@ -89,6 +93,8 @@ export const automationRuns = pgTable(
       .notNull()
       .default("active"),
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    /** Resposta da cliente pausa a cadência; o sweep retoma depois. */
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
     stopReason: text("stop_reason"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),

@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { todayISO, utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { clampToSendWindow, mergedConfig } from "./reactivation";
 
 /**
  * Motor de automações: varre automation_runs.next_run_at <= now() (a fila real
@@ -166,6 +167,17 @@ async function loadContext(run: Run): Promise<RunContext | "postpone" | null> {
   let appointment: RunContext["appointment"] = null;
   let procedure: RunContext["procedure"] = null;
   let professionalName: string | null = null;
+  // Reativação: a run guarda o procedimento direto (não nasce de agendamento)
+  if (!run.appointmentId && run.procedureId) {
+    procedure =
+      (
+        await db
+          .select()
+          .from(schema.procedures)
+          .where(eq(schema.procedures.id, run.procedureId))
+          .limit(1)
+      )[0] ?? null;
+  }
   if (run.appointmentId) {
     appointment =
       (
@@ -485,6 +497,103 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       return finishRun(run.id, "completed");
     }
 
+    // ── Reativação (sequências longas; resposta pausa, agendou = objetivo) ─
+    case "reactivation_smart":
+    case "reactivation_generic": {
+      const future = (
+        await db
+          .select({ id: schema.appointments.id })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.customerId, run.customerId),
+              inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+              gt(schema.appointments.startsAt, new Date()),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (future) {
+        await finishRun(run.id, "goal_reached", "cliente agendou");
+        return log(run, "goal_reached", "cliente agendou");
+      }
+
+      const config = mergedConfig(ctx.definition.defaultConfig, ctx.settings?.config);
+      const steps = config.steps;
+      if (steps.length === 0 || run.currentStep >= steps.length) {
+        return skip("sequência sem passos");
+      }
+
+      // Passo 2+ sem NENHUMA mensagem anterior de fato liberada (tudo expirou na
+      // aprovação)? "Passando de novo por aqui" como 1ª mensagem da vida não existe.
+      if (run.currentStep > 0) {
+        const delivered = (
+          await db
+            .select({ id: schema.messages.id })
+            .from(schema.messages)
+            .where(
+              and(
+                eq(schema.messages.automationRunId, run.id),
+                inArray(schema.messages.status, ["queued", "sending", "sent", "delivered", "read"]),
+              ),
+            )
+            .limit(1)
+        )[0];
+        if (!delivered) return cancel("nenhuma mensagem da sequência foi aprovada/enviada");
+      }
+
+      // Crash entre o emit e o avanço? O log diz se ESTE passo já foi emitido —
+      // nunca manda o mesmo balão duas vezes (fingerprint de robô).
+      const emitted = await db.execute(sql`
+        SELECT count(*)::int AS n FROM automation_log
+        WHERE run_id = ${run.id} AND result IN ('queued', 'pending_approval')
+      `);
+      const alreadyEmitted =
+        Number((emitted.rows[0] as { n: number } | undefined)?.n ?? 0) > run.currentStep;
+
+      if (!alreadyEmitted) {
+        const vars: Record<string, string> = {
+          nome: ctx.customer.fullName.split(" ")[0] ?? ctx.customer.fullName,
+          clinica: ctx.clinic.name,
+          procedimento: ctx.procedure?.name ?? "seu tratamento",
+        };
+        const step = steps[run.currentStep]!;
+        await emit(ctx, renderTemplate(step.template, vars, { html: false }), {
+          contextLine: `Reativação ${run.currentStep + 1}/${steps.length}${
+            ctx.procedure ? ` · ${ctx.procedure.name}` : ""
+          }`,
+        });
+      }
+
+      const nextStep = run.currentStep + 1;
+      if (nextStep < steps.length) {
+        const gapDays = steps[nextStep]!.days - steps[run.currentStep]!.days;
+        const nextAt = clampToSendWindow(
+          new Date(Date.now() + Math.max(1, gapDays) * 86_400_000),
+          ctx.clinic.timezone,
+        );
+        // Cliente respondeu DURANTE a execução? A pausa venceu: avança o passo
+        // mas preserva o estado pausado (a retomada agenda o próximo envio).
+        const advanced = await db
+          .update(schema.automationRuns)
+          .set({ status: "active", currentStep: nextStep, nextRunAt: nextAt })
+          .where(
+            and(eq(schema.automationRuns.id, run.id), eq(schema.automationRuns.status, "processing")),
+          )
+          .returning({ id: schema.automationRuns.id });
+        if (advanced.length === 0) {
+          await db
+            .update(schema.automationRuns)
+            .set({ currentStep: nextStep, nextRunAt: null })
+            .where(
+              and(eq(schema.automationRuns.id, run.id), eq(schema.automationRuns.status, "paused")),
+            );
+        }
+        return;
+      }
+      return finishRun(run.id, "completed", "sequência concluída — despedida enviada");
+    }
+
     default:
       return skip(`tipo desconhecido: ${run.automationId}`);
   }
@@ -527,9 +636,11 @@ export async function processBirthdays(logger: Logger): Promise<void> {
       automationId: "birthday",
       customerId: row.customer_id,
       appointmentId: null,
+      procedureId: null,
       currentStep: 0,
       status: "processing",
       nextRunAt: null,
+      pausedAt: null,
       stopReason: null,
       startedAt: new Date(),
       finishedAt: null,

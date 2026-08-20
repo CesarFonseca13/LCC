@@ -99,6 +99,21 @@ export default async function AutomacoesPage() {
               <div className="mt-3 space-y-3">
                 {defs.map((def) => {
                   const setting = settings.find((s) => s.automationId === def.id);
+                  // Sequências (reativação): textos da clínica, senão os do catálogo
+                  const defaultSteps = ((def.defaultConfig ?? {}) as {
+                    steps?: { days: number; template: string }[];
+                  }).steps;
+                  const settingSteps = ((setting?.config ?? {}) as {
+                    steps?: { days: number; template: string }[];
+                  }).steps;
+                  // O que a clínica salvou é o que o worker envia — a UI mostra
+                  // exatamente isso (o catálogo entra só como padrão/reset)
+                  const sequence =
+                    defaultSteps && defaultSteps.length > 0
+                      ? settingSteps && settingSteps.length > 0
+                        ? settingSteps
+                        : defaultSteps
+                      : null;
                   return (
                     <AutomationCard
                       key={def.id}
@@ -113,6 +128,8 @@ export default async function AutomacoesPage() {
                         requiresApproval: setting?.requiresApproval ?? true,
                         messageTemplate: setting?.messageTemplate ?? null,
                       }}
+                      sequence={sequence}
+                      defaultSequence={defaultSteps ?? null}
                     />
                   );
                 })}

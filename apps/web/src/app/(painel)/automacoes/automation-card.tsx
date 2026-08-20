@@ -33,25 +33,48 @@ function preview(template: string): string {
   );
 }
 
+export interface SequenceStepView {
+  days: number;
+  template: string;
+}
+
+function stepLabel(index: number, days: number, prevDays: number): string {
+  const ord = `${index + 1}ª mensagem`;
+  if (index === 0) return `${ord} · no primeiro dia`;
+  const gap = days - prevDays;
+  return `${ord} · dia ${days} (${gap} dia${gap === 1 ? "" : "s"} depois da anterior)`;
+}
+
 export function AutomationCard({
   definition,
   setting,
+  sequence,
+  defaultSequence,
 }: {
   definition: DefinitionView;
   setting: SettingView;
+  /** Sequência multi-passos (reativação): dias fixos, textos editáveis. */
+  sequence?: SequenceStepView[] | null;
+  /** Textos originais do catálogo (para "Voltar ao padrão"). */
+  defaultSequence?: SequenceStepView[] | null;
 }) {
   const router = useRouter();
   const [editOpen, setEditOpen] = useState(false);
   const [template, setTemplate] = useState(
     setting.messageTemplate ?? definition.defaultTemplate,
   );
+  const [stepTexts, setStepTexts] = useState<string[]>(
+    (sequence ?? []).map((s) => s.template),
+  );
   const [error, setError] = useState<string>();
   const [pending, startTransition] = useTransition();
+  const isSequence = Boolean(sequence && sequence.length > 0);
 
   function save(patch: {
     enabled?: boolean;
     requiresApproval?: boolean;
     messageTemplate?: string;
+    steps?: string[];
   }) {
     setError(undefined);
     startTransition(async () => {
@@ -63,6 +86,7 @@ export function AutomationCard({
         ...(patch.messageTemplate !== undefined
           ? { messageTemplate: patch.messageTemplate }
           : {}),
+        ...(patch.steps !== undefined ? { steps: patch.steps } : {}),
       });
       if (result.ok) {
         setEditOpen(false);
@@ -124,12 +148,25 @@ export function AutomationCard({
               Enviar automaticamente
             </label>
             <Button variant="ghost" onClick={() => setEditOpen(true)}>
-              Editar mensagem
+              {isSequence ? "Ver e editar sequência" : "Editar mensagem"}
             </Button>
           </div>
-          <p className="rounded-lg bg-stone-50 px-3 py-2 text-sm text-stone-600">
-            {preview(setting.messageTemplate ?? definition.defaultTemplate)}
-          </p>
+          {isSequence ? (
+            <div className="rounded-lg bg-stone-50 px-3 py-2.5 text-sm text-stone-600">
+              <p>{preview(stepTexts[0] ?? sequence![0]!.template)}</p>
+              {sequence!.length > 1 ? (
+                <p className="mt-1.5 text-xs text-stone-400">
+                  …e mais {sequence!.length - 1} mensagens ao longo de{" "}
+                  {sequence![sequence!.length - 1]!.days} dias. Se a cliente responder, a
+                  sequência pausa na hora; se ela agendar, para de vez.
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="rounded-lg bg-stone-50 px-3 py-2 text-sm text-stone-600">
+              {preview(setting.messageTemplate ?? definition.defaultTemplate)}
+            </p>
+          )}
         </div>
       ) : null}
 
@@ -137,9 +174,70 @@ export function AutomationCard({
 
       <Modal
         open={editOpen}
-        onClose={() => setEditOpen(false)}
-        title={`Mensagem — ${definition.name}`}
+        onClose={() => {
+          // Fechar sem salvar descarta o rascunho — o preview do card nunca
+          // mostra texto que não é o que será enviado
+          setEditOpen(false);
+          setTemplate(setting.messageTemplate ?? definition.defaultTemplate);
+          setStepTexts((sequence ?? []).map((s) => s.template));
+        }}
+        title={isSequence ? `Sequência — ${definition.name}` : `Mensagem — ${definition.name}`}
       >
+        {isSequence ? (
+          <div className="space-y-4">
+            <div className="space-y-4">
+              {sequence!.map((step, i) => (
+                <div key={i} className="relative pl-6">
+                  {/* Linha do tempo visual */}
+                  <span className="absolute left-1.5 top-2 h-2 w-2 rounded-full bg-teal-600" />
+                  {i < sequence!.length - 1 ? (
+                    <span className="absolute bottom-[-16px] left-[8.5px] top-4 w-px bg-stone-200" />
+                  ) : null}
+                  <p className="text-xs font-medium text-stone-600">
+                    {stepLabel(i, step.days, sequence![i - 1]?.days ?? 0)}
+                  </p>
+                  <Textarea
+                    value={stepTexts[i] ?? step.template}
+                    onChange={(e) =>
+                      setStepTexts((prev) => {
+                        const next = [...prev];
+                        next[i] = e.target.value;
+                        return next;
+                      })
+                    }
+                    rows={2}
+                    className="mt-1"
+                  />
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-stone-500">
+              Variáveis:{" "}
+              <code className="rounded bg-stone-100 px-1">{"{{nome}}"}</code>{" "}
+              <code className="rounded bg-stone-100 px-1">{"{{procedimento}}"}</code>{" "}
+              <code className="rounded bg-stone-100 px-1">{"{{clinica}}"}</code> · A
+              sequência pausa se a cliente responder e encerra se ela agendar.
+            </p>
+            <FieldError message={error} />
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() =>
+                  setStepTexts((defaultSequence ?? sequence ?? []).map((s) => s.template))
+                }
+              >
+                Voltar ao padrão
+              </Button>
+              <Button
+                onClick={() => save({ steps: stepTexts.map((t, i) => t || sequence![i]!.template) })}
+                disabled={pending || stepTexts.some((t) => t !== undefined && t.trim().length === 0)}
+              >
+                {pending ? "Salvando..." : "Salvar sequência"}
+              </Button>
+            </div>
+          </div>
+        ) : (
         <div className="space-y-4">
           <Textarea
             value={template}
@@ -182,6 +280,7 @@ export function AutomationCard({
             </Button>
           </div>
         </div>
+        )}
       </Modal>
     </div>
   );

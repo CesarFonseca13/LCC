@@ -4,6 +4,7 @@ import { jidToPhone, normalizeEvent, type EvolutionClient } from "@clinicaos/wha
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
 import { clinicHasAiEnabled, scheduleAiTurn } from "./ai-agent";
 import { classifyInbound } from "./classify-inbound";
+import { pauseReactivationOnReply } from "./reactivation";
 
 /**
  * Processadores WhatsApp do worker.
@@ -93,6 +94,12 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
           status: "open",
         })
         .where(eq(schema.conversations.id, conversationId));
+
+      // Resposta da cliente pausa qualquer cadência de reativação na hora
+      // (nunca "fala por cima" de quem acabou de responder) — qualquer tipo de mensagem
+      if ((inserted.rowCount ?? 0) > 0) {
+        await pauseReactivationOnReply(event.clinicId, customerId);
+      }
 
       // Roteamento (só mensagens de texto novas; dedupe não reprocessa):
       // IA conversacional ligada → agenda o turno com debounce;
