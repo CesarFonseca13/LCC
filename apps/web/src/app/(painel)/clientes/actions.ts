@@ -10,6 +10,7 @@ import {
 } from "@clinicaos/core/anamnesis";
 import { encryptSensitive } from "@clinicaos/core/crypto";
 import { normalizePhoneBR } from "@clinicaos/core/phone";
+import { addDaysISO, todayISO } from "@clinicaos/core/timezone";
 import { schema } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
 import { parseBRLDecimal } from "@/lib/format";
@@ -392,6 +393,98 @@ export const importCustomersCsv = authAction({
 
     revalidatePath("/clientes");
     return { ok: true, imported, skipped };
+  },
+});
+
+// ── Pacotes: atribuição gera a conta a receber do pacote ─────────────
+
+const assignPackageSchema = z.object({
+  customerId: z.string().uuid(),
+  packageId: z.string().uuid("Escolha o pacote"),
+});
+
+export const assignPackage = authAction({
+  permission: "customers.write",
+  schema: assignPackageSchema,
+  handler: async (input, { auth, tx }): Promise<FormResult> => {
+    const pkg = (
+      await tx
+        .select()
+        .from(schema.packages)
+        .where(and(eq(schema.packages.id, input.packageId), eq(schema.packages.active, true)))
+        .limit(1)
+    )[0];
+    if (!pkg) return { ok: false, error: "Pacote não encontrado." };
+
+    const item = (
+      await tx
+        .select()
+        .from(schema.packageItems)
+        .where(eq(schema.packageItems.packageId, input.packageId))
+        .limit(1)
+    )[0];
+    if (!item) return { ok: false, error: "Pacote sem procedimento vinculado." };
+
+    const today = todayISO("America/Sao_Paulo");
+    const [customerPackage] = await tx
+      .insert(schema.customerPackages)
+      .values({
+        clinicId: auth.clinicId,
+        customerId: input.customerId,
+        packageId: pkg.id,
+        procedureId: item.procedureId,
+        sessionsTotal: item.sessions,
+        pricePaid: pkg.price,
+        purchasedAt: today,
+        expiresAt: pkg.validityDays ? addDaysISO(today, pkg.validityDays) : null,
+        createdBy: auth.userId,
+      })
+      .returning({ id: schema.customerPackages.id });
+    if (!customerPackage) return { ok: false, error: "Falha ao atribuir o pacote." };
+
+    // Venda do pacote → conta a receber (categoria Pacotes)
+    let category = (
+      await tx
+        .select({ id: schema.financeCategories.id })
+        .from(schema.financeCategories)
+        .where(
+          and(
+            eq(schema.financeCategories.clinicId, auth.clinicId),
+            eq(schema.financeCategories.kind, "income"),
+            eq(schema.financeCategories.name, "Pacotes"),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!category) {
+      const [created] = await tx
+        .insert(schema.financeCategories)
+        .values({ clinicId: auth.clinicId, name: "Pacotes", kind: "income" })
+        .onConflictDoNothing()
+        .returning({ id: schema.financeCategories.id });
+      category = created;
+    }
+    const customer = (
+      await tx
+        .select({ fullName: schema.customers.fullName })
+        .from(schema.customers)
+        .where(eq(schema.customers.id, input.customerId))
+        .limit(1)
+    )[0];
+    await tx.insert(schema.receivables).values({
+      clinicId: auth.clinicId,
+      customerId: input.customerId,
+      customerPackageId: customerPackage.id,
+      categoryId: category?.id ?? null,
+      description: `${pkg.name} — ${customer?.fullName ?? "Cliente"}`,
+      grossAmount: pkg.price,
+      netAmount: pkg.price,
+      dueDate: today,
+    });
+
+    revalidatePath(`/clientes/${input.customerId}`);
+    revalidatePath("/financeiro");
+    return { ok: true };
   },
 });
 

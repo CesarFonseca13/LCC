@@ -47,6 +47,8 @@ export const appointments = pgTable(
     })
       .notNull()
       .default("manual"),
+    /** Sessão coberta por pacote (sem conta a receber; debita sessão no Compareceu). */
+    customerPackageId: uuid("customer_package_id"),
     allowOverlap: boolean("allow_overlap").notNull().default(false),
     cancelReason: text("cancel_reason"),
     notes: text("notes"),

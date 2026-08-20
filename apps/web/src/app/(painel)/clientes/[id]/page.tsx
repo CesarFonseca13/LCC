@@ -15,6 +15,7 @@ import { AnamnesisForm } from "./anamnesis-form";
 import { DadosForm } from "./dados-form";
 import { HeaderActions } from "./header-actions";
 import { HistoryFormButton } from "./history-form";
+import { AssignPackageButton } from "./package-assign";
 
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   lead: { label: "Lead", className: "bg-sky-50 text-sky-700" },
@@ -23,7 +24,7 @@ const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   inactive: { label: "Inativa", className: "bg-stone-100 text-stone-500" },
 };
 
-type Tab = "dados" | "anamnese" | "historico";
+type Tab = "dados" | "anamnese" | "historico" | "pacotes";
 
 export default async function ClientePage({
   params,
@@ -37,7 +38,13 @@ export default async function ClientePage({
   const { id } = await params;
   const sp = await searchParams;
   const tab: Tab =
-    sp.tab === "anamnese" ? "anamnese" : sp.tab === "historico" ? "historico" : "dados";
+    sp.tab === "anamnese"
+      ? "anamnese"
+      : sp.tab === "historico"
+        ? "historico"
+        : sp.tab === "pacotes"
+          ? "pacotes"
+          : "dados";
 
   const canClinicalRead = can(auth.role, "customers.clinical.read");
 
@@ -99,6 +106,32 @@ export default async function ClientePage({
         .where(eq(schema.procedures.active, true))
         .orderBy(schema.procedures.name);
 
+      const customerPackages = await tx
+        .select({
+          id: schema.customerPackages.id,
+          sessionsTotal: schema.customerPackages.sessionsTotal,
+          sessionsUsed: schema.customerPackages.sessionsUsed,
+          status: schema.customerPackages.status,
+          expiresAt: schema.customerPackages.expiresAt,
+          pricePaid: schema.customerPackages.pricePaid,
+          packageName: schema.packages.name,
+          procedureName: sql<string | null>`(SELECT p2.name FROM procedures p2 WHERE p2.id = customer_packages.procedure_id)`,
+        })
+        .from(schema.customerPackages)
+        .innerJoin(schema.packages, eq(schema.packages.id, schema.customerPackages.packageId))
+        .where(eq(schema.customerPackages.customerId, id))
+        .orderBy(desc(schema.customerPackages.createdAt));
+
+      const packageModels = await tx
+        .select({
+          id: schema.packages.id,
+          name: schema.packages.name,
+          price: schema.packages.price,
+        })
+        .from(schema.packages)
+        .where(eq(schema.packages.active, true))
+        .orderBy(schema.packages.name);
+
       const otherCustomers = await tx
         .select({
           id: schema.customers.id,
@@ -110,13 +143,31 @@ export default async function ClientePage({
         .orderBy(schema.customers.fullName)
         .limit(300);
 
-      return { customer, history, latestAnamnesis, templateVersion, procedures, otherCustomers };
+      return {
+        customer,
+        history,
+        latestAnamnesis,
+        templateVersion,
+        procedures,
+        otherCustomers,
+        customerPackages,
+        packageModels,
+      };
     },
     auth.userId,
   );
 
   if (!data) notFound();
-  const { customer, history, latestAnamnesis, templateVersion, procedures, otherCustomers } = data;
+  const {
+    customer,
+    history,
+    latestAnamnesis,
+    templateVersion,
+    procedures,
+    otherCustomers,
+    customerPackages,
+    packageModels,
+  } = data;
 
   // Dados de saúde: decifra apenas para quem tem permissão clínica
   let anamnesisAnswers: AnamnesisAnswers | null = null;
@@ -211,6 +262,7 @@ export default async function ClientePage({
             ["dados", "Dados"],
             ["anamnese", "Anamnese"],
             ["historico", "Histórico"],
+            ["pacotes", "Pacotes"],
           ] as const
         ).map(([key, label]) => (
           <Link
@@ -274,6 +326,79 @@ export default async function ClientePage({
               }
             />
           )
+        ) : tab === "pacotes" ? (
+          <div>
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-stone-500">
+                Pacotes ativos debitam a sessão sozinhos quando o atendimento é marcado
+                como “Compareceu”.
+              </p>
+              <AssignPackageButton
+                customerId={customer.id}
+                packages={packageModels.map((p) => ({
+                  id: p.id,
+                  name: p.name,
+                  priceLabel: formatBRL(p.price),
+                }))}
+              />
+            </div>
+            <div className="mt-4 space-y-3">
+              {customerPackages.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-stone-300 bg-white px-6 py-10 text-center text-sm text-stone-500">
+                  Nenhum pacote atribuído ainda.
+                </p>
+              ) : (
+                customerPackages.map((pkg) => {
+                  const remaining = pkg.sessionsTotal - pkg.sessionsUsed;
+                  const pct = Math.min((pkg.sessionsUsed / pkg.sessionsTotal) * 100, 100);
+                  return (
+                    <div key={pkg.id} className="rounded-xl border border-stone-200 bg-white p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-stone-800">
+                            {pkg.packageName}
+                          </p>
+                          <p className="text-xs text-stone-500">
+                            {pkg.procedureName ?? ""} · {formatBRL(pkg.pricePaid)}
+                            {pkg.expiresAt
+                              ? ` · válido até ${new Date(`${pkg.expiresAt}T12:00:00`).toLocaleDateString("pt-BR")}`
+                              : ""}
+                          </p>
+                        </div>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                            pkg.status === "active"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : pkg.status === "completed"
+                                ? "bg-teal-50 text-teal-700"
+                                : "bg-stone-100 text-stone-500"
+                          }`}
+                        >
+                          {pkg.status === "active"
+                            ? "Ativo"
+                            : pkg.status === "completed"
+                              ? "Concluído"
+                              : pkg.status === "expired"
+                                ? "Vencido"
+                                : "Cancelado"}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-sm text-stone-700">
+                        {pkg.sessionsUsed} de {pkg.sessionsTotal} sessões usadas —{" "}
+                        {remaining} restante{remaining === 1 ? "" : "s"}
+                      </p>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-100">
+                        <div
+                          className="h-full rounded-full bg-teal-600 transition-all"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         ) : (
           <div>
             <div className="flex items-center justify-between">

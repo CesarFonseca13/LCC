@@ -8,7 +8,7 @@ import {
   type AppointmentStatus,
 } from "@clinicaos/core/appointment-fsm";
 import { formatPhoneBR, normalizePhoneBR } from "@clinicaos/core/phone";
-import { zonedToUtc } from "@clinicaos/core/timezone";
+import { todayISO, zonedToUtc } from "@clinicaos/core/timezone";
 import { schema, type Tx } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
 
@@ -98,6 +98,177 @@ async function materializeConfirmationRuns(
       })
       .onConflictDoNothing();
   }
+}
+
+async function ensureCategory(
+  tx: Tx,
+  clinicId: string,
+  name: string,
+  kind: "income" | "expense",
+): Promise<string> {
+  const existing = await tx
+    .select({ id: schema.financeCategories.id })
+    .from(schema.financeCategories)
+    .where(
+      and(
+        eq(schema.financeCategories.clinicId, clinicId),
+        eq(schema.financeCategories.kind, kind),
+        eq(schema.financeCategories.name, name),
+      ),
+    )
+    .limit(1);
+  if (existing[0]) return existing[0].id;
+  const [created] = await tx
+    .insert(schema.financeCategories)
+    .values({ clinicId, name, kind })
+    .onConflictDoNothing()
+    .returning({ id: schema.financeCategories.id });
+  if (created) return created.id;
+  const retry = await tx
+    .select({ id: schema.financeCategories.id })
+    .from(schema.financeCategories)
+    .where(
+      and(
+        eq(schema.financeCategories.clinicId, clinicId),
+        eq(schema.financeCategories.kind, kind),
+        eq(schema.financeCategories.name, name),
+      ),
+    )
+    .limit(1);
+  return retry[0]!.id;
+}
+
+type AppointmentRow = typeof schema.appointments.$inferSelect;
+
+/** Efeitos do Compareceu: debita sessão de pacote OU cria a conta a receber. */
+async function applyShowedEffects(
+  tx: Tx,
+  clinicId: string,
+  appointment: AppointmentRow,
+): Promise<void> {
+  if (appointment.customerPackageId) {
+    // Sessão de pacote (pré-paga): debita, nunca cobra de novo
+    const inserted = await tx
+      .insert(schema.packageSessionUses)
+      .values({
+        clinicId,
+        customerPackageId: appointment.customerPackageId,
+        appointmentId: appointment.id,
+      })
+      .onConflictDoNothing()
+      .returning({ id: schema.packageSessionUses.id });
+    if (inserted[0]) {
+      const [pkg] = await tx
+        .update(schema.customerPackages)
+        .set({ sessionsUsed: sql`${schema.customerPackages.sessionsUsed} + 1` })
+        .where(eq(schema.customerPackages.id, appointment.customerPackageId))
+        .returning({
+          sessionsUsed: schema.customerPackages.sessionsUsed,
+          sessionsTotal: schema.customerPackages.sessionsTotal,
+        });
+      if (pkg && pkg.sessionsUsed >= pkg.sessionsTotal) {
+        await tx
+          .update(schema.customerPackages)
+          .set({ status: "completed" })
+          .where(eq(schema.customerPackages.id, appointment.customerPackageId));
+      }
+    }
+    return;
+  }
+
+  const price = appointment.price ? Number(appointment.price) : 0;
+  if (price <= 0) return;
+
+  // Idempotência: nunca duplica a conta do mesmo atendimento
+  const existing = await tx
+    .select({ id: schema.receivables.id })
+    .from(schema.receivables)
+    .where(
+      and(
+        eq(schema.receivables.appointmentId, appointment.id),
+        sql`${schema.receivables.status} <> 'cancelled'`,
+      ),
+    )
+    .limit(1);
+  if (existing[0]) return;
+
+  const customer = (
+    await tx
+      .select({ fullName: schema.customers.fullName })
+      .from(schema.customers)
+      .where(eq(schema.customers.id, appointment.customerId))
+      .limit(1)
+  )[0];
+  const procedure = appointment.procedureId
+    ? (
+        await tx
+          .select({ name: schema.procedures.name })
+          .from(schema.procedures)
+          .where(eq(schema.procedures.id, appointment.procedureId))
+          .limit(1)
+      )[0]
+    : undefined;
+  const tz = await clinicTimezone(tx, clinicId);
+  const categoryId = await ensureCategory(tx, clinicId, "Procedimentos", "income");
+
+  await tx.insert(schema.receivables).values({
+    clinicId,
+    customerId: appointment.customerId,
+    appointmentId: appointment.id,
+    categoryId,
+    description: `${procedure?.name ?? "Atendimento"} — ${customer?.fullName ?? "Cliente"}`,
+    grossAmount: appointment.price!,
+    netAmount: appointment.price!,
+    dueDate: todayISO(tz),
+  });
+}
+
+/** Correção Compareceu→Faltou: devolve a sessão e cancela a conta pendente. */
+async function revertShowedEffects(
+  tx: Tx,
+  clinicId: string,
+  appointment: AppointmentRow,
+): Promise<void> {
+  void clinicId;
+  if (appointment.customerPackageId) {
+    const reverted = await tx
+      .update(schema.packageSessionUses)
+      .set({ revertedAt: new Date() })
+      .where(
+        and(
+          eq(schema.packageSessionUses.appointmentId, appointment.id),
+          isNull(schema.packageSessionUses.revertedAt),
+        ),
+      )
+      .returning({ id: schema.packageSessionUses.id });
+    if (reverted[0]) {
+      // Sessão devolvida: decrementa e reativa (pacote "completo" volta a ter saldo)
+      await tx
+        .update(schema.customerPackages)
+        .set({
+          sessionsUsed: sql`GREATEST(${schema.customerPackages.sessionsUsed} - 1, 0)`,
+          status: "active",
+        })
+        .where(
+          and(
+            eq(schema.customerPackages.id, appointment.customerPackageId),
+            sql`${schema.customerPackages.status} IN ('active','completed')`,
+          ),
+        );
+    }
+    return;
+  }
+
+  // Conta ainda pendente é cancelada; recebida fica (estorno é decisão humana)
+  await tx
+    .update(schema.receivables)
+    .set({ status: "cancelled" })
+    .where(
+      and(
+        eq(schema.receivables.appointmentId, appointment.id),
+        eq(schema.receivables.status, "pending"),
+      ),
+    );
 }
 
 /** Encerra as runs pendentes de um agendamento (cancelou/remarcou/compareceu/confirmou). */
@@ -191,6 +362,23 @@ export const createAppointment = authAction({
     )[0];
     if (!proc) return { ok: false, error: "Procedimento não encontrado." };
 
+    // Pacote ativo cobre este procedimento? Sessão entra no pacote (sem nova cobrança)
+    const activePackage = (
+      await tx
+        .select({ id: schema.customerPackages.id })
+        .from(schema.customerPackages)
+        .where(
+          and(
+            eq(schema.customerPackages.customerId, customerId),
+            eq(schema.customerPackages.procedureId, input.procedureId),
+            eq(schema.customerPackages.status, "active"),
+            sql`${schema.customerPackages.sessionsUsed} < ${schema.customerPackages.sessionsTotal}`,
+            sql`(${schema.customerPackages.expiresAt} IS NULL OR ${schema.customerPackages.expiresAt} >= current_date)`,
+          ),
+        )
+        .limit(1)
+    )[0];
+
     const tz = await clinicTimezone(tx, auth.clinicId);
     const startsAt = zonedToUtc(input.dateISO, input.timeHHMM, tz);
     const endsAt = new Date(startsAt.getTime() + proc.durationMinutes * 60_000);
@@ -211,6 +399,7 @@ export const createAppointment = authAction({
           startsAt,
           endsAt,
           price: proc.price,
+          customerPackageId: activePackage?.id ?? null,
           notes: input.notes,
           allowOverlap: input.allowOverlap,
           createdBy: auth.userId,
@@ -308,8 +497,21 @@ export const changeAppointmentStatus = authAction({
       await stopConfirmationRuns(tx, input.id, "cancelled", `status ${input.to}`);
     }
 
-    // Efeitos de "showed"/"no_show" (financeiro, pós-atendimento, recuperação
-    // de falta) entram na Fase 2 — o gancho é a FSM em packages/core.
+    // Efeitos financeiros/pacote (com correções simétricas showed ↔ no_show)
+    const fullAppointment = (
+      await tx
+        .select()
+        .from(schema.appointments)
+        .where(eq(schema.appointments.id, input.id))
+        .limit(1)
+    )[0];
+    if (fullAppointment) {
+      if (input.to === "showed") {
+        await applyShowedEffects(tx, auth.clinicId, fullAppointment);
+      } else if (current === "showed" && input.to === "no_show") {
+        await revertShowedEffects(tx, auth.clinicId, fullAppointment);
+      }
+    }
 
     revalidatePath("/agenda");
     revalidatePath("/inicio");
@@ -369,6 +571,7 @@ export const rescheduleAppointment = authAction({
           startsAt,
           endsAt,
           price: original.price,
+          customerPackageId: original.customerPackageId,
           notes: original.notes,
           origin: "reschedule",
           allowOverlap: input.allowOverlap,
