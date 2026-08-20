@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@clinicaos/config": "workspace:*",
+    "@clinicaos/core": "workspace:*",
     "drizzle-orm": "^0.38.0",
     "pg": "^8.13.0"
   },

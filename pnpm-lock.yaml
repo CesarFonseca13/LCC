@@ -41,6 +41,9 @@ importers:
       next:
         specifier: 15.5.23
         version: 15.5.23(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -168,6 +171,9 @@ importers:
       '@clinicaos/config':
         specifier: workspace:*
         version: link:../config
+      '@clinicaos/core':
+        specifier: workspace:*
+        version: link:../core
       drizzle-orm:
         specifier: ^0.38.0
         version: 0.38.4(@types/pg@8.23.1)(@types/react@19.2.18)(pg@8.23.0)(react@19.1.0)

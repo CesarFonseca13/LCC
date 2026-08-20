@@ -9,7 +9,9 @@
     "./permissions": "./src/permissions.ts",
     "./appointment-fsm": "./src/appointment-fsm.ts",
     "./template-render": "./src/template-render.ts",
-    "./crypto": "./src/crypto.ts"
+    "./crypto": "./src/crypto.ts",
+    "./phone": "./src/phone.ts",
+    "./anamnesis": "./src/anamnesis.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

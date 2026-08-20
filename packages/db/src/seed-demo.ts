@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { AESTHETIC_ANAMNESIS_V1 } from "@clinicaos/core/anamnesis";
 import argon2 from "argon2";
 import { config as loadEnv } from "dotenv";
 import { and, eq } from "drizzle-orm";
 import { closeDb, unsafeGlobalDb, withContext, withTenant } from "./client";
 import {
+  anamnesisTemplates,
+  anamnesisTemplateVersions,
   clinicMembers,
   clinics,
+  customerHistoryEntries,
+  customers,
   packageItems,
   packages,
   procedures,
@@ -181,6 +186,115 @@ async function main() {
         });
         console.log(`Criado pacote: ${pkgName}`);
       }
+    }
+  });
+
+  // ── Anamnese: modelo seed ─────────────────────────────────────────
+  await withTenant(finalClinicId, async (tx) => {
+    const templateName = "Clínica de Estética";
+    const existing = await tx
+      .select({ id: anamnesisTemplates.id })
+      .from(anamnesisTemplates)
+      .where(eq(anamnesisTemplates.name, templateName))
+      .limit(1);
+    if (existing.length === 0) {
+      const [template] = await tx
+        .insert(anamnesisTemplates)
+        .values({ clinicId: finalClinicId, name: templateName })
+        .returning({ id: anamnesisTemplates.id });
+      if (template) {
+        await tx.insert(anamnesisTemplateVersions).values({
+          clinicId: finalClinicId,
+          templateId: template.id,
+          version: 1,
+          schema: AESTHETIC_ANAMNESIS_V1,
+        });
+        console.log(`Criado modelo de anamnese: ${templateName} (v1)`);
+      }
+    }
+  });
+
+  // ── Clientes demo (exercitam filtros, histórico e reativação) ─────
+  await withTenant(finalClinicId, async (tx) => {
+    const procs = await tx
+      .select({ id: procedures.id, name: procedures.name })
+      .from(procedures);
+    const procId = (name: string) => procs.find((p) => p.name === name)?.id ?? null;
+
+    const daysAgo = (n: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10);
+    };
+
+    const demoCustomers: {
+      fullName: string;
+      phone: string;
+      birthDate?: string;
+      status: "lead" | "active";
+      history: { daysAgo: number; procedure: string; amount: string }[];
+    }[] = [
+      {
+        fullName: "Maria Silva",
+        phone: "+5511988620001",
+        birthDate: "1990-05-10",
+        status: "active",
+        history: [
+          { daysAgo: 20, procedure: "Limpeza de Pele", amount: "180.00" },
+          { daysAgo: 50, procedure: "Limpeza de Pele", amount: "180.00" },
+        ],
+      },
+      {
+        fullName: "Edson Neto",
+        phone: "+5511988620002",
+        birthDate: "1985-11-22",
+        status: "active",
+        history: [
+          { daysAgo: 130, procedure: "Botox", amount: "1200.00" },
+          { daysAgo: 260, procedure: "Botox", amount: "1200.00" },
+        ],
+      },
+      {
+        fullName: "Juliana Costa",
+        phone: "+5511988620003",
+        status: "lead",
+        history: [],
+      },
+    ];
+
+    for (const demo of demoCustomers) {
+      const exists = await tx
+        .select({ id: customers.id })
+        .from(customers)
+        .where(eq(customers.phoneE164, demo.phone))
+        .limit(1);
+      if (exists.length > 0) continue;
+
+      const [created] = await tx
+        .insert(customers)
+        .values({
+          clinicId: finalClinicId,
+          fullName: demo.fullName,
+          phoneE164: demo.phone,
+          birthDate: demo.birthDate,
+          status: demo.status,
+          source: "seed",
+        })
+        .returning({ id: customers.id });
+      if (!created) continue;
+
+      for (const h of demo.history) {
+        await tx.insert(customerHistoryEntries).values({
+          clinicId: finalClinicId,
+          customerId: created.id,
+          occurredOn: daysAgo(h.daysAgo),
+          procedureId: procId(h.procedure),
+          procedureName: procId(h.procedure) ? null : h.procedure,
+          amount: h.amount,
+          createdBy: ownerId,
+        });
+      }
+      console.log(`Criada cliente demo: ${demo.fullName}`);
     }
   });
 
