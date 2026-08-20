@@ -25,6 +25,9 @@ const SAMPLE = {
   hora: "14:00",
   profissional: "Dra. Paula",
   procedimento: "Limpeza de Pele",
+  pacote: "Pacote 10 Drenagens",
+  sessoes: "2",
+  horario: "qui 21/08 às 14:00 com Dra. Paula",
 };
 
 function preview(template: string): string {

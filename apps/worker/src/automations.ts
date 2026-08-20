@@ -1,8 +1,8 @@
 import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { renderTemplate } from "@clinicaos/core/template-render";
-import { todayISO, utcToZoned } from "@clinicaos/core/timezone";
-import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
+import { findSlots, schema, unsafeGlobalDb } from "@clinicaos/db";
 import { clampToSendWindow, mergedConfig } from "./reactivation";
 
 /**
@@ -592,6 +592,143 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
         return;
       }
       return finishRun(run.id, "completed", "sequência concluída — despedida enviada");
+    }
+
+    // ── Crescimento: preenchimento de agenda e renovação de pacote ──
+    case "smart_fill": {
+      // Já marcou horário? Missão cumprida sem mensagem.
+      const future = (
+        await db
+          .select({ id: schema.appointments.id })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.customerId, run.customerId),
+              inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+              gt(schema.appointments.startsAt, new Date()),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (future) {
+        await finishRun(run.id, "goal_reached", "cliente já agendou");
+        return log(run, "goal_reached");
+      }
+      if (!ctx.procedure) return skip("procedimento da oferta não existe mais");
+
+      // Crash entre emit e finish? Nunca manda a mesma oferta duas vezes.
+      const fillEmitted = await db.execute(sql`
+        SELECT 1 FROM automation_log
+        WHERE run_id = ${run.id} AND result IN ('queued', 'pending_approval')
+        LIMIT 1
+      `);
+      if ((fillEmitted.rowCount ?? 0) > 0) return finishRun(run.id, "completed");
+
+      // O slot é escolhido AGORA — nunca oferece horário que acabou de fechar.
+      // Preferência pela profissional que já atendeu essa cliente nesse procedimento.
+      const config = ((ctx.settings?.config ?? {}) as Record<string, unknown>);
+      const defaults = (ctx.definition.defaultConfig ?? {}) as Record<string, unknown>;
+      const windowHours = Number(config.window_hours ?? defaults.window_hours ?? 72);
+      const slots = await findSlots(db, run.clinicId, ctx.clinic.timezone, ctx.procedure.durationMinutes, 6);
+      const cutoff = Date.now() + windowHours * 3_600_000;
+      const inWindow = slots.filter(
+        (s) => zonedToUtc(s.dateISO, s.timeHHMM, ctx.clinic.timezone).getTime() <= cutoff,
+      );
+      if (inWindow.length === 0) return skip("sem buracos na agenda dentro da janela");
+      const usualProfessional = (
+        await db
+          .select({ professionalId: schema.appointments.professionalId })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.customerId, run.customerId),
+              eq(schema.appointments.procedureId, ctx.procedure.id),
+              eq(schema.appointments.status, "showed"),
+            ),
+          )
+          .orderBy(sql`starts_at DESC`)
+          .limit(1)
+      )[0];
+      const slot =
+        inWindow.find(
+          (s) => s.slotId.split("|")[0] === usualProfessional?.professionalId,
+        ) ?? inWindow[0]!;
+
+      const vars: Record<string, string> = {
+        nome: ctx.customer.fullName.split(" ")[0] ?? ctx.customer.fullName,
+        clinica: ctx.clinic.name,
+        procedimento: ctx.procedure.name,
+        horario: slot.label,
+      };
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Preenchimento de agenda · ${slot.label}`,
+        // Oferta de horário envelhece rápido: aprovação vale só até o próprio slot
+        approvalExpiresAt: zonedToUtc(slot.dateISO, slot.timeHHMM, ctx.clinic.timezone),
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    case "package_renewal_sessions":
+    case "package_renewal_expiry": {
+      const isSessions = run.automationId === "package_renewal_sessions";
+      const config = ((ctx.settings?.config ?? {}) as Record<string, unknown>);
+      const defaults = (ctx.definition.defaultConfig ?? {}) as Record<string, unknown>;
+      const threshold = Number(config.sessions_left_threshold ?? defaults.sessions_left_threshold ?? 1);
+      const expiryDays = Number(config.expiry_days ?? defaults.expiry_days ?? 7);
+
+      // Crash entre emit e finish? Nunca manda o mesmo convite duas vezes.
+      const renewalEmitted = await db.execute(sql`
+        SELECT 1 FROM automation_log
+        WHERE run_id = ${run.id} AND result IN ('queued', 'pending_approval')
+        LIMIT 1
+      `);
+      if ((renewalEmitted.rowCount ?? 0) > 0) return finishRun(run.id, "completed");
+
+      // Comprou pacote novo depois que o convite nasceu? Objetivo alcançado.
+      const renewed = await db.execute(sql`
+        SELECT 1 FROM customer_packages
+        WHERE customer_id = ${run.customerId} AND created_at > ${run.startedAt}
+        LIMIT 1
+      `);
+      if ((renewed.rowCount ?? 0) > 0) {
+        await finishRun(run.id, "goal_reached", "cliente já renovou");
+        return log(run, "goal_reached");
+      }
+
+      // Revalida o gatilho na hora do envio (pacote pode ter mudado)
+      const pkg = await db.execute(sql`
+        WITH ctx AS (SELECT (now() AT TIME ZONE ${ctx.clinic.timezone})::date AS today)
+        SELECT pk.name, (cp.sessions_total - cp.sessions_used) AS sessions_left
+        FROM customer_packages cp
+        JOIN packages pk ON pk.id = cp.package_id
+        CROSS JOIN ctx
+        WHERE cp.customer_id = ${run.customerId} AND cp.clinic_id = ${run.clinicId}
+          AND cp.status = 'active'
+          AND (cp.expires_at IS NULL OR cp.expires_at >= ctx.today)
+          AND ${
+            isSessions
+              ? sql`cp.sessions_used > 0 AND (cp.sessions_total - cp.sessions_used) <= ${threshold}`
+              : sql`cp.expires_at IS NOT NULL
+                    AND cp.expires_at <= ctx.today + make_interval(days => ${expiryDays})
+                    AND cp.sessions_used < cp.sessions_total`
+          }
+        ORDER BY cp.expires_at ASC NULLS LAST
+        LIMIT 1
+      `);
+      const pkgRow = pkg.rows[0] as { name: string; sessions_left: number } | undefined;
+      if (!pkgRow) return skip("pacote não está mais no gatilho de renovação");
+
+      const vars: Record<string, string> = {
+        nome: ctx.customer.fullName.split(" ")[0] ?? ctx.customer.fullName,
+        clinica: ctx.clinic.name,
+        pacote: pkgRow.name,
+        sessoes: String(pkgRow.sessions_left),
+        procedimento: ctx.procedure?.name ?? "seu tratamento",
+      };
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Renovação · ${pkgRow.name} (${isSessions ? `${pkgRow.sessions_left} sessão(ões) restante(s)` : "vencendo em breve"})`,
+      });
+      return finishRun(run.id, "completed");
     }
 
     default:

@@ -27,6 +27,17 @@ const settingSchema = z.object({
 /** Reativação não tem agendamento por trás: só estas variáveis existem no envio. */
 const SEQUENCE_VARIABLES = new Set(["nome", "procedimento", "clinica"]);
 
+/**
+ * Variáveis que cada automação de fato fornece no envio — salvar {{data}} numa
+ * automação sem agendamento por trás quebraria o envio na hora H.
+ */
+const TEMPLATE_VARIABLES: Record<string, Set<string>> = {
+  smart_fill: new Set(["nome", "clinica", "procedimento", "horario"]),
+  package_renewal_sessions: new Set(["nome", "clinica", "pacote", "sessoes", "procedimento"]),
+  package_renewal_expiry: new Set(["nome", "clinica", "pacote", "sessoes", "procedimento"]),
+  birthday: new Set(["nome", "clinica"]),
+};
+
 export const saveAutomationSetting = authAction({
   permission: "automations.manage",
   schema: settingSchema,
@@ -38,6 +49,16 @@ export const saveAutomationSetting = authAction({
           ok: false,
           error: `Variável desconhecida: ${unknown.map((v) => `{{${v}}}`).join(", ")}`,
         };
+      }
+      const allowed = TEMPLATE_VARIABLES[input.automationId];
+      if (allowed) {
+        const invalid = extractVariables(input.messageTemplate).filter((v) => !allowed.has(v));
+        if (invalid.length > 0) {
+          return {
+            ok: false,
+            error: `Essa automação não tem ${invalid.map((v) => `{{${v}}}`).join(", ")} — use ${[...allowed].map((v) => `{{${v}}}`).join(", ")}`,
+          };
+        }
       }
     }
 

@@ -14,6 +14,31 @@ import { schema, unsafeGlobalDb } from "@clinicaos/db";
 
 export const REACTIVATION_IDS = ["reactivation_smart", "reactivation_generic"] as const;
 
+/** Todas as automações que INICIAM conversa (proativas de relacionamento). */
+export const PROACTIVE_IDS = [
+  "reactivation_smart",
+  "reactivation_generic",
+  "smart_fill",
+  "package_renewal_sessions",
+  "package_renewal_expiry",
+] as const;
+
+/** Teto GLOBAL de conversas proativas novas por dia por clínica (anti-ban). */
+export const GLOBAL_DAILY_PROACTIVE_CAP = 15;
+
+/** Quantas conversas proativas a clínica já iniciou hoje (dia local). */
+export async function proactiveStartsToday(clinicId: string, tz: string): Promise<number> {
+  const db = unsafeGlobalDb();
+  const result = await db.execute(sql`
+    SELECT count(*)::int AS n FROM automation_runs
+    WHERE clinic_id = ${clinicId}
+      AND automation_id IN ('reactivation_smart', 'reactivation_generic',
+                            'smart_fill', 'package_renewal_sessions', 'package_renewal_expiry')
+      AND started_at >= (now() AT TIME ZONE ${tz})::date::timestamp AT TIME ZONE ${tz}
+  `);
+  return Number((result.rows[0] as { n: number } | undefined)?.n ?? 0);
+}
+
 export interface ReactivationStep {
   days: number;
   template: string;
@@ -62,7 +87,7 @@ export function clampToSendWindow(candidate: Date, tz: string): Date {
 }
 
 /** Próximo horário de envio: agora + jitter de 2-45min, preso à janela comercial. */
-function nextSendWindow(tz: string): Date {
+export function nextSendWindow(tz: string): Date {
   const jittered = new Date(Date.now() + 120_000 + Math.floor(Math.random() * 43 * 60_000));
   return clampToSendWindow(jittered, tz);
 }
@@ -173,12 +198,13 @@ async function reconcileStuckRuns(logger: Logger): Promise<void> {
     UPDATE automation_runs
     SET status = 'active', next_run_at = now() + interval '2 minutes'
     WHERE status = 'processing'
-      AND automation_id IN ('reactivation_smart', 'reactivation_generic')
+      AND automation_id IN ('reactivation_smart', 'reactivation_generic',
+                            'smart_fill', 'package_renewal_sessions', 'package_renewal_expiry')
       AND next_run_at < now() - interval '15 minutes'
     RETURNING id
   `);
   if ((stuck.rowCount ?? 0) > 0) {
-    logger.warn({ count: stuck.rowCount }, "runs de reativação presas em processing — reenfileiradas");
+    logger.warn({ count: stuck.rowCount }, "runs proativas presas em processing — reenfileiradas");
   }
 }
 
@@ -202,7 +228,12 @@ async function materializeRuns(
       AND started_at >= ${localMidnight}
   `);
   const already = Number((startedToday.rows[0] as { n: number } | undefined)?.n ?? 0);
-  const remaining = config.max_new_per_day - already;
+  // Orçamento do dia: teto da automação E teto global de proativas da clínica
+  const globalUsed = await proactiveStartsToday(clinicId, tz);
+  const remaining = Math.min(
+    config.max_new_per_day - already,
+    GLOBAL_DAILY_PROACTIVE_CAP - globalUsed,
+  );
   if (remaining <= 0) return;
 
   const isSmart = automationId === "reactivation_smart";
@@ -282,6 +313,13 @@ async function materializeRuns(
                    AND r.finished_at > now() - make_interval(days => ${config.cooldown_days}))
                OR (r.status IN ('cancelled', 'skipped', 'error')
                    AND r.finished_at > now() - interval '1 day'))
+      )
+      -- Governador: nada de reativar quem recebeu oferta/convite de crescimento hoje
+      AND NOT EXISTS (
+        SELECT 1 FROM automation_runs g
+        WHERE g.customer_id = cand.customer_id
+          AND g.automation_id IN ('smart_fill', 'package_renewal_sessions', 'package_renewal_expiry')
+          AND g.started_at > now() - interval '1 day'
       )
     LIMIT ${remaining}
   `);
