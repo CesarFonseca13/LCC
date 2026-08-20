@@ -37,6 +37,8 @@ export interface DbContext {
   webhookToken?: string;
   /** Página pública de assinatura: resolve o documento pelo token (política sign_resolve). */
   signToken?: string;
+  /** Página pública de orçamento: resolve pelo token (política quote_resolve). */
+  quoteToken?: string;
 }
 
 /** Transação com contexto de tenant/usuário aplicado via set_config (lido pelas políticas RLS). */
@@ -44,8 +46,8 @@ export async function withContext<T>(
   ctx: DbContext,
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
-  if (!ctx.clinicId && !ctx.userId && !ctx.webhookToken && !ctx.signToken) {
-    throw new Error("withContext exige clinicId, userId, webhookToken ou signToken.");
+  if (!ctx.clinicId && !ctx.userId && !ctx.webhookToken && !ctx.signToken && !ctx.quoteToken) {
+    throw new Error("withContext exige clinicId, userId ou um token público.");
   }
   return getDb().transaction(async (tx) => {
     if (ctx.clinicId) {
@@ -61,6 +63,9 @@ export async function withContext<T>(
     }
     if (ctx.signToken) {
       await tx.execute(sql`SELECT set_config('app.sign_token', ${ctx.signToken}, true)`);
+    }
+    if (ctx.quoteToken) {
+      await tx.execute(sql`SELECT set_config('app.quote_token', ${ctx.quoteToken}, true)`);
     }
     return fn(tx);
   });

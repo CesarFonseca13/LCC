@@ -7,3 +7,4 @@ export * from "./whatsapp";
 export * from "./automations";
 export * from "./finance";
 export * from "./documents";
+export * from "./quotes";
