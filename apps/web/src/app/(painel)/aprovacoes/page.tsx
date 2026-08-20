@@ -1,4 +1,5 @@
 import { desc, eq } from "drizzle-orm";
+import { can } from "@clinicaos/core/permissions";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
@@ -6,19 +7,37 @@ import { ApprovalCard, ApproveAllButton } from "./approval-card";
 
 export const metadata = { title: "Aprovações" };
 
-const AUTOMATION_LABEL: Record<string, string> = {
-  reminder_24h: "Lembrete 24h antes",
-  confirm_2h: "Confirmação 2h antes",
+const SPECIAL_LABEL: Record<string, string> = {
+  intelligence_suggestion: "✨ Sugestão da Inteligência",
 };
 
 export default async function AprovacoesPage() {
   const auth = await requireAuth();
-  if (!auth.clinicId) return null;
+  if (!auth.clinicId || !auth.role) return null;
 
-  const pending = await withTenant(
+  if (!can(auth.role, "approvals.review")) {
+    return (
+      <div className="p-8">
+        <h1 className="text-xl font-semibold text-stone-800">Aprovações</h1>
+        <div className="mt-6">
+          <EmptyState title="A fila de aprovações é visível apenas para quem revisa mensagens (administradora e recepção)." />
+        </div>
+      </div>
+    );
+  }
+
+  const { pending, labels } = await withTenant(
     auth.clinicId,
-    (tx) =>
-      tx
+    async (tx) => {
+      const definitions = await tx
+        .select({
+          id: schema.automationDefinitions.id,
+          name: schema.automationDefinitions.name,
+        })
+        .from(schema.automationDefinitions);
+      const labels: Record<string, string> = { ...SPECIAL_LABEL };
+      for (const d of definitions) labels[d.id] = d.name;
+      const pending = await tx
         .select({
           id: schema.approvals.id,
           automationId: schema.approvals.automationId,
@@ -32,7 +51,9 @@ export default async function AprovacoesPage() {
         .from(schema.approvals)
         .innerJoin(schema.customers, eq(schema.customers.id, schema.approvals.customerId))
         .where(eq(schema.approvals.status, "pending"))
-        .orderBy(desc(schema.approvals.createdAt)),
+        .orderBy(desc(schema.approvals.createdAt));
+      return { pending, labels };
+    },
     auth.userId,
   );
 
@@ -59,8 +80,7 @@ export default async function AprovacoesPage() {
                 id: item.id,
                 customerName: item.customerName,
                 customerId: item.customerId,
-                automationLabel:
-                  AUTOMATION_LABEL[item.automationId ?? ""] ?? "Automação",
+                automationLabel: labels[item.automationId ?? ""] ?? "Automação",
                 body: item.generatedBody,
                 contextLine: item.contextLine,
                 expiresAtISO: item.expiresAt ? new Date(item.expiresAt).toISOString() : null,
