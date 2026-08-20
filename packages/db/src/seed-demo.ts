@@ -375,15 +375,33 @@ async function main() {
     `);
   });
 
-  // ── Automações: liga as cadências de confirmação (modo supervisionado) ──
+  // ── Automações: liga tudo em modo supervisionado ──────────────────
   await withTenant(finalClinicId, async (tx) => {
-    for (const automationId of ["reminder_24h", "confirm_2h"]) {
+    for (const automationId of [
+      "reminder_24h",
+      "confirm_2h",
+      "reminder_45min",
+      "pre_care",
+      "no_show_message",
+      "no_show_followup",
+      "post_visit",
+      "feedback_request",
+      "touchup_offer",
+      "post_sale_cadence",
+      "birthday",
+    ]) {
       await tx.execute(sqlRaw`
         INSERT INTO automation_settings (clinic_id, automation_id, enabled, requires_approval)
         VALUES (${finalClinicId}, ${automationId}, true, true)
         ON CONFLICT (clinic_id, automation_id) DO NOTHING
       `);
     }
+    // Cadência pós-venda demo: Limpeza de Pele em D+7 e D+30
+    await tx.execute(sqlRaw`
+      UPDATE procedures SET post_sale_cadence_days = '{7,30}'
+      WHERE clinic_id = ${finalClinicId} AND name = 'Limpeza de Pele'
+        AND post_sale_cadence_days IS NULL
+    `);
   });
 
   // ── Termos: modelo padrão + dados completos da Maria (CPF/endereço) ──

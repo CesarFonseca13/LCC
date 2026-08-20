@@ -1,18 +1,15 @@
-import { and, asc, eq, inArray, lte } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { renderTemplate } from "@clinicaos/core/template-render";
-import { formatPhoneBR } from "@clinicaos/core/phone";
-import { utcToZoned } from "@clinicaos/core/timezone";
+import { todayISO, utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
 
 /**
- * Tick das automações: varre automation_runs.next_run_at <= now() (a fila real
- * é o Postgres) e materializa a mensagem — direto na fila de envio ou na fila
- * de Aprovações, conforme a configuração da clínica.
- *
- * Regra de ouro: a run vencida é uma INTENÇÃO — a elegibilidade é revalidada
- * aqui, no momento da execução. Run inválida morre em silêncio (com log).
+ * Motor de automações: varre automation_runs.next_run_at <= now() (a fila real
+ * é o Postgres) e executa cada tipo com a SUA elegibilidade — revalidada no
+ * momento da execução. Run inválida morre em silêncio, com log.
  */
+
 export async function processAutomationTick(logger: Logger): Promise<number> {
   const db = unsafeGlobalDb();
   const due = await db
@@ -28,7 +25,6 @@ export async function processAutomationTick(logger: Logger): Promise<number> {
     .limit(25);
 
   for (const { id } of due) {
-    // Claim otimista: só um worker processa a run
     const claimed = await db
       .update(schema.automationRuns)
       .set({ status: "processing" })
@@ -38,10 +34,10 @@ export async function processAutomationTick(logger: Logger): Promise<number> {
     if (!run) continue;
 
     try {
-      await executeConfirmationRun(run, logger);
+      await executeRun(run, logger);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error({ runId: run.id, err: message }, "falha na automação");
+      logger.error({ runId: run.id, automationId: run.automationId, err: message }, "falha na automação");
       await finishRun(run.id, "error", message);
       await log(run, "error", message);
     }
@@ -82,52 +78,31 @@ async function log(
   });
 }
 
-/** Executa lembrete 24h / confirmação 2h de um agendamento. */
-async function executeConfirmationRun(run: Run, logger: Logger): Promise<void> {
+// ── Contexto compartilhado ───────────────────────────────────────────
+
+interface RunContext {
+  run: Run;
+  appointment: typeof schema.appointments.$inferSelect | null;
+  customer: typeof schema.customers.$inferSelect;
+  clinic: { name: string; timezone: string; googleReviewUrl: string | null };
+  procedure: typeof schema.procedures.$inferSelect | null;
+  professionalName: string | null;
+  settings: typeof schema.automationSettings.$inferSelect | null;
+  definition: typeof schema.automationDefinitions.$inferSelect;
+  instance: { id: string; status: string } | null;
+}
+
+/** Carrega tudo e aplica as guardas universais. Retorna null se a run deve morrer. */
+async function loadContext(run: Run): Promise<RunContext | "postpone" | null> {
   const db = unsafeGlobalDb();
 
-  if (!run.appointmentId) {
-    await finishRun(run.id, "skipped", "sem agendamento");
-    return;
-  }
-
-  // ── Revalidação de elegibilidade ─────────────────────────────────
-  const appt = (
-    await db
-      .select()
-      .from(schema.appointments)
-      .where(eq(schema.appointments.id, run.appointmentId))
-      .limit(1)
-  )[0];
-  if (!appt || !["scheduled", "confirmed"].includes(appt.status)) {
-    await finishRun(run.id, "cancelled", `agendamento ${appt?.status ?? "inexistente"}`);
-    await log(run, "cancelled", `agendamento ${appt?.status ?? "inexistente"}`);
-    return;
-  }
-  // Confirmação já obtida → objetivo atingido, não cobra de novo
-  if (appt.status === "confirmed") {
-    await finishRun(run.id, "goal_reached", "cliente já confirmou");
-    await log(run, "goal_reached");
-    return;
-  }
-  // Lembrete depois do horário não faz sentido
-  if (new Date(appt.startsAt) <= new Date()) {
-    await finishRun(run.id, "skipped", "horário já passou");
-    await log(run, "expired", "horário já passou");
-    return;
-  }
-
   const customer = (
-    await db
-      .select()
-      .from(schema.customers)
-      .where(eq(schema.customers.id, run.customerId))
-      .limit(1)
+    await db.select().from(schema.customers).where(eq(schema.customers.id, run.customerId)).limit(1)
   )[0];
   if (!customer || customer.deletedAt || customer.automationsBlocked || customer.optedOutAt) {
     await finishRun(run.id, "skipped", "cliente bloqueada/opt-out");
     await log(run, "skipped", "cliente bloqueada/opt-out");
-    return;
+    return null;
   }
 
   const settings = (
@@ -145,27 +120,9 @@ async function executeConfirmationRun(run: Run, logger: Logger): Promise<void> {
   if (!settings?.enabled) {
     await finishRun(run.id, "cancelled", "automação desligada");
     await log(run, "cancelled", "automação desligada");
-    return;
+    return null;
   }
 
-  const instance = (
-    await db
-      .select()
-      .from(schema.whatsappInstances)
-      .where(eq(schema.whatsappInstances.clinicId, run.clinicId))
-      .limit(1)
-  )[0];
-  if (!instance || instance.status !== "connected") {
-    // WhatsApp fora: adia 5 minutos sem perder o estado
-    await db
-      .update(schema.automationRuns)
-      .set({ status: "active", nextRunAt: new Date(Date.now() + 5 * 60_000) })
-      .where(eq(schema.automationRuns.id, run.id));
-    logger.warn({ runId: run.id }, "instância desconectada — automação adiada 5min");
-    return;
-  }
-
-  // ── Render do template ───────────────────────────────────────────
   const definition = (
     await db
       .select()
@@ -175,101 +132,439 @@ async function executeConfirmationRun(run: Run, logger: Logger): Promise<void> {
   )[0];
   const clinic = (
     await db
-      .select({ name: schema.clinics.name, timezone: schema.clinics.timezone })
+      .select({
+        name: schema.clinics.name,
+        timezone: schema.clinics.timezone,
+        googleReviewUrl: schema.clinics.googleReviewUrl,
+      })
       .from(schema.clinics)
       .where(eq(schema.clinics.id, run.clinicId))
       .limit(1)
   )[0];
-  const professional = appt.professionalId
-    ? (
+  if (!definition || !clinic) {
+    await finishRun(run.id, "error", "definição/clínica ausente");
+    return null;
+  }
+
+  const instance = (
+    await db
+      .select({ id: schema.whatsappInstances.id, status: schema.whatsappInstances.status })
+      .from(schema.whatsappInstances)
+      .where(eq(schema.whatsappInstances.clinicId, run.clinicId))
+      .limit(1)
+  )[0];
+  if (!instance || instance.status !== "connected") {
+    // WhatsApp fora: adia 5 minutos sem perder o estado
+    const db2 = unsafeGlobalDb();
+    await db2
+      .update(schema.automationRuns)
+      .set({ status: "active", nextRunAt: new Date(Date.now() + 5 * 60_000) })
+      .where(eq(schema.automationRuns.id, run.id));
+    return "postpone";
+  }
+
+  let appointment: RunContext["appointment"] = null;
+  let procedure: RunContext["procedure"] = null;
+  let professionalName: string | null = null;
+  if (run.appointmentId) {
+    appointment =
+      (
         await db
-          .select({ name: schema.professionals.name })
-          .from(schema.professionals)
-          .where(eq(schema.professionals.id, appt.professionalId))
+          .select()
+          .from(schema.appointments)
+          .where(eq(schema.appointments.id, run.appointmentId))
           .limit(1)
-      )[0]
-    : undefined;
-  const procedure = appt.procedureId
-    ? (
-        await db
-          .select({ name: schema.procedures.name })
-          .from(schema.procedures)
-          .where(eq(schema.procedures.id, appt.procedureId))
-          .limit(1)
-      )[0]
-    : undefined;
+      )[0] ?? null;
+    if (appointment?.procedureId) {
+      procedure =
+        (
+          await db
+            .select()
+            .from(schema.procedures)
+            .where(eq(schema.procedures.id, appointment.procedureId))
+            .limit(1)
+        )[0] ?? null;
+    }
+    if (appointment) {
+      professionalName =
+        (
+          await db
+            .select({ name: schema.professionals.name })
+            .from(schema.professionals)
+            .where(eq(schema.professionals.id, appointment.professionalId))
+            .limit(1)
+        )[0]?.name ?? null;
+    }
+  }
 
-  const tz = clinic?.timezone ?? "America/Sao_Paulo";
-  const zoned = utcToZoned(new Date(appt.startsAt), tz);
-  const [y, m, d] = zoned.dateISO.split("-");
-  const template = settings.messageTemplate ?? definition?.defaultTemplate ?? "";
+  return { run, appointment, customer, clinic, procedure, professionalName, settings, definition, instance };
+}
 
-  const body = renderTemplate(
-    template,
-    {
-      nome: customer.fullName.split(" ")[0] ?? customer.fullName,
-      clinica: clinic?.name ?? "",
-      data: `${d}/${m}/${y}`,
-      hora: zoned.timeHHMM,
-      profissional: professional?.name ?? "nossa equipe",
-      procedimento: procedure?.name ?? "seu atendimento",
-      telefone: formatPhoneBR(customer.phoneE164),
-    },
-    { html: false },
-  );
+function apptVars(ctx: RunContext): Record<string, string> {
+  const tz = ctx.clinic.timezone;
+  const vars: Record<string, string> = {
+    nome: ctx.customer.fullName.split(" ")[0] ?? ctx.customer.fullName,
+    clinica: ctx.clinic.name,
+    procedimento: ctx.procedure?.name ?? "seu atendimento",
+    profissional: ctx.professionalName ?? "nossa equipe",
+  };
+  if (ctx.appointment) {
+    const z = utcToZoned(new Date(ctx.appointment.startsAt), tz);
+    const [y, m, d] = z.dateISO.split("-");
+    vars.data = `${d}/${m}/${y}`;
+    vars.hora = z.timeHHMM;
+  }
+  return vars;
+}
 
-  // ── Conversa + mensagem ──────────────────────────────────────────
-  const remoteJid = `${customer.phoneE164.replace("+", "")}@s.whatsapp.net`;
+/** Cria a mensagem (direto ou via Aprovações) + log + encerra a run. */
+async function emit(
+  ctx: RunContext,
+  body: string,
+  opts: { forceDirect?: boolean; approvalExpiresAt?: Date | null; contextLine?: string } = {},
+): Promise<void> {
+  const db = unsafeGlobalDb();
+  const remoteJid = `${ctx.customer.phoneE164.replace("+", "")}@s.whatsapp.net`;
   const conversationId = await ensureConversationForAutomation(
-    run.clinicId,
-    instance.id,
+    ctx.run.clinicId,
+    ctx.instance!.id,
     remoteJid,
-    customer.id,
+    ctx.customer.id,
   );
 
-  const initialStatus = settings.requiresApproval ? "pending_approval" : "queued";
+  const requiresApproval = !opts.forceDirect && (ctx.settings?.requiresApproval ?? true);
   const [message] = await db
     .insert(schema.messages)
     .values({
-      clinicId: run.clinicId,
+      clinicId: ctx.run.clinicId,
       conversationId,
       direction: "outbound",
       author: "automation",
       body,
-      status: initialStatus,
-      automationId: run.automationId,
-      automationRunId: run.id,
-      // Jitter anti-fingerprint: nunca envia em segundo exato
+      status: requiresApproval ? "pending_approval" : "queued",
+      automationId: ctx.run.automationId,
+      automationRunId: ctx.run.id,
       scheduledFor: new Date(Date.now() + 5_000 + Math.floor(Math.random() * 25_000)),
     })
     .returning({ id: schema.messages.id });
   if (!message) throw new Error("falha ao criar mensagem");
 
-  if (settings.requiresApproval) {
-    const contextLine = [
-      procedure?.name,
-      `${d}/${m} às ${zoned.timeHHMM}`,
-      professional?.name,
-    ]
-      .filter(Boolean)
-      .join(" · ");
+  if (requiresApproval) {
     await db.insert(schema.approvals).values({
-      clinicId: run.clinicId,
+      clinicId: ctx.run.clinicId,
       messageId: message.id,
-      customerId: customer.id,
-      automationId: run.automationId,
-      runId: run.id,
+      customerId: ctx.customer.id,
+      automationId: ctx.run.automationId,
+      runId: ctx.run.id,
       generatedBody: body,
-      contextLine,
-      expiresAt: new Date(appt.startsAt),
+      contextLine: opts.contextLine ?? null,
+      expiresAt: opts.approvalExpiresAt ?? new Date(Date.now() + 48 * 3_600_000),
     });
-    await log(run, "pending_approval", undefined, message.id);
+    await log(ctx.run, "pending_approval", undefined, message.id);
   } else {
-    await log(run, "queued", undefined, message.id);
+    await log(ctx.run, "queued", undefined, message.id);
   }
-
-  await finishRun(run.id, "completed");
 }
+
+function template(ctx: RunContext): string {
+  return ctx.settings?.messageTemplate ?? ctx.definition.defaultTemplate;
+}
+
+// ── Execução por tipo ────────────────────────────────────────────────
+
+async function executeRun(run: Run, logger: Logger): Promise<void> {
+  const loaded = await loadContext(run);
+  if (loaded === null) return;
+  if (loaded === "postpone") {
+    logger.warn({ runId: run.id }, "instância desconectada — automação adiada 5min");
+    return;
+  }
+  const ctx = loaded;
+  const db = unsafeGlobalDb();
+
+  const skip = async (reason: string) => {
+    await finishRun(run.id, "skipped", reason);
+    await log(run, "skipped", reason);
+  };
+  const cancel = async (reason: string) => {
+    await finishRun(run.id, "cancelled", reason);
+    await log(run, "cancelled", reason);
+  };
+
+  switch (run.automationId) {
+    // ── Confirmação de agenda ────────────────────────────────────────
+    case "reminder_24h":
+    case "confirm_2h": {
+      if (!ctx.appointment || !["scheduled", "confirmed"].includes(ctx.appointment.status)) {
+        return cancel(`agendamento ${ctx.appointment?.status ?? "inexistente"}`);
+      }
+      if (ctx.appointment.status === "confirmed") {
+        await finishRun(run.id, "goal_reached", "cliente já confirmou");
+        return log(run, "goal_reached");
+      }
+      if (new Date(ctx.appointment.startsAt) <= new Date()) return skip("horário já passou");
+      const vars = apptVars(ctx);
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        approvalExpiresAt: new Date(ctx.appointment.startsAt),
+        contextLine: [vars.procedimento, `${vars.data} às ${vars.hora}`, vars.profissional].join(" · "),
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    case "reminder_45min": {
+      // Time-critical: envia mesmo confirmado e NUNCA passa por aprovação
+      if (!ctx.appointment || !["scheduled", "confirmed"].includes(ctx.appointment.status)) {
+        return cancel(`agendamento ${ctx.appointment?.status ?? "inexistente"}`);
+      }
+      const untilStart = new Date(ctx.appointment.startsAt).getTime() - Date.now();
+      if (untilStart < 5 * 60_000) return skip("em cima da hora — não faz mais sentido");
+      await emit(ctx, renderTemplate(template(ctx), apptVars(ctx), { html: false }), {
+        forceDirect: true,
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    case "pre_care": {
+      if (!ctx.appointment || !["scheduled", "confirmed"].includes(ctx.appointment.status)) {
+        return cancel(`agendamento ${ctx.appointment?.status ?? "inexistente"}`);
+      }
+      if (!ctx.procedure?.preCare) return skip("procedimento sem pré-cuidados");
+      const vars: Record<string, string> = {
+        ...apptVars(ctx),
+        cuidados: ctx.procedure.preCare,
+      };
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        approvalExpiresAt: new Date(ctx.appointment.startsAt),
+        contextLine: `${vars.procedimento} · ${vars.data} às ${vars.hora}`,
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    // ── Recuperação de faltas ────────────────────────────────────────
+    case "no_show_message":
+    case "no_show_followup": {
+      if (!ctx.appointment || ctx.appointment.status !== "no_show") {
+        return cancel(`agendamento não está mais como falta (${ctx.appointment?.status})`);
+      }
+      const future = (
+        await db
+          .select({ id: schema.appointments.id })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.customerId, run.customerId),
+              inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+              gt(schema.appointments.startsAt, new Date()),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (future) {
+        await finishRun(run.id, "goal_reached", "cliente já remarcou");
+        return log(run, "goal_reached", "cliente já remarcou");
+      }
+      const vars = apptVars(ctx);
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Faltou: ${vars.procedimento} de ${vars.data} às ${vars.hora}`,
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    // ── Pós-atendimento ──────────────────────────────────────────────
+    case "post_visit": {
+      if (!ctx.appointment || ctx.appointment.status !== "showed") {
+        return cancel("atendimento não está mais como compareceu");
+      }
+      const vars: Record<string, string> = {
+        ...apptVars(ctx),
+        cuidados:
+          ctx.procedure?.postCare ??
+          "Qualquer dúvida sobre os cuidados de casa, é só me chamar!",
+      };
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Pós-atendimento · ${vars.procedimento} de hoje`,
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    case "feedback_request": {
+      if (!ctx.appointment || ctx.appointment.status !== "showed") {
+        return cancel("atendimento não está mais como compareceu");
+      }
+      const vars = apptVars(ctx);
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Feedback · ${vars.procedimento} de ${vars.data}`,
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    case "touchup_offer": {
+      if (!ctx.appointment || ctx.appointment.status !== "showed") {
+        return cancel("atendimento base não é mais compareceu");
+      }
+      if (!ctx.procedure?.touchupDays) return skip("procedimento sem retoque");
+      // Já tem horário futuro do mesmo procedimento? Objetivo alcançado.
+      const future = (
+        await db
+          .select({ id: schema.appointments.id })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.customerId, run.customerId),
+              eq(schema.appointments.procedureId, ctx.procedure.id),
+              inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+              gt(schema.appointments.startsAt, new Date()),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (future) {
+        await finishRun(run.id, "goal_reached", "retoque já agendado");
+        return log(run, "goal_reached");
+      }
+      const vars: Record<string, string> = {
+        ...apptVars(ctx),
+        dias: String(ctx.procedure.touchupDays),
+      };
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Retoque de ${vars.procedimento} (${vars.dias} dias)`,
+      });
+      return finishRun(run.id, "completed");
+    }
+
+    case "post_sale_cadence": {
+      if (!ctx.appointment || ctx.appointment.status !== "showed") {
+        return cancel("atendimento base não é mais compareceu");
+      }
+      const days = (ctx.procedure?.postSaleCadenceDays ?? []).slice().sort((a, b) => a - b);
+      if (days.length === 0 || run.currentStep >= days.length) {
+        return skip("sem passos de pós-venda");
+      }
+      // Refez o procedimento nesse meio-tempo? Cadência morre.
+      const base = ctx.appointment.statusChangedAt ?? ctx.appointment.startsAt;
+      const redone = ctx.procedure
+        ? (
+            await db
+              .select({ id: schema.appointments.id })
+              .from(schema.appointments)
+              .where(
+                and(
+                  eq(schema.appointments.customerId, run.customerId),
+                  eq(schema.appointments.procedureId, ctx.procedure.id),
+                  inArray(schema.appointments.status, ["scheduled", "confirmed", "showed"]),
+                  gt(schema.appointments.startsAt, new Date(base)),
+                  // Nunca o próprio atendimento base (check-in antecipado é normal)
+                  sql`${schema.appointments.id} <> ${ctx.appointment.id}`,
+                ),
+              )
+              .limit(1)
+          )[0]
+        : undefined;
+      if (redone) {
+        await finishRun(run.id, "goal_reached", "cliente voltou/agendou de novo");
+        return log(run, "goal_reached");
+      }
+
+      const vars = apptVars(ctx);
+      await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
+        contextLine: `Pós-venda ${run.currentStep + 1}/${days.length} · ${vars.procedimento}`,
+      });
+
+      const nextStep = run.currentStep + 1;
+      if (nextStep < days.length) {
+        await db
+          .update(schema.automationRuns)
+          .set({
+            status: "active",
+            currentStep: nextStep,
+            nextRunAt: new Date(new Date(base).getTime() + days[nextStep]! * 86_400_000),
+          })
+          .where(eq(schema.automationRuns.id, run.id));
+        return;
+      }
+      return finishRun(run.id, "completed");
+    }
+
+    default:
+      return skip(`tipo desconhecido: ${run.automationId}`);
+  }
+}
+
+// ── Aniversários (sweep dedicado, dedupe por ano via automation_log) ─
+
+export async function processBirthdays(logger: Logger): Promise<void> {
+  const db = unsafeGlobalDb();
+  const hoje = todayISO("America/Sao_Paulo");
+  const monthDay = hoje.slice(5); // MM-DD
+  const year = hoje.slice(0, 4);
+
+  const birthdays = await db.execute(sql`
+    SELECT c.id AS customer_id, c.clinic_id, c.full_name, c.phone_e164
+    FROM customers c
+    JOIN automation_settings s ON s.clinic_id = c.clinic_id
+      AND s.automation_id = 'birthday' AND s.enabled
+    JOIN whatsapp_instances w ON w.clinic_id = c.clinic_id AND w.status = 'connected'
+    WHERE c.deleted_at IS NULL AND NOT c.automations_blocked AND c.opted_out_at IS NULL
+      AND c.birth_date IS NOT NULL
+      AND to_char(c.birth_date, 'MM-DD') = ${monthDay}
+      AND NOT EXISTS (
+        SELECT 1 FROM automation_log al
+        WHERE al.automation_id = 'birthday' AND al.customer_id = c.id
+          AND al.created_at >= ${`${year}-01-01`}::date
+      )
+    LIMIT 20
+  `);
+
+  for (const row of birthdays.rows as {
+    customer_id: string;
+    clinic_id: string;
+    full_name: string;
+    phone_e164: string;
+  }[]) {
+    const fakeRun: Run = {
+      id: crypto.randomUUID(),
+      clinicId: row.clinic_id,
+      automationId: "birthday",
+      customerId: row.customer_id,
+      appointmentId: null,
+      currentStep: 0,
+      status: "processing",
+      nextRunAt: null,
+      stopReason: null,
+      startedAt: new Date(),
+      finishedAt: null,
+    };
+    // Cria a run real para rastreabilidade
+    const [run] = await db
+      .insert(schema.automationRuns)
+      .values({
+        clinicId: row.clinic_id,
+        automationId: "birthday",
+        customerId: row.customer_id,
+        status: "processing",
+      })
+      .returning();
+    const activeRun = run ?? fakeRun;
+
+    try {
+      const loaded = await loadContext(activeRun);
+      if (loaded === null || loaded === "postpone") continue;
+      const vars = {
+        nome: loaded.customer.fullName.split(" ")[0] ?? loaded.customer.fullName,
+        clinica: loaded.clinic.name,
+      };
+      await emit(loaded, renderTemplate(template(loaded), vars, { html: false }), {
+        contextLine: "Aniversário de hoje 🎉",
+      });
+      await finishRun(activeRun.id, "completed");
+      logger.info({ customerId: row.customer_id }, "parabéns de aniversário preparado");
+    } catch (err) {
+      await finishRun(activeRun.id, "error", err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
+// ── Compartilhado ────────────────────────────────────────────────────
 
 async function ensureConversationForAutomation(
   clinicId: string,
@@ -320,7 +615,7 @@ export async function expireApprovals(logger: Logger): Promise<void> {
     .where(
       and(eq(schema.approvals.status, "pending"), lte(schema.approvals.expiresAt, new Date())),
     )
-    .returning({ messageId: schema.approvals.messageId, clinicId: schema.approvals.clinicId });
+    .returning({ messageId: schema.approvals.messageId });
   if (expired.length === 0) return;
 
   await db
@@ -337,3 +632,4 @@ export async function expireApprovals(logger: Logger): Promise<void> {
     );
   logger.info({ count: expired.length }, "aprovações expiradas");
 }
+

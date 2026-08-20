@@ -30,6 +30,10 @@ export async function classifyInbound(
   // Só classifica quando o atendimento automático está no controle
   if (!conversation || conversation.mode !== "ai") return;
 
+  // ── Resposta à coleta de feedback (nota 0–10) ────────────────────
+  const handled = await maybeHandleFeedbackRating(clinicId, conversation, customerId, text, logger);
+  if (handled) return;
+
   const appointment = (
     await db
       .select()
@@ -117,6 +121,103 @@ export async function classifyInbound(
     refTable: "conversations",
     refId: conversationId,
   });
+}
+
+/**
+ * Nota de 0 a 10 respondendo à coleta de feedback:
+ * ≥9 → agradece + convite para avaliar no Google (se configurado);
+ * ≤8 → alerta "feedback negativo" para a equipe recuperar a cliente.
+ */
+async function maybeHandleFeedbackRating(
+  clinicId: string,
+  conversation: typeof schema.conversations.$inferSelect,
+  customerId: string,
+  text: string,
+  logger: Logger,
+): Promise<boolean> {
+  const match = text.trim().match(/^(?:nota\s*)?(10|[0-9])\s*[!.]*$/i);
+  if (!match) return false;
+  const rating = Number(match[1]);
+
+  const db = unsafeGlobalDb();
+  // Só interpreta como nota se pedimos feedback nas últimas 48h e ainda não agradecemos
+  const asked = (
+    await db
+      .select({ id: schema.messages.id, createdAt: schema.messages.createdAt })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.conversationId, conversation.id),
+          eq(schema.messages.automationId, "feedback_request"),
+          gt(schema.messages.createdAt, new Date(Date.now() - 48 * 3_600_000)),
+        ),
+      )
+      .limit(1)
+  )[0];
+  if (!asked) return false;
+  const thanked = (
+    await db
+      .select({ id: schema.messages.id })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.conversationId, conversation.id),
+          eq(schema.messages.automationId, "feedback_thanks"),
+          gt(schema.messages.createdAt, asked.createdAt),
+        ),
+      )
+      .limit(1)
+  )[0];
+  if (thanked) return false;
+
+  const customer = (
+    await db
+      .select({ fullName: schema.customers.fullName })
+      .from(schema.customers)
+      .where(eq(schema.customers.id, customerId))
+      .limit(1)
+  )[0];
+  const firstName = customer?.fullName.split(" ")[0] ?? "querida";
+
+  if (rating >= 9) {
+    const clinic = (
+      await db
+        .select({ googleReviewUrl: schema.clinics.googleReviewUrl })
+        .from(schema.clinics)
+        .where(eq(schema.clinics.id, clinicId))
+        .limit(1)
+    )[0];
+    const body = clinic?.googleReviewUrl
+      ? `Ahh que alegria, ${firstName}! 💛 Se puder, nos ajudaria MUITO deixando essa avaliação aqui no Google: ${clinic.googleReviewUrl}`
+      : `Ahh que alegria, ${firstName}! 💛 Obrigada demais pelo carinho — até a próxima!`;
+    await db.insert(schema.messages).values({
+      clinicId,
+      conversationId: conversation.id,
+      direction: "outbound",
+      author: "automation",
+      body,
+      status: "queued",
+      automationId: "feedback_thanks",
+      scheduledFor: new Date(Date.now() + 3_000 + Math.floor(Math.random() * 5_000)),
+    });
+    logger.info({ conversationId: conversation.id, rating }, "feedback positivo → agradecimento");
+  } else {
+    // Nota baixa NUNCA recebe link de avaliação — vira recuperação humana
+    await db
+      .update(schema.conversations)
+      .set({ mode: "waiting_human" })
+      .where(eq(schema.conversations.id, conversation.id));
+    await db.insert(schema.notifications).values({
+      clinicId,
+      type: "conversation_needs_human",
+      title: `Feedback negativo de ${customer?.fullName ?? "cliente"} (nota ${rating})`,
+      body: "Recuperar essa cliente é tarefa humana — fale com ela com carinho.",
+      refTable: "conversations",
+      refId: conversation.id,
+    });
+    logger.warn({ conversationId: conversation.id, rating }, "feedback negativo → humano");
+  }
+  return true;
 }
 
 async function confirmAppointment(

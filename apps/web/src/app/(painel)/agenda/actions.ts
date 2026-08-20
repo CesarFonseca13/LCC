@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import { and, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import {
@@ -61,6 +61,7 @@ async function materializeConfirmationRuns(
   appointmentId: string,
   customerId: string,
   startsAt: Date,
+  procedureId?: string | null,
 ): Promise<void> {
   const enabled = await tx
     .select({ automationId: schema.automationSettings.automationId })
@@ -69,7 +70,8 @@ async function materializeConfirmationRuns(
       and(
         eq(schema.automationSettings.clinicId, clinicId),
         eq(schema.automationSettings.enabled, true),
-        sql`${schema.automationSettings.automationId} IN ('reminder_24h','confirm_2h')`,
+        sql`${schema.automationSettings.automationId} IN
+          ('reminder_24h','confirm_2h','reminder_45min','pre_care')`,
       ),
     );
   const enabledSet = new Set(enabled.map((e) => e.automationId));
@@ -79,7 +81,29 @@ async function materializeConfirmationRuns(
   const plan: { automationId: string; offsetMs: number; minGapMs: number }[] = [
     { automationId: "reminder_24h", offsetMs: 24 * 3_600_000, minGapMs: 2 * 3_600_000 },
     { automationId: "confirm_2h", offsetMs: 2 * 3_600_000, minGapMs: 20 * 60_000 },
+    { automationId: "reminder_45min", offsetMs: 45 * 60_000, minGapMs: 10 * 60_000 },
   ];
+
+  // Pré-cuidados: só se o procedimento tem texto cadastrado; antecedência configurável
+  if (enabledSet.has("pre_care") && procedureId) {
+    const proc = (
+      await tx
+        .select({
+          preCare: schema.procedures.preCare,
+          hoursBefore: schema.procedures.preCareHoursBefore,
+        })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.id, procedureId))
+        .limit(1)
+    )[0];
+    if (proc?.preCare) {
+      plan.push({
+        automationId: "pre_care",
+        offsetMs: (proc.hoursBefore ?? 24) * 3_600_000,
+        minGapMs: 30 * 60_000,
+      });
+    }
+  }
 
   for (const item of plan) {
     if (!enabledSet.has(item.automationId)) continue;
@@ -95,6 +119,79 @@ async function materializeConfirmationRuns(
         customerId,
         appointmentId,
         nextRunAt,
+      })
+      .onConflictDoNothing();
+  }
+}
+
+/** Runs criadas quando o atendimento vira Compareceu ou Faltou. */
+async function materializeOutcomeRuns(
+  tx: Tx,
+  clinicId: string,
+  appointment: AppointmentRow,
+  outcome: "showed" | "no_show",
+): Promise<void> {
+  const wanted =
+    outcome === "showed"
+      ? ["post_visit", "feedback_request", "touchup_offer", "post_sale_cadence"]
+      : ["no_show_message", "no_show_followup"];
+  const enabled = await tx
+    .select({ automationId: schema.automationSettings.automationId })
+    .from(schema.automationSettings)
+    .where(
+      and(
+        eq(schema.automationSettings.clinicId, clinicId),
+        eq(schema.automationSettings.enabled, true),
+        inArray(schema.automationSettings.automationId, wanted),
+      ),
+    );
+  const enabledSet = new Set(enabled.map((e) => e.automationId));
+  if (enabledSet.size === 0) return;
+
+  const proc = appointment.procedureId
+    ? (
+        await tx
+          .select({
+            touchupDays: schema.procedures.touchupDays,
+            postSaleCadenceDays: schema.procedures.postSaleCadenceDays,
+          })
+          .from(schema.procedures)
+          .where(eq(schema.procedures.id, appointment.procedureId))
+          .limit(1)
+      )[0]
+    : undefined;
+
+  const now = Date.now();
+  const schedule: { automationId: string; at: number }[] = [];
+  if (outcome === "showed") {
+    schedule.push(
+      { automationId: "post_visit", at: now + 2 * 3_600_000 },
+      { automationId: "feedback_request", at: now + 24 * 3_600_000 },
+    );
+    if (proc?.touchupDays) {
+      schedule.push({ automationId: "touchup_offer", at: now + proc.touchupDays * 86_400_000 });
+    }
+    const days = (proc?.postSaleCadenceDays ?? []).slice().sort((a, b) => a - b);
+    if (days.length > 0) {
+      schedule.push({ automationId: "post_sale_cadence", at: now + days[0]! * 86_400_000 });
+    }
+  } else {
+    schedule.push(
+      { automationId: "no_show_message", at: now + 40 * 60_000 },
+      { automationId: "no_show_followup", at: now + 3 * 86_400_000 },
+    );
+  }
+
+  for (const item of schedule) {
+    if (!enabledSet.has(item.automationId)) continue;
+    await tx
+      .insert(schema.automationRuns)
+      .values({
+        clinicId,
+        automationId: item.automationId,
+        customerId: appointment.customerId,
+        appointmentId: appointment.id,
+        nextRunAt: new Date(item.at),
       })
       .onConflictDoNothing();
   }
@@ -420,6 +517,7 @@ export const createAppointment = authAction({
           created.id,
           customerId,
           startsAt,
+          input.procedureId,
         );
       }
 
@@ -508,8 +606,12 @@ export const changeAppointmentStatus = authAction({
     if (fullAppointment) {
       if (input.to === "showed") {
         await applyShowedEffects(tx, auth.clinicId, fullAppointment);
-      } else if (current === "showed" && input.to === "no_show") {
-        await revertShowedEffects(tx, auth.clinicId, fullAppointment);
+        await materializeOutcomeRuns(tx, auth.clinicId, fullAppointment, "showed");
+      } else if (input.to === "no_show") {
+        if (current === "showed") {
+          await revertShowedEffects(tx, auth.clinicId, fullAppointment);
+        }
+        await materializeOutcomeRuns(tx, auth.clinicId, fullAppointment, "no_show");
       }
     }
 
@@ -594,6 +696,7 @@ export const rescheduleAppointment = authAction({
         created.id,
         original.customerId,
         startsAt,
+        original.procedureId,
       );
 
       await tx.insert(schema.appointmentStatusHistory).values([

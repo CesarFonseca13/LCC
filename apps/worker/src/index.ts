@@ -11,7 +11,7 @@ import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
 import { processAiTurns } from "./ai-agent";
-import { expireApprovals, processAutomationTick } from "./automations";
+import { expireApprovals, processAutomationTick, processBirthdays } from "./automations";
 import { processPdfGeneration } from "./documents";
 import { processEvents, processOutbound, reconcileStuckSending } from "./whatsapp";
 
@@ -41,6 +41,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("pdf-sweep", { every: 10_000 });
   await schedulerQueue.upsertJobScheduler("ai-turns", { every: 3_000 });
+  await schedulerQueue.upsertJobScheduler("birthdays", { every: 60_000 });
 
   const worker = new Worker(
     "q-scheduler",
@@ -66,6 +67,9 @@ async function main() {
           break;
         case "ai-turns":
           await processAiTurns(logger);
+          break;
+        case "birthdays":
+          await processBirthdays(logger);
           break;
       }
     },

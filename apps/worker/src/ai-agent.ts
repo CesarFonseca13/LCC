@@ -746,7 +746,11 @@ async function materializeRuns(
       and(
         eq(schema.automationSettings.clinicId, clinicId),
         eq(schema.automationSettings.enabled, true),
-        inArray(schema.automationSettings.automationId, ["reminder_24h", "confirm_2h"]),
+        inArray(schema.automationSettings.automationId, [
+          "reminder_24h",
+          "confirm_2h",
+          "reminder_45min",
+        ]),
       ),
     );
   const enabledSet = new Set(enabled.map((e) => e.automationId));
@@ -755,6 +759,7 @@ async function materializeRuns(
   const plan = [
     { automationId: "reminder_24h", offsetMs: 24 * 3_600_000, minGapMs: 2 * 3_600_000 },
     { automationId: "confirm_2h", offsetMs: 2 * 3_600_000, minGapMs: 20 * 60_000 },
+    { automationId: "reminder_45min", offsetMs: 45 * 60_000, minGapMs: 10 * 60_000 },
   ];
   for (const item of plan) {
     if (!enabledSet.has(item.automationId)) continue;

@@ -12,6 +12,26 @@ const PHASE_LABEL: Record<string, { title: string; subtitle: string }> = {
     title: "Confirmação de Agenda",
     subtitle: "Confirmam e lembram a cliente da consulta — menos faltas, sem telefonema.",
   },
+  auto_reply: {
+    title: "Respostas Automáticas",
+    subtitle: "O que a cliente recebe na hora quando ela mesma responde pelo WhatsApp.",
+  },
+  no_show_recovery: {
+    title: "Recuperação de Faltas",
+    subtitle: "A cliente faltou? O sistema corre atrás do reagendamento sozinho.",
+  },
+  post_visit: {
+    title: "Pós-Atendimento",
+    subtitle: "Cuidados de casa, coleta de feedback, retoque e acompanhamento pós-venda.",
+  },
+  reactivation: {
+    title: "Reativação e Datas Especiais",
+    subtitle: "Aniversários e reencontros com quem sumiu.",
+  },
+  growth: {
+    title: "Crescimento e Receita",
+    subtitle: "Preenchimento inteligente da agenda e renovação de pacotes.",
+  },
 };
 
 export default async function AutomacoesPage() {

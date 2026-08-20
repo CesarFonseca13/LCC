@@ -17,6 +17,8 @@ export const KNOWN_VARIABLES = [
   "profissional",
   "link",
   "link_agendamento",
+  "cuidados",
+  "dias",
 ] as const;
 
 export type TemplateVariable = (typeof KNOWN_VARIABLES)[number];
