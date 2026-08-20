@@ -541,6 +541,24 @@ export const mergeCustomers = authAction({
       VALUES (${auth.clinicId}, ${input.targetId}, ${source.phone}, 'mesclado')
       ON CONFLICT DO NOTHING
     `);
+    // Funil: negociações fechadas migram; a aberta migra só se a principal
+    // não tiver outra aberta (senão encerra como mesclada — nunca duplica card)
+    await tx.execute(sql`
+      UPDATE deals SET customer_id = ${input.targetId}
+      WHERE customer_id = ${input.sourceId} AND status <> 'open'
+    `);
+    await tx.execute(sql`
+      UPDATE deals SET customer_id = ${input.targetId}
+      WHERE customer_id = ${input.sourceId} AND status = 'open'
+        AND NOT EXISTS (
+          SELECT 1 FROM deals d2 WHERE d2.customer_id = ${input.targetId} AND d2.status = 'open'
+        )
+    `);
+    await tx.execute(sql`
+      UPDATE deals SET status = 'lost', lost_at = now(), lost_reason = 'Ficha mesclada',
+                       updated_at = now()
+      WHERE customer_id = ${input.sourceId} AND status = 'open'
+    `);
 
     await tx
       .update(schema.customers)

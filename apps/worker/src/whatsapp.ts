@@ -247,7 +247,7 @@ async function ensureCustomer(
 ): Promise<string> {
   const db = unsafeGlobalDb();
   const existing = await db
-    .select({ id: schema.customers.id })
+    .select({ id: schema.customers.id, status: schema.customers.status })
     .from(schema.customers)
     .where(
       and(
@@ -262,7 +262,17 @@ async function ensureCustomer(
       ),
     )
     .limit(1);
-  if (existing[0]) return existing[0].id;
+  if (existing[0]) {
+    // Lead que voltou a chamar sem negociação aberta = nova oportunidade no funil
+    // (índice único parcial segura duplicata; conversa em andamento não recria)
+    if (existing[0].status === "lead") {
+      await db
+        .insert(schema.deals)
+        .values({ clinicId, customerId: existing[0].id, source: "whatsapp", status: "open" })
+        .onConflictDoNothing();
+    }
+    return existing[0].id;
+  }
 
   const [created] = await db
     .insert(schema.customers)
@@ -275,7 +285,15 @@ async function ensureCustomer(
     })
     .onConflictDoNothing()
     .returning({ id: schema.customers.id });
-  if (created) return created.id;
+  if (created) {
+    // Número desconhecido virou lead: nasce um card no funil de vendas
+    // (índice único parcial impede duplicar negociação aberta)
+    await db
+      .insert(schema.deals)
+      .values({ clinicId, customerId: created.id, source: "whatsapp", status: "open" })
+      .onConflictDoNothing();
+    return created.id;
+  }
 
   // Corrida: outro processo criou entre o select e o insert
   const retry = await db
