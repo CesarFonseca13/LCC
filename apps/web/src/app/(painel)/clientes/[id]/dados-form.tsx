@@ -24,7 +24,13 @@ export interface DadosInitial {
   notes: string;
 }
 
-export function DadosForm({ initial }: { initial: DadosInitial }) {
+export function DadosForm({
+  initial,
+  readOnly = false,
+}: {
+  initial: DadosInitial;
+  readOnly?: boolean;
+}) {
   const [error, setError] = useState<string>();
   const [saved, setSaved] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -68,6 +74,8 @@ export function DadosForm({ initial }: { initial: DadosInitial }) {
 
   return (
     <form action={submit} className="space-y-4 rounded-xl border border-stone-200 bg-white p-6">
+      {/* fieldset disabled desliga todos os campos de uma vez no modo leitura */}
+      <fieldset disabled={readOnly} className="contents">
       <div className="grid grid-cols-2 gap-3">
         <div>
           <Label htmlFor="d-name">Nome completo</Label>
@@ -147,14 +155,21 @@ export function DadosForm({ initial }: { initial: DadosInitial }) {
         <Textarea id="d-notes" name="notes" rows={2} defaultValue={initial.notes} />
       </div>
 
+      </fieldset>
       <FieldError message={error} />
       {saved ? <p className="text-sm text-emerald-600">Dados salvos!</p> : null}
 
-      <div className="flex justify-end">
-        <Button type="submit" disabled={pending}>
-          {pending ? "Salvando..." : "Salvar alterações"}
-        </Button>
-      </div>
+      {readOnly ? (
+        <p className="text-xs text-stone-400">
+          Somente leitura — peça para a recepção ou a administradora atualizar os dados.
+        </p>
+      ) : (
+        <div className="flex justify-end">
+          <Button type="submit" disabled={pending}>
+            {pending ? "Salvando..." : "Salvar alterações"}
+          </Button>
+        </div>
+      )}
     </form>
   );
 }

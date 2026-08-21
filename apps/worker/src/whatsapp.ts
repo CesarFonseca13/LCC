@@ -231,13 +231,12 @@ async function handleFromMe(
   `);
   await db
     .update(schema.conversations)
-    .set({ mode: "human", lastMessageAt: new Date() })
-    .where(
-      and(
-        eq(schema.conversations.id, conversationId),
-        eq(schema.conversations.mode, "ai"),
-      ),
-    );
+    .set({
+      // "aguardando humano" também é resolvido por resposta via celular da clínica
+      mode: sql`CASE WHEN mode IN ('ai', 'waiting_human') THEN 'human' ELSE mode END`,
+      lastMessageAt: new Date(),
+    })
+    .where(eq(schema.conversations.id, conversationId));
 }
 
 async function ensureCustomer(
@@ -260,6 +259,13 @@ async function ensureCustomer(
                         AND cp.phone_e164 = ${phone})`,
         ),
       ),
+    )
+    // Duas fichas com o mesmo número: prioridade determinística — número
+    // principal vence o secundário, ficha real vence lead, depois a mais antiga
+    .orderBy(
+      sql`(${schema.customers.phoneE164} = ${phone}) DESC`,
+      sql`(${schema.customers.status} <> 'lead') DESC`,
+      sql`${schema.customers.createdAt} ASC`,
     )
     .limit(1);
   if (existing[0]) {

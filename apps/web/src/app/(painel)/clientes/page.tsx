@@ -39,6 +39,15 @@ export default async function ClientesPage({
   const { counts, list } = await withTenant(
     auth.clinicId,
     async (tx) => {
+      const tz =
+        (
+          await tx
+            .select({ timezone: schema.clinics.timezone })
+            .from(schema.clinics)
+            .where(eq(schema.clinics.id, auth.clinicId!))
+            .limit(1)
+        )[0]?.timezone ?? "America/Sao_Paulo";
+
       const countRows = await tx
         .select({
           status: schema.customers.status,
@@ -66,14 +75,46 @@ export default async function ClientesPage({
           phoneE164: schema.customers.phoneE164,
           status: schema.customers.status,
           automationsBlocked: schema.customers.automationsBlocked,
-          visits: sql<number>`(SELECT count(*)::int FROM customer_history_entries h2 WHERE h2.customer_id = customers.id)`,
-          totalSpent: sql<string | null>`(SELECT sum(h2.amount) FROM customer_history_entries h2 WHERE h2.customer_id = customers.id)`,
-          lastVisit: sql<string | null>`(SELECT max(h2.occurred_on) FROM customer_history_entries h2 WHERE h2.customer_id = customers.id)`,
+          // Visitas/investido/última = histórico manual + atendimentos realizados na
+          // agenda (mesma regra da ficha; mesmo dia não conta duas vezes)
+          visits: sql<number>`(
+            (SELECT count(*)::int FROM customer_history_entries h2 WHERE h2.customer_id = customers.id)
+            + (SELECT count(*)::int FROM appointments a2
+               WHERE a2.customer_id = customers.id AND a2.status = 'showed'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM customer_history_entries h3
+                   WHERE h3.customer_id = customers.id
+                     AND h3.occurred_on = (a2.starts_at AT TIME ZONE ${tz})::date
+                 ))
+          )`,
+          totalSpent: sql<string | null>`NULLIF(
+            COALESCE((SELECT sum(h2.amount) FROM customer_history_entries h2 WHERE h2.customer_id = customers.id), 0)
+            + COALESCE((SELECT sum(COALESCE(a2.price, 0)) FROM appointments a2
+               WHERE a2.customer_id = customers.id AND a2.status = 'showed'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM customer_history_entries h3
+                   WHERE h3.customer_id = customers.id
+                     AND h3.occurred_on = (a2.starts_at AT TIME ZONE ${tz})::date
+                 )), 0)
+          , 0)`,
+          lastVisit: sql<string | null>`(
+            SELECT max(d) FROM (
+              SELECT h2.occurred_on AS d FROM customer_history_entries h2 WHERE h2.customer_id = customers.id
+              UNION ALL
+              SELECT (a2.starts_at AT TIME ZONE ${tz})::date FROM appointments a2
+              WHERE a2.customer_id = customers.id AND a2.status = 'showed'
+            ) u
+          )`,
           lastProcedure: sql<string | null>`(
-            SELECT COALESCE(p2.name, h2.procedure_name)
-            FROM customer_history_entries h2 LEFT JOIN procedures p2 ON p2.id = h2.procedure_id
-            WHERE h2.customer_id = customers.id
-            ORDER BY h2.occurred_on DESC LIMIT 1
+            SELECT name FROM (
+              SELECT COALESCE(p2.name, h2.procedure_name) AS name, h2.occurred_on AS d
+              FROM customer_history_entries h2 LEFT JOIN procedures p2 ON p2.id = h2.procedure_id
+              WHERE h2.customer_id = customers.id
+              UNION ALL
+              SELECT p3.name, (a2.starts_at AT TIME ZONE ${tz})::date
+              FROM appointments a2 JOIN procedures p3 ON p3.id = a2.procedure_id
+              WHERE a2.customer_id = customers.id AND a2.status = 'showed'
+            ) u ORDER BY d DESC NULLS LAST LIMIT 1
           )`,
         })
         .from(schema.customers)
@@ -216,6 +257,12 @@ export default async function ClientesPage({
                 })}
               </tbody>
             </table>
+            {list.length >= 200 ? (
+              <p className="border-t border-stone-100 px-4 py-3 text-xs text-stone-500">
+                Mostrando as primeiras 200 clientes em ordem alfabética. Para encontrar as
+                demais, use a busca por nome acima.
+              </p>
+            ) : null}
           </div>
         )}
       </div>

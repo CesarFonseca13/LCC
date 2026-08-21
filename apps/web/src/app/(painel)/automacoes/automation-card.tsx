@@ -36,6 +36,15 @@ function preview(template: string): string {
   );
 }
 
+// Automações que saem SEMPRE na hora (o worker nunca as coloca na fila de
+// revisão) — mostrar o rádio "Revisar antes de enviar" aqui seria mentira
+const ALWAYS_DIRECT: Record<string, string> = {
+  reminder_45min:
+    "Sai sozinha na hora certa — um lembrete de 45 minutos não dá tempo de revisar.",
+  reply_on_confirm:
+    "Resposta em tempo real — sai sozinha no momento em que a cliente confirma.",
+};
+
 export interface SequenceStepView {
   days: number;
   template: string;
@@ -130,26 +139,32 @@ export function AutomationCard({
       {setting.enabled ? (
         <div className="mt-4 space-y-3 border-t border-stone-100 pt-4">
           <div className="flex flex-wrap items-center gap-4 text-sm">
-            <label className="flex cursor-pointer items-center gap-2 text-stone-700">
-              <input
-                type="radio"
-                name={`mode-${definition.id}`}
-                checked={setting.requiresApproval}
-                onChange={() => save({ requiresApproval: true })}
-                className="h-4 w-4 accent-teal-700"
-              />
-              Revisar antes de enviar
-            </label>
-            <label className="flex cursor-pointer items-center gap-2 text-stone-700">
-              <input
-                type="radio"
-                name={`mode-${definition.id}`}
-                checked={!setting.requiresApproval}
-                onChange={() => save({ requiresApproval: false })}
-                className="h-4 w-4 accent-teal-700"
-              />
-              Enviar automaticamente
-            </label>
+            {ALWAYS_DIRECT[definition.id] ? (
+              <p className="text-stone-500">⚡ {ALWAYS_DIRECT[definition.id]}</p>
+            ) : (
+              <>
+                <label className="flex cursor-pointer items-center gap-2 text-stone-700">
+                  <input
+                    type="radio"
+                    name={`mode-${definition.id}`}
+                    checked={setting.requiresApproval}
+                    onChange={() => save({ requiresApproval: true })}
+                    className="h-4 w-4 accent-teal-700"
+                  />
+                  Revisar antes de enviar
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-stone-700">
+                  <input
+                    type="radio"
+                    name={`mode-${definition.id}`}
+                    checked={!setting.requiresApproval}
+                    onChange={() => save({ requiresApproval: false })}
+                    className="h-4 w-4 accent-teal-700"
+                  />
+                  Enviar automaticamente
+                </label>
+              </>
+            )}
             <Button variant="ghost" onClick={() => setEditOpen(true)}>
               {isSequence ? "Ver e editar sequência" : "Editar mensagem"}
             </Button>

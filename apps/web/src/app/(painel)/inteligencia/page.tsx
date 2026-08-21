@@ -1,4 +1,4 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { can } from "@clinicaos/core/permissions";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
@@ -44,6 +44,10 @@ export default async function InteligenciaPage() {
           schema.customers,
           eq(schema.customers.id, schema.customerScores.customerId),
         )
+        // Ficha mesclada/excluída sai da lista (o botão dela só daria erro)
+        .where(
+          and(isNull(schema.customers.deletedAt), isNull(schema.customers.mergedIntoId)),
+        )
         .orderBy(desc(schema.customerScores.score), schema.customers.fullName)
         .limit(300);
       const lastComputed = (
@@ -58,6 +62,13 @@ export default async function InteligenciaPage() {
           count: sql<number>`count(*)::int`,
         })
         .from(schema.customerScores)
+        .innerJoin(
+          schema.customers,
+          eq(schema.customers.id, schema.customerScores.customerId),
+        )
+        .where(
+          and(isNull(schema.customers.deletedAt), isNull(schema.customers.mergedIntoId)),
+        )
         .groupBy(schema.customerScores.classification);
       return { rows, lastComputed: lastComputed?.max ?? null, byClass };
     },

@@ -511,6 +511,33 @@ export const createAppointment = authAction({
     }
     if (!customerId) return { ok: false, error: "Cliente inválida." };
 
+    // Posse dos IDs recebidos do formulário: FK não passa pela RLS, então um id
+    // de outra clínica entraria (e travaria a agenda da vítima via anti-overlap)
+    if (input.customerId) {
+      const owned = await tx
+        .select({ id: schema.customers.id })
+        .from(schema.customers)
+        .where(
+          and(eq(schema.customers.id, input.customerId), isNull(schema.customers.deletedAt)),
+        )
+        .limit(1);
+      if (!owned[0]) return { ok: false, error: "Cliente não encontrada." };
+    }
+    const prof = await tx
+      .select({ id: schema.professionals.id })
+      .from(schema.professionals)
+      .where(eq(schema.professionals.id, input.professionalId))
+      .limit(1);
+    if (!prof[0]) return { ok: false, error: "Profissional não encontrada." };
+    if (input.roomId) {
+      const room = await tx
+        .select({ id: schema.rooms.id })
+        .from(schema.rooms)
+        .where(eq(schema.rooms.id, input.roomId))
+        .limit(1);
+      if (!room[0]) return { ok: false, error: "Sala não encontrada." };
+    }
+
     const proc = (
       await tx
         .select({

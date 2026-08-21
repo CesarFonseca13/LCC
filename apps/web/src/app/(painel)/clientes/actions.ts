@@ -233,6 +233,14 @@ export const addHistoryEntry = authAction({
     if (!input.procedureId && !input.procedureName) {
       return { ok: false, error: "Escolha um procedimento ou descreva-o." };
     }
+    // Histórico é passado: data futura viraria "última visita há -N dias"
+    // e distorceria o score de recência
+    if (input.occurredOn > new Date().toISOString().slice(0, 10)) {
+      return {
+        ok: false,
+        error: "A data do atendimento não pode ser no futuro — confira o ano.",
+      };
+    }
     await tx.insert(schema.customerHistoryEntries).values({
       clinicId: auth.clinicId,
       customerId: input.customerId,
@@ -362,13 +370,22 @@ export const importCustomersCsv = authAction({
 
       // Data/valor torto NUNCA some em silêncio: a linha entra, mas o aviso
       // aparece no resultado (a dona corrige a planilha em vez de perder histórico)
-      const lastVisitISO = brDateToISO(get("ultima_visita"));
+      let lastVisitISO = brDateToISO(get("ultima_visita"));
       if (get("ultima_visita") && !lastVisitISO) {
         skipped.push({
           line,
           name,
           reason: `cadastrada SEM histórico — última visita "${get("ultima_visita")}" não está em dd/mm/aaaa`,
         });
+      }
+      // Data futura viraria "última visita há -N dias" no score
+      if (lastVisitISO && lastVisitISO > new Date().toISOString().slice(0, 10)) {
+        skipped.push({
+          line,
+          name,
+          reason: `cadastrada SEM histórico — última visita "${get("ultima_visita")}" está no futuro`,
+        });
+        lastVisitISO = null;
       }
       const birthISO = brDateToISO(get("nascimento"));
       if (get("nascimento") && !birthISO) {
@@ -635,10 +652,10 @@ export const mergeCustomers = authAction({
           SELECT 1 FROM deals d2 WHERE d2.customer_id = ${input.targetId} AND d2.status = 'open'
         )
     `);
+    // Card duplicado é descartado (não é venda perdida — não pode inflar o
+    // contador "perdidas no mês" do funil)
     await tx.execute(sql`
-      UPDATE deals SET status = 'lost', lost_at = now(), lost_reason = 'Ficha mesclada',
-                       updated_at = now()
-      WHERE customer_id = ${input.sourceId} AND status = 'open'
+      DELETE FROM deals WHERE customer_id = ${input.sourceId} AND status = 'open'
     `);
 
     await tx

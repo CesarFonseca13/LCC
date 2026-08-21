@@ -359,8 +359,15 @@ function suggestAction(
           : `Oferecer renovação do pacote ${m.packageName} — vencendo em breve.`,
     };
   }
-  // Retorno muito atrasado deixou de ser "retorno": é reativação
-  if (m.overdueProcedure && m.overdueDays !== null && m.overdueDays <= 60) {
+  // Retorno muito atrasado deixou de ser "retorno": é reativação.
+  // Esteve na clínica há poucos dias (outro procedimento)? Cobrar retorno
+  // agora soaria robótico — espera 2 semanas desde a última visita.
+  if (
+    m.overdueProcedure &&
+    m.overdueDays !== null &&
+    m.overdueDays <= 60 &&
+    (m.daysSinceVisit === null || m.daysSinceVisit >= 14)
+  ) {
     return {
       kind: "return_due",
       action: `Convidar para o retorno de ${m.overdueProcedure} — venceu há ${m.overdueDays} dia${m.overdueDays === 1 ? "" : "s"}.`,
@@ -374,7 +381,10 @@ function suggestAction(
   }
   if (
     (m.daysSinceVisit !== null && m.daysSinceVisit > 90) ||
-    (m.overdueProcedure && m.overdueDays !== null && m.overdueDays > 60)
+    (m.overdueProcedure &&
+      m.overdueDays !== null &&
+      m.overdueDays > 60 &&
+      (m.daysSinceVisit === null || m.daysSinceVisit >= 14))
   ) {
     const days = m.daysSinceVisit;
     return {

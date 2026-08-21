@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { adoptClinic, schema, withContext } from "@clinicaos/db";
+import { isLinkPreviewBot } from "@/lib/preview-bot";
 import { SignPad } from "./sign-pad";
 
 export const metadata = { title: "Assinatura de termo" };
@@ -10,6 +11,7 @@ export default async function AssinarPage({
   params: Promise<{ token: string }>;
 }) {
   const { token } = await params;
+  const previewBot = await isLinkPreviewBot();
 
   const data = await withContext({ signToken: token }, async (tx) => {
     const doc = (
@@ -33,8 +35,9 @@ export default async function AssinarPage({
     const expired =
       doc.status !== "signed" && new Date(doc.tokenExpiresAt) < new Date();
 
-    // Trilha: registro de abertura + primeiro "visualizado"
-    if (!expired && ["sent", "viewed"].includes(doc.status)) {
+    // Trilha: registro de abertura + primeiro "visualizado" — a prévia de link
+    // do WhatsApp faz um GET no envio e não conta como abertura de verdade
+    if (!expired && !previewBot && ["sent", "viewed"].includes(doc.status)) {
       await tx.insert(schema.documentAuditLog).values({
         clinicId: doc.clinicId,
         documentId: doc.id,

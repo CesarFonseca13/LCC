@@ -47,6 +47,9 @@ export default async function ClientePage({
           : "dados";
 
   const canClinicalRead = can(auth.role, "customers.clinical.read");
+  // Papel sem customers.write (ex.: Profissional) vê a ficha, não os controles
+  // de edição — clicar neles só renderia um erro de permissão
+  const canWrite = can(auth.role, "customers.write");
 
   const data = await withTenant(
     auth.clinicId,
@@ -240,14 +243,16 @@ export default async function ClientePage({
               <p className="text-sm text-stone-500">{formatPhoneBR(customer.phoneE164)}</p>
             </div>
           </div>
-          <HeaderActions
-            customerId={customer.id}
-            blocked={customer.automationsBlocked}
-            others={otherCustomers.map((o) => ({
-              id: o.id,
-              label: `${o.fullName} — ${formatPhoneBR(o.phoneE164)}`,
-            }))}
-          />
+          {canWrite ? (
+            <HeaderActions
+              customerId={customer.id}
+              blocked={customer.automationsBlocked}
+              others={otherCustomers.map((o) => ({
+                id: o.id,
+                label: `${o.fullName} — ${formatPhoneBR(o.phoneE164)}`,
+              }))}
+            />
+          ) : null}
         </div>
 
         {/* Alerta clínico — visível em todas as abas */}
@@ -304,6 +309,7 @@ export default async function ClientePage({
       <div className="mt-6 max-w-3xl">
         {tab === "dados" ? (
           <DadosForm
+            readOnly={!canWrite}
             initial={{
               id: customer.id,
               fullName: customer.fullName,
@@ -355,14 +361,16 @@ export default async function ClientePage({
                 Pacotes ativos debitam a sessão sozinhos quando o atendimento é marcado
                 como “Compareceu”.
               </p>
-              <AssignPackageButton
-                customerId={customer.id}
-                packages={packageModels.map((p) => ({
-                  id: p.id,
-                  name: p.name,
-                  priceLabel: formatBRL(p.price),
-                }))}
-              />
+              {canWrite ? (
+                <AssignPackageButton
+                  customerId={customer.id}
+                  packages={packageModels.map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    priceLabel: formatBRL(p.price),
+                  }))}
+                />
+              ) : null}
             </div>
             <div className="mt-4 space-y-3">
               {customerPackages.length === 0 ? (
@@ -428,7 +436,9 @@ export default async function ClientePage({
                 Atendimentos anteriores ao sistema também contam para o ranking e as
                 reativações — registre-os aqui.
               </p>
-              <HistoryFormButton customerId={customer.id} procedures={procedures} />
+              {canWrite ? (
+                <HistoryFormButton customerId={customer.id} procedures={procedures} />
+              ) : null}
             </div>
             <div className="mt-4 overflow-hidden rounded-xl border border-stone-200 bg-white">
               {history.length === 0 ? (

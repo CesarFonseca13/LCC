@@ -78,13 +78,16 @@ export const approveMessage = authAction({
       };
     }
 
+    if (input.editedBody !== undefined && input.editedBody.length === 0) {
+      return {
+        ok: false,
+        error: "A mensagem não pode ficar vazia — escreva o texto ou cancele a edição.",
+      };
+    }
     const edited =
-      input.editedBody && input.editedBody !== approval.generatedBody
+      input.editedBody !== undefined && input.editedBody !== approval.generatedBody
         ? input.editedBody
         : null;
-    if (edited !== null && edited.length === 0) {
-      return { ok: false, error: "A mensagem não pode ficar vazia." };
-    }
 
     // Primeiro a mensagem (com guarda de status) — se ela já expirou/enviou
     // numa corrida, a aprovação NÃO é marcada como aprovada

@@ -1,6 +1,7 @@
 import { and, asc, eq } from "drizzle-orm";
 import { adoptClinic, schema, withContext } from "@clinicaos/db";
 import { todayISO } from "@clinicaos/core/timezone";
+import { isLinkPreviewBot } from "@/lib/preview-bot";
 import { AcceptQuoteButton } from "./accept-button";
 
 export const metadata = { title: "Orçamento" };
@@ -15,6 +16,7 @@ export default async function OrcamentoPublicoPage({
   params: Promise<{ token: string }>;
 }) {
   const { token } = await params;
+  const previewBot = await isLinkPreviewBot();
 
   const data = await withContext({ quoteToken: token }, async (tx) => {
     const quote = (
@@ -51,8 +53,9 @@ export default async function OrcamentoPublicoPage({
       ["sent", "viewed"].includes(quote.status) &&
       quote.validUntil < todayISO("America/Sao_Paulo");
 
-    // Primeira abertura marca "Visualizado"
-    if (quote.status === "sent" && !expired) {
+    // Primeira abertura de VERDADE marca "Visualizado" — a prévia de link do
+    // WhatsApp faz um GET no próprio envio e não pode contar como abertura
+    if (quote.status === "sent" && !expired && !previewBot) {
       await tx
         .update(schema.quotes)
         .set({ status: "viewed", viewedAt: new Date() })
@@ -61,7 +64,11 @@ export default async function OrcamentoPublicoPage({
 
     return {
       number: quote.number,
-      status: expired ? "expired" : quote.status === "sent" ? "viewed" : quote.status,
+      status: expired
+        ? "expired"
+        : quote.status === "sent" && !previewBot
+          ? "viewed"
+          : quote.status,
       validUntil: quote.validUntil,
       subtotal: quote.subtotal,
       discount: quote.discountAmount,

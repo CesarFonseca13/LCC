@@ -21,7 +21,9 @@ export async function processCampaignsSweep(logger: Logger): Promise<void> {
     JOIN clinics c ON c.id = ca.clinic_id
     JOIN whatsapp_instances w ON w.clinic_id = ca.clinic_id AND w.status = 'connected'
     WHERE ca.status = 'running'
-    ORDER BY ca.started_at ASC
+    -- Rodízio justo: quem enviou há mais tempo (ou nunca) vai primeiro — duas
+    -- campanhas ligadas se alternam em vez de a mais antiga monopolizar o ritmo
+    ORDER BY ca.next_send_at ASC NULLS FIRST, ca.started_at ASC
   `);
 
   for (const row of running.rows as unknown as CampaignRow[]) {
@@ -93,15 +95,21 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
   `);
   if ((clinicPacing.rowCount ?? 0) > 0) return;
 
-  // Teto diário POR NÚMERO (soma todas as campanhas da clínica no dia local)
+  // Teto diário POR NÚMERO (soma todas as campanhas da clínica no dia local).
+  // Com caps diferentes entre campanhas ligadas, vale o MENOR — o número segue
+  // o ritmo mais conservador que a dona configurou (anti-ban em primeiro lugar)
   const sentToday = await db.execute(sql`
-    SELECT count(*)::int AS n
-    FROM campaign_recipients r
-    JOIN campaigns ca ON ca.id = r.campaign_id
-    WHERE ca.clinic_id = ${campaign.clinic_id} AND r.status = 'sent'
-      AND r.sent_at >= (now() AT TIME ZONE ${tz})::date::timestamp AT TIME ZONE ${tz}
+    SELECT (SELECT count(*)::int
+            FROM campaign_recipients r
+            JOIN campaigns ca ON ca.id = r.campaign_id
+            WHERE ca.clinic_id = ${campaign.clinic_id} AND r.status = 'sent'
+              AND r.sent_at >= (now() AT TIME ZONE ${tz})::date::timestamp AT TIME ZONE ${tz}
+           ) AS n,
+           (SELECT min(daily_cap) FROM campaigns
+            WHERE clinic_id = ${campaign.clinic_id} AND status = 'running') AS cap
   `);
-  if (Number((sentToday.rows[0] as { n: number }).n) >= campaign.daily_cap) return;
+  const today = sentToday.rows[0] as { n: number; cap: number | null };
+  if (Number(today.n) >= Number(today.cap ?? campaign.daily_cap)) return;
 
   // Tudo dentro de UMA transação: claim + mensagem ou nada (crash não perde
   // destinatária); advisory lock por clínica segura varreduras concorrentes
