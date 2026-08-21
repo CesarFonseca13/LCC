@@ -77,7 +77,7 @@ services:
 
   # ── Milestone WhatsApp (Fase 1, item 5) ────────────────────────────
   # evolution:
-  #   image: atendai/evolution-api:v2.2.0        # PIN — upgrade via canário
+  #   image: evoapicloud/evolution-api:v2.2.0    # PIN — upgrade via canário (org antiga atendai/ saiu do Hub)
   #   restart: unless-stopped
   #   environment:
   #     AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?}

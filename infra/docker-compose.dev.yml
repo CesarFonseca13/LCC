@@ -39,7 +39,8 @@ services:
   # Para testes automatizados use o mock: node infra/evolution-mock/server.mjs (porta 8099)
   # e rode web/worker com EVOLUTION_BASE_URL=http://localhost:8099
   evolution:
-    image: atendai/evolution-api:v2.2.0        # PIN de versão — upgrade só via canário
+    # A org antiga (atendai/) saiu do Docker Hub — a imagem oficial vive em evoapicloud/
+    image: evoapicloud/evolution-api:v2.2.0    # PIN de versão — upgrade só via canário
     environment:
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-change-me-evolution-global-key}
       DATABASE_ENABLED: "true"
