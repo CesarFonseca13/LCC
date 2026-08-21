@@ -5,6 +5,10 @@ import { NextResponse, type NextRequest } from "next/server";
  * a validação real da sessão acontece no layout do painel (Node).
  */
 export function middleware(request: NextRequest) {
+  // "/" é a landing pública — visitante sem sessão vê o site, logada cai no painel
+  if (request.nextUrl.pathname === "/") {
+    return NextResponse.next();
+  }
   const hasSession = request.cookies.has("cos_session");
   if (!hasSession) {
     const loginUrl = new URL("/login", request.url);

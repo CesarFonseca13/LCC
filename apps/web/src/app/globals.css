@@ -9,3 +9,55 @@ body {
   background: var(--color-stone-50);
   color: var(--color-stone-800);
 }
+
+/* ── VFX da landing e do login (CSS puro, respeita reduced-motion) ── */
+@keyframes fx-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  33% { transform: translate3d(4%, -6%, 0) scale(1.08); }
+  66% { transform: translate3d(-5%, 4%, 0) scale(0.95); }
+}
+@keyframes fx-rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fx-bubble {
+  0% { opacity: 0; transform: translateY(14px) scale(0.97); }
+  8%, 88% { opacity: 1; transform: translateY(0) scale(1); }
+  96%, 100% { opacity: 0; transform: translateY(-8px) scale(0.99); }
+}
+@keyframes fx-shine {
+  from { background-position: 200% center; }
+  to { background-position: -200% center; }
+}
+.fx-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(80px);
+  animation: fx-drift 16s ease-in-out infinite;
+  will-change: transform;
+  pointer-events: none;
+}
+.fx-rise { animation: fx-rise 0.7s ease-out both; }
+.fx-rise-1 { animation-delay: 0.08s; }
+.fx-rise-2 { animation-delay: 0.18s; }
+.fx-rise-3 { animation-delay: 0.3s; }
+.fx-shine-text {
+  background: linear-gradient(110deg, #0f766e 20%, #34d399 40%, #0f766e 60%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: fx-shine 6s linear infinite;
+}
+.fx-grid {
+  background-image:
+    linear-gradient(to right, rgb(15 118 110 / 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(15 118 110 / 0.06) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, black 40%, transparent 100%);
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, black 40%, transparent 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fx-blob, .fx-rise, .fx-shine-text { animation: none; }
+  .fx-rise { opacity: 1; transform: none; }
+}
