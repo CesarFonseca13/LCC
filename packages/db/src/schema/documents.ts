@@ -88,7 +88,8 @@ export const documentSignatures = pgTable("document_signatures", {
   signatureKind: text("signature_kind", { enum: ["drawn", "typed"] }).notNull(),
   signatureImage: text("signature_image"),
   signedAt: timestamp("signed_at", { withTimezone: true }).notNull().defaultNow(),
-  ip: inet("ip").notNull(),
+  /** Nulo quando o proxy manda lixo no header — as demais evidências ficam. */
+  ip: inet("ip"),
   userAgent: text("user_agent").notNull(),
   contentSha256: text("content_sha256").notNull(),
   evidence: jsonb("evidence").notNull().default({}),

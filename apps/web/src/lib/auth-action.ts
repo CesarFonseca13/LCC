@@ -39,7 +39,13 @@ export function authAction<S extends z.ZodType, R>(opts: {
     if (!auth.clinicId || !auth.role) redirect("/login");
     if (!can(auth.role, opts.permission)) throw new ForbiddenError(opts.permission);
 
-    const input = opts.schema.parse(rawInput);
+    // Validação NUNCA derruba a página: a mensagem pt-BR volta para o formulário
+    const parsed = opts.schema.safeParse(rawInput);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Confira os campos e tente de novo.";
+      return { ok: false, error: message } as R;
+    }
+    const input = parsed.data;
 
     return withTenant(
       auth.clinicId,

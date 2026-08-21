@@ -270,9 +270,22 @@ export const resendTerm = authAction({
         .where(eq(schema.documents.id, input.id))
         .limit(1)
     )[0];
-    if (!doc || !["sent", "viewed"].includes(doc.status)) {
+    if (!doc || !["sent", "viewed", "expired"].includes(doc.status)) {
       return { ok: false, error: "Documento não está pendente." };
     }
+
+    // Reenviar RENOVA o link: token novo + 7 dias de validade (link morto nunca sai)
+    const newToken = randomBytes(32).toString("base64url");
+    await tx
+      .update(schema.documents)
+      .set({
+        signToken: newToken,
+        tokenExpiresAt: new Date(Date.now() + 7 * 86_400_000),
+        status: "sent",
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.documents.id, doc.id));
+    doc.signToken = newToken;
     const customer = (
       await tx
         .select({ fullName: schema.customers.fullName, phoneE164: schema.customers.phoneE164 })

@@ -31,7 +31,8 @@ function periodRange(period: Period, hoje: string): { start: string; end: string
       m === 1 ? `${y! - 1}-12-01` : `${y}-${String(m! - 1).padStart(2, "0")}-01`;
     return { start: prevFirst, end: addDaysISO(`${hoje.slice(0, 7)}-01`, -1) };
   }
-  return { start: addDaysISO(hoje, period === "30d" ? -30 : -90), end: hoje };
+  // -29/-89 porque o próprio hoje conta: exatamente 30/90 datas na janela
+  return { start: addDaysISO(hoje, period === "30d" ? -29 : -89), end: hoje };
 }
 
 function Card({
@@ -113,7 +114,10 @@ export default async function RelatoriosPage({
             noShow: sql<number>`count(*) FILTER (WHERE status = 'no_show')::int`,
             cancelled: sql<number>`count(*) FILTER (WHERE status = 'cancelled')::int`,
             upcoming: sql<number>`count(*) FILTER (WHERE status IN ('scheduled','confirmed'))::int`,
-            showedValue: sql<string | null>`sum(price) FILTER (WHERE status = 'showed')`,
+            // Sessão de pacote não gera cobrança: o preço avulso dela NÃO entra
+            // no ticket (o dinheiro do pacote entrou quando foi vendido)
+            showedValue: sql<string | null>`sum(price) FILTER (WHERE status = 'showed' AND customer_package_id IS NULL)`,
+            showedBillable: sql<number>`count(*) FILTER (WHERE status = 'showed' AND customer_package_id IS NULL)::int`,
           })
           .from(schema.appointments)
           .where(
@@ -128,7 +132,7 @@ export default async function RelatoriosPage({
         .select({
           name: schema.procedures.name,
           count: sql<number>`count(*)::int`,
-          total: sql<string | null>`sum(${schema.appointments.price})`,
+          total: sql<string | null>`sum(${schema.appointments.price}) FILTER (WHERE ${schema.appointments.customerPackageId} IS NULL)`,
         })
         .from(schema.appointments)
         .innerJoin(
@@ -178,11 +182,23 @@ export default async function RelatoriosPage({
             schema.stockItems,
             eq(schema.stockItems.id, schema.stockMovements.stockItemId),
           )
+          // Consumo entra no período do ATENDIMENTO (não do clique tardio no
+          // "Compareceu") — mesmo corte usado por atendimentos/ticket
+          .leftJoin(
+            schema.appointments,
+            eq(schema.appointments.id, schema.stockMovements.appointmentId),
+          )
           .where(
             and(
               eq(schema.stockMovements.kind, "procedure_use"),
-              gte(schema.stockMovements.createdAt, new Date(startTs)),
-              lte(schema.stockMovements.createdAt, new Date(endTs)),
+              gte(
+                sql`COALESCE(${schema.appointments.startsAt}, ${schema.stockMovements.createdAt})`,
+                new Date(startTs),
+              ),
+              lte(
+                sql`COALESCE(${schema.appointments.startsAt}, ${schema.stockMovements.createdAt})`,
+                new Date(endTs),
+              ),
             ),
           )
       )[0];
@@ -200,7 +216,10 @@ export default async function RelatoriosPage({
           eq(schema.customers.id, schema.customerScores.customerId),
         )
         .where(
-          inArray(schema.customerScores.suggestedKind, ["return_due", "reactivation"]),
+          and(
+            inArray(schema.customerScores.suggestedKind, ["return_due", "reactivation"]),
+            sql`customers.deleted_at IS NULL AND customers.merged_into_id IS NULL`,
+          ),
         )
         .orderBy(desc(schema.customerScores.score))
         .limit(10);
@@ -214,6 +233,7 @@ export default async function RelatoriosPage({
         cancelled: appts?.cancelled ?? 0,
         upcoming: appts?.upcoming ?? 0,
         showedValue: appts?.showedValue ?? "0",
+        showedBillable: appts?.showedBillable ?? 0,
         cmv: cmv?.total ?? "0",
         hasStock: Boolean(hasStock),
         topProcedures,
@@ -227,7 +247,8 @@ export default async function RelatoriosPage({
 
   const finished = data.showed + data.noShow;
   const showRate = finished > 0 ? Math.round((data.showed / finished) * 100) : null;
-  const ticket = data.showed > 0 ? Number(data.showedValue ?? 0) / data.showed : null;
+  const ticket =
+    data.showedBillable > 0 ? Number(data.showedValue ?? 0) / data.showedBillable : null;
   const quoteRate =
     data.quotesSent > 0 ? Math.round((data.quotesAccepted / data.quotesSent) * 100) : null;
   const maxProcCount = Math.max(1, ...data.topProcedures.map((p) => p.count));
@@ -277,7 +298,7 @@ export default async function RelatoriosPage({
         <Card
           label="Ticket médio"
           value={ticket === null ? "—" : formatBRL(ticket)}
-          hint="por atendimento realizado"
+          hint="por atendimento avulso (sessões de pacote fora)"
         />
         {data.hasStock ? (
           <Card

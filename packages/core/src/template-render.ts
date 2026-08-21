@@ -51,6 +51,22 @@ export function unknownVariables(template: string): string[] {
   );
 }
 
+/**
+ * Placeholders "tortos" que o render NÃO substituiria e sairiam literais na
+ * mensagem ({{Nome}}, {{ NOME }}, {{nome cliente}}, {{clínica}} com acento...).
+ * Todo save de template deve rejeitá-los — mensagem com {{...}} cru entrega
+ * que é um sistema.
+ */
+export function strayPlaceholders(template: string): string[] {
+  const anyBraces = /\{\{\s*([^{}]*?)\s*\}\}/g;
+  const stray = new Set<string>();
+  for (const match of template.matchAll(anyBraces)) {
+    const inner = match[1]!;
+    if (!/^[a-z_]+$/.test(inner)) stray.add(inner);
+  }
+  return [...stray];
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")

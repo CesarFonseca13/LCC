@@ -3,7 +3,52 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { Button, FieldError, Input, Label, Modal, Select } from "@/components/ui";
-import { confirmReceivable, createPayable, markPayablePaid } from "./actions";
+import { cancelReceivable, confirmReceivable, createPayable, markPayablePaid } from "./actions";
+
+/** Cancela uma conta pendente (lançada errada) com confirmação de 1 passo. */
+export function CancelReceivableButton({ id }: { id: string }) {
+  const router = useRouter();
+  const [confirming, setConfirming] = useState(false);
+  const [pending, startTransition] = useTransition();
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        title="Cancelar esta conta (lançada errada)"
+        onClick={() => setConfirming(true)}
+        className="text-xs text-stone-400 underline-offset-2 hover:text-red-600 hover:underline"
+      >
+        cancelar
+      </button>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs">
+      <button
+        type="button"
+        disabled={pending}
+        onClick={() =>
+          startTransition(async () => {
+            await cancelReceivable({ id });
+            setConfirming(false);
+            router.refresh();
+          })
+        }
+        className="rounded bg-red-50 px-2 py-1 font-medium text-red-600 hover:bg-red-100 disabled:opacity-50"
+      >
+        {pending ? "..." : "Confirmar"}
+      </button>
+      <button
+        type="button"
+        onClick={() => setConfirming(false)}
+        className="text-stone-400 hover:underline"
+      >
+        voltar
+      </button>
+    </span>
+  );
+}
 
 const METHODS = [
   ["pix", "Pix"],

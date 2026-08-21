@@ -134,8 +134,8 @@ export function CreateQuoteButton({
           <div className="space-y-4">
             {success.whatsappSent ? (
               <p className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                ✓ Orçamento enviado pelo WhatsApp! Você será avisada quando a cliente
-                visualizar.
+                ✓ Orçamento enviado pelo WhatsApp! Acompanhe aqui na lista — o status
+                muda para “Visualizado” quando a cliente abrir.
               </p>
             ) : (
               <div className="space-y-2">

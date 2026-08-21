@@ -59,20 +59,42 @@ export default async function ClientePage({
       const customer = customerRows[0];
       if (!customer) return null;
 
-      const history = await tx
-        .select({
-          id: schema.customerHistoryEntries.id,
-          occurredOn: schema.customerHistoryEntries.occurredOn,
-          procedureName: sql<string | null>`COALESCE(
-            (SELECT p2.name FROM procedures p2 WHERE p2.id = customer_history_entries.procedure_id),
-            customer_history_entries.procedure_name
-          )`,
-          amount: schema.customerHistoryEntries.amount,
-          notes: schema.customerHistoryEntries.notes,
-        })
-        .from(schema.customerHistoryEntries)
-        .where(eq(schema.customerHistoryEntries.customerId, id))
-        .orderBy(desc(schema.customerHistoryEntries.occurredOn));
+      // Histórico COMPLETO: atendimentos da agenda (compareceu) ∪ pré-sistema,
+      // sem contar dobrado o mesmo dia (mesma regra do score da Inteligência)
+      const historyRaw = await tx.execute(sql`
+        SELECT id, occurred_on, procedure_name, amount, notes, origem FROM (
+          SELECT a.id::text, (a.starts_at AT TIME ZONE 'America/Sao_Paulo')::date AS occurred_on,
+                 p.name AS procedure_name, a.price AS amount, a.notes, 'agenda' AS origem
+          FROM appointments a
+          LEFT JOIN procedures p ON p.id = a.procedure_id
+          WHERE a.customer_id = ${id} AND a.status = 'showed'
+          UNION ALL
+          SELECT h.id::text, h.occurred_on,
+                 COALESCE((SELECT p2.name FROM procedures p2 WHERE p2.id = h.procedure_id), h.procedure_name),
+                 h.amount, h.notes, 'registro' AS origem
+          FROM customer_history_entries h
+          WHERE h.customer_id = ${id}
+            AND NOT EXISTS (
+              SELECT 1 FROM appointments a2
+              WHERE a2.customer_id = ${id} AND a2.status = 'showed'
+                AND (a2.starts_at AT TIME ZONE 'America/Sao_Paulo')::date = h.occurred_on
+            )
+        ) t ORDER BY occurred_on DESC
+      `);
+      const history = (historyRaw.rows as unknown as {
+        id: string;
+        occurred_on: string;
+        procedure_name: string | null;
+        amount: string | null;
+        notes: string | null;
+        origem: string;
+      }[]).map((r) => ({
+        id: r.id,
+        occurredOn: r.occurred_on,
+        procedureName: r.procedure_name,
+        amount: r.amount,
+        notes: r.notes,
+      }));
 
       const latestAnamnesis = (
         await tx

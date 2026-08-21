@@ -7,7 +7,12 @@ import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
 import { DeleteRuleButton, PayCommissionsButton, RuleButton } from "./commissions-client";
-import { PayableFormButton, PayButton, ReceiveButton } from "./finance-client";
+import {
+  CancelReceivableButton,
+  PayableFormButton,
+  PayButton,
+  ReceiveButton,
+} from "./finance-client";
 
 export const metadata = { title: "Financeiro" };
 
@@ -54,7 +59,7 @@ export default async function FinanceiroPage({
           ? "comissoes"
           : "geral";
   const hoje = todayISO("America/Sao_Paulo");
-  const monthISO = /^\d{4}-\d{2}$/.test(sp.m ?? "") ? sp.m! : hoje.slice(0, 7);
+  const monthISO = /^\d{4}-(0[1-9]|1[0-2])$/.test(sp.m ?? "") ? sp.m! : hoje.slice(0, 7);
   const { start, end } = monthRange(monthISO);
 
   const data = await withTenant(
@@ -91,6 +96,9 @@ export default async function FinanceiroPage({
           )
       )[0];
 
+      // Visão geral: o MÊS selecionado (vencimento ou recebimento dentro dele).
+      // A receber: TODAS as pendentes, da mais antiga para a mais nova — conta
+      // atrasada de outro mês nunca some da lista.
       const receivablesList = await tx
         .select({
           id: schema.receivables.id,
@@ -102,9 +110,31 @@ export default async function FinanceiroPage({
           receivedAt: schema.receivables.receivedAt,
         })
         .from(schema.receivables)
-        .where(sql`${schema.receivables.status} <> 'cancelled'`)
+        .where(
+          and(
+            sql`${schema.receivables.status} <> 'cancelled'`,
+            sql`(
+              (${schema.receivables.dueDate} BETWEEN ${start} AND ${end})
+              OR (${schema.receivables.receivedAt} BETWEEN ${start} AND ${end})
+            )`,
+          ),
+        )
         .orderBy(desc(schema.receivables.dueDate))
-        .limit(100);
+        .limit(200);
+      const pendingList = await tx
+        .select({
+          id: schema.receivables.id,
+          description: schema.receivables.description,
+          netAmount: schema.receivables.netAmount,
+          dueDate: schema.receivables.dueDate,
+          status: schema.receivables.status,
+          method: schema.receivables.method,
+          receivedAt: schema.receivables.receivedAt,
+        })
+        .from(schema.receivables)
+        .where(eq(schema.receivables.status, "pending"))
+        .orderBy(schema.receivables.dueDate)
+        .limit(300);
 
       const payablesList = await tx
         .select({
@@ -184,6 +214,7 @@ export default async function FinanceiroPage({
         pendingCount: pending?.count ?? 0,
         expenses: expensesPaid?.total ?? "0",
         receivablesList,
+        pendingList,
         payablesList,
         commissionEntries,
         commissionRules,
@@ -353,11 +384,7 @@ export default async function FinanceiroPage({
           )
         ) : (
           <ReceivablesTable
-            list={
-              tab === "receber"
-                ? data.receivablesList.filter((r) => r.status === "pending")
-                : data.receivablesList
-            }
+            list={tab === "receber" ? data.pendingList : data.receivablesList}
             hoje={hoje}
             canWrite={canWrite}
             emptyText={
@@ -591,7 +618,12 @@ function ReceivablesTable({
                 </td>
                 {canWrite ? (
                   <td className="px-4 py-3 text-right">
-                    {r.status === "pending" ? <ReceiveButton id={r.id} /> : null}
+                    {r.status === "pending" ? (
+                      <span className="inline-flex items-center gap-2">
+                        <ReceiveButton id={r.id} />
+                        <CancelReceivableButton id={r.id} />
+                      </span>
+                    ) : null}
                   </td>
                 ) : null}
               </tr>

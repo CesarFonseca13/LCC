@@ -274,33 +274,49 @@ async function applyShowedEffects(
   await applyCommission(tx, clinicId, appointment);
 
   if (appointment.customerPackageId) {
-    // Sessão de pacote (pré-paga): debita, nunca cobra de novo
-    const inserted = await tx
-      .insert(schema.packageSessionUses)
-      .values({
+    // Sessão de pacote (pré-paga): débito ATÔMICO com guarda — pacote esgotado,
+    // vencido ou cancelado NÃO cobre a sessão; o atendimento vira cobrança avulsa
+    // (nunca sai de graça em silêncio)
+    const alreadyUsed = (
+      await tx
+        .select({ id: schema.packageSessionUses.id })
+        .from(schema.packageSessionUses)
+        .where(eq(schema.packageSessionUses.appointmentId, appointment.id))
+        .limit(1)
+    )[0];
+    if (alreadyUsed) return;
+
+    const [pkg] = await tx
+      .update(schema.customerPackages)
+      .set({ sessionsUsed: sql`${schema.customerPackages.sessionsUsed} + 1` })
+      .where(
+        and(
+          eq(schema.customerPackages.id, appointment.customerPackageId),
+          eq(schema.customerPackages.status, "active"),
+          sql`${schema.customerPackages.sessionsUsed} < ${schema.customerPackages.sessionsTotal}`,
+          sql`(${schema.customerPackages.expiresAt} IS NULL OR ${schema.customerPackages.expiresAt} >= current_date)`,
+        ),
+      )
+      .returning({
+        sessionsUsed: schema.customerPackages.sessionsUsed,
+        sessionsTotal: schema.customerPackages.sessionsTotal,
+      });
+
+    if (pkg) {
+      await tx.insert(schema.packageSessionUses).values({
         clinicId,
         customerPackageId: appointment.customerPackageId,
         appointmentId: appointment.id,
-      })
-      .onConflictDoNothing()
-      .returning({ id: schema.packageSessionUses.id });
-    if (inserted[0]) {
-      const [pkg] = await tx
-        .update(schema.customerPackages)
-        .set({ sessionsUsed: sql`${schema.customerPackages.sessionsUsed} + 1` })
-        .where(eq(schema.customerPackages.id, appointment.customerPackageId))
-        .returning({
-          sessionsUsed: schema.customerPackages.sessionsUsed,
-          sessionsTotal: schema.customerPackages.sessionsTotal,
-        });
-      if (pkg && pkg.sessionsUsed >= pkg.sessionsTotal) {
+      });
+      if (pkg.sessionsUsed >= pkg.sessionsTotal) {
         await tx
           .update(schema.customerPackages)
           .set({ status: "completed" })
           .where(eq(schema.customerPackages.id, appointment.customerPackageId));
       }
+      return;
     }
-    return;
+    // Pacote não cobre: segue para a cobrança avulsa abaixo
   }
 
   const price = appointment.price ? Number(appointment.price) : 0;
@@ -618,14 +634,20 @@ export const changeAppointmentStatus = authAction({
       };
     }
 
-    await tx
+    // Trava otimista: só muda se o status ainda for o que acabamos de validar
+    // (duas pessoas clicando junto não deixam cobrança/estoque/comissão órfãos)
+    const updated = await tx
       .update(schema.appointments)
       .set({
         status: input.to,
         statusChangedAt: new Date(),
         cancelReason: input.to === "cancelled" ? (input.reason ?? null) : undefined,
       })
-      .where(eq(schema.appointments.id, input.id));
+      .where(and(eq(schema.appointments.id, input.id), eq(schema.appointments.status, current)))
+      .returning({ id: schema.appointments.id });
+    if (!updated[0]) {
+      return { ok: false, error: "O status mudou agora mesmo em outra tela — recarregue." };
+    }
 
     await tx.insert(schema.appointmentStatusHistory).values({
       clinicId: auth.clinicId,

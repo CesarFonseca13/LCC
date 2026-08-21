@@ -59,7 +59,10 @@ export default async function EquipePage({
           userEmail: schema.users.email,
         })
         .from(schema.clinicMembers)
-        .innerJoin(schema.users, eq(schema.users.id, schema.clinicMembers.userId));
+        .innerJoin(schema.users, eq(schema.users.id, schema.clinicMembers.userId))
+        // Filtro explícito: a policy de clinic_members também libera "OR user_id =
+        // usuário atual", o que traria vínculos da mesma pessoa em OUTRAS clínicas
+        .where(eq(schema.clinicMembers.clinicId, auth.clinicId!));
       const rooms = await tx.select().from(schema.rooms).orderBy(schema.rooms.name);
       return { professionals, members, rooms };
     },

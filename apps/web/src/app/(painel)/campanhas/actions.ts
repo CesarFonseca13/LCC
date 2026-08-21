@@ -3,7 +3,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { extractVariables } from "@clinicaos/core/template-render";
+import { extractVariables, strayPlaceholders } from "@clinicaos/core/template-render";
 import { schema } from "@clinicaos/db";
 import type { Tx } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
@@ -27,6 +27,13 @@ const segmentSchema = z.object({
 });
 
 type Segment = z.infer<typeof segmentSchema>;
+
+/** O que fica gravado em campaigns.segment (JÁ transformado — nunca re-passe no schema do form). */
+const storedSegmentSchema = z.object({
+  status: z.enum(["todas", "active", "lead"]),
+  procedureId: z.string().uuid().nullable().catch(null),
+  semVisitaDias: z.number().int().positive().nullable().catch(null),
+});
 
 const ALLOWED_VARS = new Set(["nome", "clinica"]);
 
@@ -100,14 +107,12 @@ export const createCampaign = authAction({
         error: `Use só {{nome}} e {{clinica}} (${invalid.map((v) => `{{${v}}}`).join(", ")} não existe aqui)`,
       };
     }
-    // {{Nome}} maiúsculo não seria substituído e sairia LITERAL para toda a base
-    const badCase = [...input.messageTemplate.matchAll(/\{\{\s*([A-Za-z_]+)\s*\}\}/g)]
-      .map((m) => m[1]!)
-      .filter((v) => v !== v.toLowerCase());
-    if (badCase.length > 0) {
+    // {{Nome}}/{{ NOME }}/acentos não seriam substituídos e sairiam LITERAIS
+    const stray = strayPlaceholders(input.messageTemplate);
+    if (stray.length > 0) {
       return {
         ok: false,
-        error: `Escreva em minúsculas: ${badCase.map((v) => `{{${v.toLowerCase()}}}`).join(", ")}`,
+        error: `Escreva as variáveis em minúsculas e sem acento: ${stray.map((v) => `{{${v}}}`).join(", ")} sairia literal na mensagem`,
       };
     }
     const count = await countSegment(tx, input.segment);
@@ -153,7 +158,7 @@ export const startCampaign = authAction({
 
     // Congela a lista de destinatárias agora; no envio o worker ainda revalida
     // bloqueio/opt-out e pula quem visitou depois do início
-    const segment = segmentSchema.parse(campaign.segment);
+    const segment = storedSegmentSchema.parse(campaign.segment);
     await tx.execute(sql`
       INSERT INTO campaign_recipients (clinic_id, campaign_id, customer_id)
       SELECT ${auth.clinicId}, ${input.id}, customers.id
@@ -190,7 +195,18 @@ export const deleteCampaign = authAction({
   permission: "automations.manage",
   schema: z.object({ id: z.string().uuid() }),
   handler: async (input, { tx }): Promise<CampaignResult> => {
-    // Só rascunho ou cancelada — histórico de envio real nunca é apagado
+    // Excluir apaga os recipients por CASCADE — se JÁ HOUVE envio, o registro
+    // fica (senão o teto diário do número zeraria e permitiria enviar em dobro)
+    const sent = await tx.execute(sql`
+      SELECT 1 FROM campaign_recipients
+      WHERE campaign_id = ${input.id} AND status = 'sent' LIMIT 1
+    `);
+    if ((sent.rowCount ?? 0) > 0) {
+      return {
+        ok: false,
+        error: "Essa campanha já enviou mensagens — o histórico fica guardado (cancele em vez de excluir).",
+      };
+    }
     const deleted = await tx
       .delete(schema.campaigns)
       .where(

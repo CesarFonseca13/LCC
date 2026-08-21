@@ -109,6 +109,30 @@ export async function bookOnline(rawInput: unknown): Promise<BookResult> {
     )[0];
     if (!procedure) return { ok: false, error: "Procedimento indisponível." };
 
+    // O slotId vem do navegador da cliente: NUNCA confie nele. A profissional
+    // precisa ser DESTA clínica e estar ativa, e o horário tem que existir de
+    // verdade na janela de oferta (nada de gravar em agenda alheia ou às 3h).
+    const professional = (
+      await tx
+        .select({ id: schema.professionals.id })
+        .from(schema.professionals)
+        .where(
+          and(
+            eq(schema.professionals.id, slot.professionalId),
+            eq(schema.professionals.clinicId, clinic.id),
+            eq(schema.professionals.active, true),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!professional) {
+      return { ok: false, error: "Esse horário não está mais disponível.", conflict: true };
+    }
+    const validSlots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 60);
+    if (!validSlots.some((s) => s.slotId === input.slotId)) {
+      return { ok: false, error: "Esse horário acabou de ser preenchido 😅", conflict: true };
+    }
+
     // Cliente: reaproveita a ficha pelo telefone (nunca duplica)
     let customer = (
       await tx

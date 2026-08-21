@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import {
@@ -360,9 +360,32 @@ export const importCustomersCsv = authAction({
       }
       knownPhones.add(phone);
 
+      // Data/valor torto NUNCA some em silêncio: a linha entra, mas o aviso
+      // aparece no resultado (a dona corrige a planilha em vez de perder histórico)
       const lastVisitISO = brDateToISO(get("ultima_visita"));
+      if (get("ultima_visita") && !lastVisitISO) {
+        skipped.push({
+          line,
+          name,
+          reason: `cadastrada SEM histórico — última visita "${get("ultima_visita")}" não está em dd/mm/aaaa`,
+        });
+      }
       const birthISO = brDateToISO(get("nascimento"));
+      if (get("nascimento") && !birthISO) {
+        skipped.push({
+          line,
+          name,
+          reason: `nascimento "${get("nascimento")}" ignorado — use dd/mm/aaaa`,
+        });
+      }
       const amount = parseBRLDecimal(get("total_gasto"));
+      if (get("total_gasto") && amount === null) {
+        skipped.push({
+          line,
+          name,
+          reason: `total gasto "${get("total_gasto")}" ignorado — use 1234,56`,
+        });
+      }
 
       const [created] = await tx
         .insert(schema.customers)
@@ -441,6 +464,21 @@ export const assignPackage = authAction({
       })
       .returning({ id: schema.customerPackages.id });
     if (!customerPackage) return { ok: false, error: "Falha ao atribuir o pacote." };
+
+    // Agendamentos FUTUROS do mesmo procedimento passam a ser cobertos pelo
+    // pacote (senão o Compareceu cobraria avulso E não debitaria a sessão)
+    await tx
+      .update(schema.appointments)
+      .set({ customerPackageId: customerPackage.id })
+      .where(
+        and(
+          eq(schema.appointments.customerId, input.customerId),
+          eq(schema.appointments.procedureId, item.procedureId),
+          inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+          sql`${schema.appointments.startsAt} > now()`,
+          sql`${schema.appointments.customerPackageId} IS NULL`,
+        ),
+      );
 
     // Venda do pacote → conta a receber (categoria Pacotes)
     let category = (
@@ -541,6 +579,49 @@ export const mergeCustomers = authAction({
       VALUES (${auth.clinicId}, ${input.targetId}, ${source.phone}, 'mesclado')
       ON CONFLICT DO NOTHING
     `);
+    // NADA fica preso na ficha arquivada: TODA tabela que aponta para customers
+    // migra junto (agendamentos, pacotes pagos, contas, conversas, documentos,
+    // orçamentos, comissões, aprovações, runs de automação)
+    for (const table of [
+      "appointments",
+      "receivables",
+      "customer_packages",
+      "quotes",
+      "documents",
+      "commission_entries",
+      "approvals",
+    ] as const) {
+      await tx.execute(
+        sql`UPDATE ${sql.raw(table)} SET customer_id = ${input.targetId} WHERE customer_id = ${input.sourceId}`,
+      );
+    }
+    await tx.execute(sql`
+      UPDATE conversations SET customer_id = ${input.targetId} WHERE customer_id = ${input.sourceId}
+    `);
+    // Reativação viva na duplicata morre (a principal pode ter a dela — índice único)
+    await tx.execute(sql`
+      UPDATE automation_runs SET status = 'cancelled', stop_reason = 'ficha mesclada',
+             finished_at = now(), next_run_at = NULL
+      WHERE customer_id = ${input.sourceId} AND status IN ('active', 'processing', 'paused')
+    `);
+    await tx.execute(sql`
+      UPDATE automation_runs SET customer_id = ${input.targetId} WHERE customer_id = ${input.sourceId}
+    `);
+    // Destinatárias de campanha: migra sem duplicar (unique campanha+cliente)
+    await tx.execute(sql`
+      UPDATE campaign_recipients r SET customer_id = ${input.targetId}
+      WHERE r.customer_id = ${input.sourceId}
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_recipients r2
+          WHERE r2.campaign_id = r.campaign_id AND r2.customer_id = ${input.targetId}
+        )
+    `);
+    await tx.execute(sql`
+      DELETE FROM campaign_recipients WHERE customer_id = ${input.sourceId}
+    `);
+    // Score da duplicata some (o recálculo cobre a principal)
+    await tx.execute(sql`DELETE FROM customer_scores WHERE customer_id = ${input.sourceId}`);
+
     // Funil: negociações fechadas migram; a aberta migra só se a principal
     // não tiver outra aberta (senão encerra como mesclada — nunca duplica card)
     await tx.execute(sql`

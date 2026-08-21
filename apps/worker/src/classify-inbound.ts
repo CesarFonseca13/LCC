@@ -278,7 +278,8 @@ async function confirmAppointment(
       )
       .limit(1)
   )[0];
-  const replyEnabled = setting?.enabled ?? true; // respostas reativas: ligadas por default
+  // A verdade é o que a dona VÊ no card de Automações (desligada sem registro)
+  const replyEnabled = setting?.enabled ?? false;
   if (!replyEnabled) {
     logger.info({ appointmentId }, "confirmado via WhatsApp (resposta automática desligada)");
     return;

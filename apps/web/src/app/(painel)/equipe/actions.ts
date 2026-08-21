@@ -91,6 +91,7 @@ export const createMember = authAction({
     let userId: string;
     let tempPassword: string | undefined;
     let info: string | undefined;
+    let createdNewUser = false;
 
     if (existing[0]) {
       userId = existing[0].id;
@@ -101,9 +102,11 @@ export const createMember = authAction({
       const [created] = await globalDb
         .insert(schema.users)
         .values({ name: input.name, email: input.email, passwordHash })
+        .onConflictDoNothing()
         .returning({ id: schema.users.id });
-      if (!created) return { ok: false, error: "Falha ao criar o usuário." };
+      if (!created) return { ok: false, error: "Falha ao criar o usuário — tente de novo." };
       userId = created.id;
+      createdNewUser = true;
     }
 
     try {
@@ -114,6 +117,10 @@ export const createMember = authAction({
         professionalId: input.professionalId,
       });
     } catch (err) {
+      // users é global e foi criado fora desta transação: sem vínculo, limpa o órfão
+      if (createdNewUser) {
+        await globalDb.delete(schema.users).where(eq(schema.users.id, userId));
+      }
       if (String(err).includes("clinic_members_clinic_user_uq")) {
         return { ok: false, error: "Essa pessoa já tem acesso a esta clínica." };
       }
@@ -143,6 +150,13 @@ export const toggleMemberActive = authAction({
       .update(schema.clinicMembers)
       .set({ active: input.active })
       .where(eq(schema.clinicMembers.id, input.id));
+
+    // Desativar acesso derruba as sessões vivas AGORA (não em 30 dias)
+    if (!input.active && rows[0]?.userId) {
+      await unsafeGlobalDb()
+        .delete(schema.authSessions)
+        .where(eq(schema.authSessions.userId, rows[0].userId));
+    }
     revalidatePath("/equipe");
     return { ok: true };
   },

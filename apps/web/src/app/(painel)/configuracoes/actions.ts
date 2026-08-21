@@ -55,20 +55,31 @@ export const setupWhatsApp = authAction({
       }
     }
 
-    try {
+    // Linha órfã (registrada aqui mas não na Evolution) não pode travar para
+    // sempre: se o connect falhar, recria a instância na Evolution e tenta de novo
+    const webhookUrl = `${appUrl}/api/webhooks/evolution/${name}?token=${token}`;
+    const tryConnect = async () => {
       const qr = await evolution.connect(name!);
       await tx
         .update(schema.whatsappInstances)
         .set({ qrCode: qr.base64 ?? null, status: "qr_pending" })
         .where(eq(schema.whatsappInstances.evolutionInstanceName, name!));
       revalidatePath("/configuracoes");
-      return { ok: true, status: "qr_pending", qrCode: qr.base64 ?? null };
-    } catch (err) {
-      return {
-        ok: false,
-        error:
-          "Não foi possível falar com o serviço de WhatsApp. Confira se a Evolution API está no ar.",
-      };
+      return { ok: true, status: "qr_pending", qrCode: qr.base64 ?? null } as WhatsAppState;
+    };
+    try {
+      return await tryConnect();
+    } catch {
+      try {
+        await evolution.createInstance({ instanceName: name!, webhookUrl });
+        return await tryConnect();
+      } catch {
+        return {
+          ok: false,
+          error:
+            "Não foi possível falar com o serviço de WhatsApp. Confira se a Evolution API está no ar.",
+        };
+      }
     }
   },
 });

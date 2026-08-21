@@ -2,7 +2,9 @@ import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { todayISO, utcToZoned, zonedToUtc, addDaysISO } from "@clinicaos/core/timezone";
+import { can } from "@clinicaos/core/permissions";
 import { schema, withTenant } from "@clinicaos/db";
+import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { QuickStatusButtons } from "./quick-status";
 
@@ -22,8 +24,22 @@ const STATUS_CHIP: Record<string, { label: string; className: string }> = {
 
 export default async function InicioPage() {
   const auth = await requireAuth();
-  if (!auth.clinicId) return null;
+  if (!auth.clinicId || !auth.role) return null;
   const primeiroNome = auth.userName.split(" ")[0];
+
+  // Papel Profissional vê só a própria agenda — o painel geral é da administração
+  if (!can(auth.role, "agenda.read.all")) {
+    return (
+      <div className="p-8">
+        <h1 className="text-xl font-semibold text-stone-800">
+          {saudacao(new Date().getHours())}, {primeiroNome}!
+        </h1>
+        <div className="mt-6 max-w-lg">
+          <EmptyState title="O painel geral da clínica é visível para a administração e a recepção. Em breve, sua agenda pessoal aparece aqui — por enquanto, fale com a recepção para ver seus horários do dia." />
+        </div>
+      </div>
+    );
+  }
 
   const data = await withTenant(
     auth.clinicId,
@@ -105,13 +121,21 @@ export default async function InicioPage() {
         .select({ id: schema.procedures.id, name: schema.procedures.name })
         .from(schema.procedures);
 
-      // "O que as automações fizeram hoje"
+      // "O que as automações fizeram hoje" — números HONESTOS:
+      // lembretes = só mensagens de cadência de confirmação; confirmações = só
+      // as que a PRÓPRIA cliente respondeu no WhatsApp (1 por agendamento)
       const sentToday = await tx
         .select({ count: sql<number>`count(*)::int` })
         .from(schema.messages)
         .where(
           and(
             eq(schema.messages.author, "automation"),
+            inArray(schema.messages.automationId, [
+              "reminder_24h",
+              "confirm_2h",
+              "reminder_45min",
+              "pre_care",
+            ]),
             inArray(schema.messages.status, ["sent", "delivered", "read"]),
             gte(schema.messages.sentAt, dayStart),
           ),
@@ -121,12 +145,13 @@ export default async function InicioPage() {
         .from(schema.approvals)
         .where(eq(schema.approvals.status, "pending"));
       const confirmedByCadence = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(schema.automationRuns)
+        .select({ count: sql<number>`count(DISTINCT appointment_id)::int` })
+        .from(schema.appointmentStatusHistory)
         .where(
           and(
-            eq(schema.automationRuns.status, "goal_reached"),
-            gte(schema.automationRuns.finishedAt, dayStart),
+            eq(schema.appointmentStatusHistory.toStatus, "confirmed"),
+            eq(schema.appointmentStatusHistory.source, "customer_whatsapp"),
+            gte(schema.appointmentStatusHistory.createdAt, dayStart),
           ),
         );
 

@@ -45,10 +45,13 @@ export async function signDocument(rawInput: unknown): Promise<SignResult> {
   }
 
   const headerStore = await headers();
-  const ip =
+  const rawIp =
     headerStore.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     headerStore.get("x-real-ip") ||
-    "127.0.0.1";
+    "";
+  // Coluna é inet: lixo no header ("unknown", vazio) NUNCA pode travar a assinatura
+  const ipPattern = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-fA-F:]+)$/;
+  const ip = ipPattern.test(rawIp) ? rawIp : null;
   const userAgent = headerStore.get("user-agent") ?? "desconhecido";
 
   return withContext({ signToken: input.token }, async (tx) => {

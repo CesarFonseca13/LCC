@@ -292,7 +292,12 @@ export const convertQuote = authAction({
     )[0];
     const hoje = todayISO("America/Sao_Paulo");
 
-    // Pacotes do orçamento viram pacotes da cliente (sem conta própria — o total cobre)
+    // Pacotes do orçamento viram pacotes da cliente (sem conta própria — o total cobre).
+    // O desconto do orçamento é RATEADO no preço pago do pacote: comissão por
+    // sessão e renovação enxergam o valor que a cliente pagou de verdade.
+    const subtotalNum = Number(quote.subtotal);
+    const discountFactor =
+      subtotalNum > 0 ? 1 - Number(quote.discountAmount ?? 0) / subtotalNum : 1;
     for (const item of items) {
       if (item.kind !== "package" || !item.packageId) continue;
       const pkg = (
@@ -317,7 +322,7 @@ export const convertQuote = authAction({
           packageId: pkg.id,
           procedureId: pkgItem.procedureId,
           sessionsTotal: pkgItem.sessions,
-          pricePaid: item.unitPrice,
+          pricePaid: (Number(item.unitPrice) * discountFactor).toFixed(2),
           purchasedAt: hoje,
           expiresAt: pkg.validityDays ? addDaysISO(hoje, pkg.validityDays) : null,
           createdBy: auth.userId,

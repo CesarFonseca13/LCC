@@ -1,6 +1,8 @@
 import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { can } from "@clinicaos/core/permissions";
 import { addDaysISO, todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
+import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { AgendaView, type AgendaData } from "./agenda-view";
 
@@ -30,7 +32,19 @@ export default async function AgendaPage({
   searchParams: Promise<{ view?: string; date?: string; prof?: string }>;
 }) {
   const auth = await requireAuth();
-  if (!auth.clinicId) return null;
+  if (!auth.clinicId || !auth.role) return null;
+
+  if (!can(auth.role, "agenda.read.all")) {
+    return (
+      <div className="p-8">
+        <h1 className="text-xl font-semibold text-stone-800">Agenda</h1>
+        <div className="mt-6">
+          <EmptyState title="A agenda completa da clínica é visível para a administração e a recepção. A sua agenda pessoal chega em breve — por enquanto, confira seus horários com a recepção." />
+        </div>
+      </div>
+    );
+  }
+
   const sp = await searchParams;
 
   const data = await withTenant(

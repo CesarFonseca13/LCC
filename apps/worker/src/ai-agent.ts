@@ -548,6 +548,33 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
     return;
   }
 
+  // Releitura AO VIVO antes de falar: se uma humana assumiu a conversa (takeover)
+  // ou a cliente mandou mensagem nova durante o turno, a resposta é descartada —
+  // a IA nunca fala por cima de ninguém
+  const live = (
+    await db
+      .select({
+        mode: schema.conversations.mode,
+        lastInboundAt: schema.conversations.lastInboundAt,
+      })
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, conversation.id))
+      .limit(1)
+  )[0];
+  if (
+    !live ||
+    live.mode !== "ai" ||
+    (live.lastInboundAt &&
+      conversation.lastInboundAt &&
+      live.lastInboundAt > conversation.lastInboundAt)
+  ) {
+    logger.info(
+      { conversationId: conversation.id, mode: live?.mode },
+      "turno da IA descartado (takeover ou nova mensagem durante o turno)",
+    );
+    return;
+  }
+
   // Balões: espaçados 2.5–5s entre si (nunca rajada)
   let offset = 2_000 + Math.floor(Math.random() * 3_000);
   for (const balloon of reply.balloons) {

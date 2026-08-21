@@ -19,6 +19,30 @@ export interface LoginState {
   email?: string;
 }
 
+/**
+ * Anti força bruta simples (processo único da VPS): 10 tentativas por e-mail
+ * a cada 15 minutos. Em memória — reinício do processo zera, o que é aceitável
+ * para o formulário de login (a senha continua argon2id).
+ */
+const attempts = new Map<string, { count: number; resetAt: number }>();
+const MAX_ATTEMPTS = 10;
+const WINDOW_MS = 15 * 60_000;
+
+function tooManyAttempts(key: string): boolean {
+  const now = Date.now();
+  const entry = attempts.get(key);
+  if (!entry || entry.resetAt < now) {
+    attempts.set(key, { count: 1, resetAt: now + WINDOW_MS });
+    return false;
+  }
+  entry.count++;
+  if (attempts.size > 5_000) attempts.clear();
+  return entry.count > MAX_ATTEMPTS;
+}
+
+/** Hash de referência: e-mail inexistente custa o MESMO tempo que senha errada. */
+const DUMMY_HASH_PROMISE = argon2.hash("clinicaos-timing-shield");
+
 export async function loginAction(
   _prev: LoginState,
   formData: FormData,
@@ -35,6 +59,13 @@ export async function loginAction(
     };
   }
 
+  if (tooManyAttempts(parsed.data.email.toLowerCase())) {
+    return {
+      error: "Muitas tentativas — aguarde alguns minutos e tente de novo.",
+      email: typedEmail,
+    };
+  }
+
   const db = unsafeGlobalDb();
   const users = await db
     .select()
@@ -43,12 +74,12 @@ export async function loginAction(
     .limit(1);
 
   const user = users[0];
-  // Mensagem única para e-mail inexistente e senha errada (não vaza quem tem conta)
+  // Mensagem única E custo de tempo único para e-mail inexistente e senha errada
+  // (nem a mensagem nem o relógio entregam quem tem conta)
   const genericError = { error: "E-mail ou senha incorretos", email: typedEmail };
-  if (!user?.passwordHash) return genericError;
-
-  const valid = await argon2.verify(user.passwordHash, parsed.data.password);
-  if (!valid) return genericError;
+  const hashToCheck = user?.passwordHash ?? (await DUMMY_HASH_PROMISE);
+  const valid = await argon2.verify(hashToCheck, parsed.data.password);
+  if (!user?.passwordHash || !valid) return genericError;
 
   const headerStore = await headers();
   await createSession(user.id, {

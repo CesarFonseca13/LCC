@@ -120,6 +120,15 @@ export const getAuth = cache(async (): Promise<AuthContext | null> => {
     );
     role = (member[0]?.role as Role | undefined) ?? null;
     clinicName = member[0]?.clinicName ?? null;
+
+    // Vínculo desativado/removido = acesso REVOGADO na hora: a sessão morre
+    // (funcionária demitida não continua vendo a clínica por 30 dias)
+    if (!role) {
+      await unsafeGlobalDb()
+        .delete(schema.authSessions)
+        .where(eq(schema.authSessions.id, row.sessionId));
+      return null;
+    }
   }
 
   return {

@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { addDaysISO, todayISO } from "@clinicaos/core/timezone";
@@ -15,7 +15,11 @@ export interface StockResult {
 
 const qty = (label: string) =>
   z.string().transform((v, ctx) => {
-    const n = Number(v.replace(",", "."));
+    // Formato pt-BR completo: "1.000" é MIL, "1.000,50" também funciona
+    // (Number("1.000") daria 1 e o estoque sairia 1000x menor)
+    const negative = v.trim().startsWith("-");
+    const parsed = parseBRLDecimal(v.replace("-", ""));
+    const n = parsed === null ? NaN : Number(parsed) * (negative ? -1 : 1);
     if (!Number.isFinite(n) || Math.abs(n) > 100_000) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: label });
       return z.NEVER;
@@ -47,6 +51,16 @@ export const createStockItem = authAction({
   schema: itemSchema,
   handler: async (input, { auth, tx }): Promise<StockResult> => {
     if (input.minQuantity < 0) return { ok: false, error: "Mínimo não pode ser negativo." };
+    // "toxina" e "Toxina" são o mesmo item para a dona — evita duplicata de caixa
+    const similar = await tx.execute(sql`
+      SELECT name FROM stock_items WHERE lower(name) = lower(${input.name}) LIMIT 1
+    `);
+    if ((similar.rowCount ?? 0) > 0) {
+      return {
+        ok: false,
+        error: `Já existe o item "${(similar.rows[0] as { name: string }).name}" — use ele ou escolha outro nome.`,
+      };
+    }
     const [created] = await tx
       .insert(schema.stockItems)
       .values({
@@ -107,6 +121,21 @@ export const createStockMovement = authAction({
         .limit(1)
     )[0];
     if (!item) return { ok: false, error: "Item não encontrado." };
+
+    // Saída maior que o saldo: avisa em vez de deixar o estoque negativo mudo
+    if (signed < 0) {
+      const balance = await tx.execute(sql`
+        SELECT COALESCE(sum(quantity), 0) AS n FROM stock_movements
+        WHERE stock_item_id = ${item.id}
+      `);
+      const current = Number((balance.rows[0] as { n: string }).n);
+      if (current + signed < 0) {
+        return {
+          ok: false,
+          error: `Saldo atual é ${current} — não dá para tirar ${Math.abs(signed)}. Confira a quantidade ou lance um ajuste de entrada antes.`,
+        };
+      }
+    }
 
     await tx.insert(schema.stockMovements).values({
       clinicId: auth.clinicId,

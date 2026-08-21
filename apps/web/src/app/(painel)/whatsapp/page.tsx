@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import Link from "next/link";
+import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
 import { utcToZoned } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
@@ -25,7 +26,19 @@ export default async function WhatsAppPage({
   searchParams: Promise<{ c?: string; f?: string }>;
 }) {
   const auth = await requireAuth();
-  if (!auth.clinicId) return null;
+  if (!auth.clinicId || !auth.role) return null;
+
+  if (!can(auth.role, "inbox.access")) {
+    return (
+      <div className="p-8">
+        <h1 className="text-xl font-semibold text-stone-800">WhatsApp</h1>
+        <div className="mt-6">
+          <EmptyState title="O inbox do WhatsApp é operado pela administração e pela recepção." />
+        </div>
+      </div>
+    );
+  }
+
   const sp = await searchParams;
   const filter: Filter = (FILTERS.find(([k]) => k === sp.f)?.[0] ?? "todas") as Filter;
 
@@ -98,8 +111,10 @@ export default async function WhatsAppPage({
           .select()
           .from(schema.messages)
           .where(eq(schema.messages.conversationId, selected.id))
-          .orderBy(asc(schema.messages.createdAt))
+          // As 200 mais RECENTES (senão conversa longa nunca mostra o presente)
+          .orderBy(desc(schema.messages.createdAt))
           .limit(200);
+        messages.reverse();
         thread = messages.map((m) => ({
           id: m.id,
           direction: m.direction,

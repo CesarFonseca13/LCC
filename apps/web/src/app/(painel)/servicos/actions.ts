@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { schema } from "@clinicaos/db";
@@ -99,10 +99,37 @@ export const toggleProcedureActive = authAction({
   permission: "catalog.manage",
   schema: z.object({ id: z.string().uuid(), active: z.boolean() }),
   handler: async (input, { tx }): Promise<FormResult> => {
-    await tx
-      .update(schema.procedures)
-      .set({ active: input.active })
-      .where(eq(schema.procedures.id, input.id));
+    // Desativar procedimento que sustenta pacote ativo deixaria sessões PAGAS
+    // impossíveis de agendar — bloqueia com o motivo na cara
+    if (!input.active) {
+      const inPackage = await tx.execute(sql`
+        SELECT pk.name FROM package_items pi
+        JOIN packages pk ON pk.id = pi.package_id AND pk.active
+        WHERE pi.procedure_id = ${input.id}
+        LIMIT 3
+      `);
+      if ((inPackage.rowCount ?? 0) > 0) {
+        const nomes = (inPackage.rows as { name: string }[]).map((r) => r.name).join(", ");
+        return {
+          ok: false,
+          error: `Esse procedimento faz parte do(s) pacote(s) ${nomes} — desative o pacote primeiro (clientes com sessões pagas continuam podendo usar).`,
+        };
+      }
+    }
+    try {
+      await tx
+        .update(schema.procedures)
+        .set({ active: input.active })
+        .where(eq(schema.procedures.id, input.id));
+    } catch (err) {
+      if (String(err).includes("procedures_clinic_name_uq")) {
+        return {
+          ok: false,
+          error: "Já existe outro procedimento ativo com esse nome — renomeie um deles antes de reativar.",
+        };
+      }
+      throw err;
+    }
     revalidatePath("/servicos");
     return { ok: true };
   },
@@ -121,6 +148,16 @@ export const savePackage = authAction({
   permission: "catalog.manage",
   schema: packageSchema,
   handler: async (input, { auth, tx }): Promise<FormResult> => {
+    // O procedimento precisa ser DESTA clínica (RLS filtra; FK sozinha não)
+    const owned = (
+      await tx
+        .select({ id: schema.procedures.id })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.id, input.procedureId))
+        .limit(1)
+    )[0];
+    if (!owned) return { ok: false, error: "Procedimento não encontrado." };
+
     if (input.id) {
       await tx
         .update(schema.packages)

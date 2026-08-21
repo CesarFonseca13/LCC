@@ -263,13 +263,21 @@ async function ensureCustomer(
     )
     .limit(1);
   if (existing[0]) {
-    // Lead que voltou a chamar sem negociação aberta = nova oportunidade no funil
-    // (índice único parcial segura duplicata; conversa em andamento não recria)
+    // Lead que voltou a chamar sem negociação aberta = nova oportunidade no funil.
+    // Cooldown de 7 dias após fechar (perdida hoje não "ressuscita" na mensagem
+    // seguinte da MESMA conversa); índice único parcial segura duplicata.
     if (existing[0].status === "lead") {
-      await db
-        .insert(schema.deals)
-        .values({ clinicId, customerId: existing[0].id, source: "whatsapp", status: "open" })
-        .onConflictDoNothing();
+      await db.execute(sql`
+        INSERT INTO deals (clinic_id, customer_id, source, status)
+        SELECT ${clinicId}, ${existing[0].id}, 'whatsapp', 'open'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM deals d
+          WHERE d.customer_id = ${existing[0].id}
+            AND (d.status = 'open'
+                 OR COALESCE(d.won_at, d.lost_at, d.created_at) > now() - interval '7 days')
+        )
+        ON CONFLICT DO NOTHING
+      `);
     }
     return existing[0].id;
   }

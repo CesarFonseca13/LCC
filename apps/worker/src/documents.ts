@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
 
@@ -15,6 +15,13 @@ export async function processPdfGeneration(logger: Logger): Promise<void> {
   if (!gotenbergUrl) return; // sem Gotenberg configurado, o sweep é inerte
 
   const db = unsafeGlobalDb();
+
+  // Termos com link vencido saem do limbo: viram "expirado" e a dona vê no painel
+  await db.execute(sql`
+    UPDATE documents SET status = 'expired', updated_at = now()
+    WHERE status IN ('sent', 'viewed') AND token_expires_at < now()
+  `);
+
   const pending = await db
     .select()
     .from(schema.documents)
@@ -24,7 +31,16 @@ export async function processPdfGeneration(logger: Logger): Promise<void> {
 
   for (const doc of pending) {
     try {
-      await generatePdf(doc, gotenbergUrl, logger);
+      // Advisory lock: varreduras sobrepostas nunca geram o mesmo PDF em dobro
+      const lock = await db.execute(
+        sql`SELECT pg_try_advisory_lock(hashtext(${`pdf-${doc.id}`})) AS ok`,
+      );
+      if (!(lock.rows[0] as { ok: boolean }).ok) continue;
+      try {
+        await generatePdf(doc, gotenbergUrl, logger);
+      } finally {
+        await db.execute(sql`SELECT pg_advisory_unlock(hashtext(${`pdf-${doc.id}`}))`);
+      }
     } catch (err) {
       logger.error(
         { documentId: doc.id, err: err instanceof Error ? err.message : String(err) },

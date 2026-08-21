@@ -2,7 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { extractVariables, unknownVariables } from "@clinicaos/core/template-render";
+import {
+  extractVariables,
+  strayPlaceholders,
+  unknownVariables,
+} from "@clinicaos/core/template-render";
 import { eq, sql } from "drizzle-orm";
 import { schema } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
@@ -30,12 +34,27 @@ const SEQUENCE_VARIABLES = new Set(["nome", "procedimento", "clinica"]);
 /**
  * Variáveis que cada automação de fato fornece no envio — salvar {{data}} numa
  * automação sem agendamento por trás quebraria o envio na hora H.
+ * TODA automação do catálogo tem entrada aqui (o executor é a fonte da verdade).
  */
+const APPT_VARS = ["nome", "clinica", "procedimento", "data", "hora", "profissional"];
 const TEMPLATE_VARIABLES: Record<string, Set<string>> = {
+  reminder_24h: new Set(APPT_VARS),
+  confirm_2h: new Set(APPT_VARS),
+  reminder_45min: new Set(APPT_VARS),
+  pre_care: new Set([...APPT_VARS, "cuidados"]),
+  reply_on_confirm: new Set(APPT_VARS),
+  reply_on_cancel: new Set(APPT_VARS),
+  reply_on_reschedule: new Set(APPT_VARS),
+  no_show_message: new Set(APPT_VARS),
+  no_show_followup: new Set(APPT_VARS),
+  post_visit: new Set([...APPT_VARS, "cuidados"]),
+  feedback_request: new Set(APPT_VARS),
+  touchup_offer: new Set([...APPT_VARS, "dias"]),
+  post_sale_cadence: new Set(APPT_VARS),
+  birthday: new Set(["nome", "clinica"]),
   smart_fill: new Set(["nome", "clinica", "procedimento", "horario"]),
   package_renewal_sessions: new Set(["nome", "clinica", "pacote", "sessoes", "procedimento"]),
   package_renewal_expiry: new Set(["nome", "clinica", "pacote", "sessoes", "procedimento"]),
-  birthday: new Set(["nome", "clinica"]),
 };
 
 export const saveAutomationSetting = authAction({
@@ -43,6 +62,13 @@ export const saveAutomationSetting = authAction({
   schema: settingSchema,
   handler: async (input, { auth, tx }): Promise<AutomationResult> => {
     if (input.messageTemplate !== undefined && input.messageTemplate.length > 0) {
+      const stray = strayPlaceholders(input.messageTemplate);
+      if (stray.length > 0) {
+        return {
+          ok: false,
+          error: `Escreva as variáveis em minúsculas e sem acento: ${stray.map((v) => `{{${v}}}`).join(", ")} sairia literal na mensagem`,
+        };
+      }
       const unknown = unknownVariables(input.messageTemplate);
       if (unknown.length > 0) {
         return {
@@ -79,6 +105,13 @@ export const saveAutomationSetting = authAction({
         return { ok: false, error: "Sequência inválida para essa automação." };
       }
       for (const [i, text] of input.steps.entries()) {
+        const stray = strayPlaceholders(text);
+        if (stray.length > 0) {
+          return {
+            ok: false,
+            error: `Mensagem ${i + 1}: escreva em minúsculas e sem acento (${stray.map((v) => `{{${v}}}`).join(", ")} sairia literal)`,
+          };
+        }
         const invalid = extractVariables(text).filter((v) => !SEQUENCE_VARIABLES.has(v));
         if (invalid.length > 0) {
           return {
