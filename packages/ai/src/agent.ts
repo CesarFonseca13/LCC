@@ -1,4 +1,10 @@
-import Anthropic from "@anthropic-ai/sdk";
+import {
+  createLlmClient,
+  type AiConfig,
+  type ChatMessage,
+  type ToolDef,
+  type ToolResultMsg,
+} from "./provider";
 
 /**
  * Agente conversacional humanizado — o coração do produto.
@@ -96,12 +102,12 @@ REGRAS INEGOCIÁVEIS
 8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.`;
 }
 
-const TOOLS: Anthropic.Tool[] = [
+const TOOLS: ToolDef[] = [
   {
     name: "consultar_horarios",
     description:
       "Consulta os horários realmente livres da agenda para um procedimento nos próximos dias. Use SEMPRE antes de oferecer qualquer horário.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         procedimento_nome: {
@@ -115,7 +121,7 @@ const TOOLS: Anthropic.Tool[] = [
     name: "agendar",
     description:
       "Agenda a cliente em um horário retornado por consultar_horarios. Use apenas slot_id vindos da consulta.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         slot_id: { type: "string" },
@@ -128,7 +134,7 @@ const TOOLS: Anthropic.Tool[] = [
     name: "reagendar",
     description:
       "Remarca um agendamento existente para um novo horário (slot_id de consultar_horarios).",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         agendamento_id: { type: "string" },
@@ -140,7 +146,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "cancelar",
     description: "Cancela um agendamento existente da cliente.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         agendamento_id: { type: "string" },
@@ -152,7 +158,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "confirmar_presenca",
     description: "Confirma a presença da cliente no agendamento existente.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: { agendamento_id: { type: "string" } },
       required: ["agendamento_id"],
@@ -161,13 +167,13 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "consultar_pacote",
     description: "Consulta o saldo de sessões e validade dos pacotes da cliente.",
-    input_schema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "escalar_para_humano",
     description:
       "Passa a conversa para a equipe humana. Use para: assunto de saúde, irritação, negociação de preço, pedido explícito, pergunta se você é robô, ou quando não souber ajudar.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         motivo: { type: "string" },
@@ -179,13 +185,13 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: "registrar_opt_out",
     description: "Registra que a cliente não quer mais receber mensagens da clínica.",
-    input_schema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "responder_cliente",
     description:
       "OBRIGATÓRIA ao final de toda vez sua: envia a resposta à cliente em 1 a 3 balões curtos de WhatsApp.",
-    input_schema: {
+    inputSchema: {
       type: "object",
       properties: {
         balloons: {
@@ -207,9 +213,8 @@ const TOOLS: Anthropic.Tool[] = [
 ];
 
 export interface RunAgentOptions {
-  apiKey: string;
-  baseURL?: string;
-  model?: string;
+  /** Configuração do provedor (Anthropic ou OpenAI-compatível). */
+  config: AiConfig;
   maxIterations?: number;
 }
 
@@ -218,34 +223,24 @@ export async function runAgentTurn(
   executors: AgentToolExecutors,
   options: RunAgentOptions,
 ): Promise<AgentReply> {
-  const client = new Anthropic({
-    apiKey: options.apiKey,
-    baseURL: options.baseURL,
-  });
-  const model = options.model ?? "claude-sonnet-5";
+  const client = createLlmClient(options.config);
+  const model = options.config.agentModel;
   const maxIterations = options.maxIterations ?? 6;
 
-  const system: Anthropic.TextBlockParam[] = [
-    {
-      type: "text",
-      text: buildSystemPrompt(input.persona, input.clinic),
-      cache_control: { type: "ephemeral" },
-    },
-    {
-      type: "text",
-      text: `AGORA: ${input.nowLabel}.
+  const system = [
+    buildSystemPrompt(input.persona, input.clinic),
+    `AGORA: ${input.nowLabel}.
 
 SOBRE ESTA CLIENTE
 Nome: ${input.customer.firstName}${input.customer.isNew ? " (primeira conversa — ainda não é cliente)" : ` (${input.customer.visitsCount} visita(s) anteriores)`}.
 ${input.customer.upcomingAppointment ? `Próximo agendamento: ${input.customer.upcomingAppointment}.` : "Sem agendamento futuro."}
 ${input.customer.packageSummary ? `Pacotes: ${input.customer.packageSummary}.` : ""}
 ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo — ${input.customer.activeGoal}.` : ""}`,
-    },
   ];
 
-  const messages: Anthropic.MessageParam[] = input.history.map((m) => ({
+  const messages: ChatMessage[] = input.history.map((m) => ({
     role: m.role === "customer" ? ("user" as const) : ("assistant" as const),
-    content: m.text,
+    text: m.text,
   }));
 
   let escalated = false;
@@ -271,23 +266,19 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
 
   let toolFailures = 0;
   for (let i = 0; i < maxIterations; i++) {
-    const response = await client.messages.create({
+    const response = await client.chat({
       model,
-      max_tokens: 700,
+      maxTokens: 700,
       system,
       messages,
       tools: TOOLS,
     });
-    usage.inputTokens += response.usage.input_tokens;
-    usage.outputTokens += response.usage.output_tokens;
+    usage.inputTokens += response.usage.inputTokens;
+    usage.outputTokens += response.usage.outputTokens;
     usage.calls += 1;
 
-    const toolUses = response.content.filter(
-      (c): c is Anthropic.ToolUseBlock => c.type === "tool_use",
-    );
-
     // Resposta final?
-    const responder = toolUses.find((t) => t.name === "responder_cliente");
+    const responder = response.toolCalls.find((t) => t.name === "responder_cliente");
     if (responder) {
       const raw = responder.input as {
         balloons?: unknown;
@@ -309,44 +300,56 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       }
     }
 
-    if (toolUses.length === 0) {
+    if (response.toolCalls.length === 0) {
       // Sem ferramentas: usa o texto como balão único (fallback)
-      const text = response.content
-        .filter((c): c is Anthropic.TextBlock => c.type === "text")
-        .map((c) => c.text)
-        .join(" ")
-        .trim();
-      if (text) {
-        return { balloons: [text], internalNote: null, confidence: "media", escalated, usage };
+      if (response.text) {
+        return {
+          balloons: [response.text],
+          internalNote: null,
+          confidence: "media",
+          escalated,
+          usage,
+        };
       }
       break;
     }
 
     // Executa as ferramentas e continua o loop
-    messages.push({ role: "assistant", content: response.content });
-    const results: Anthropic.ToolResultBlockParam[] = [];
-    for (const toolUse of toolUses) {
-      if (toolUse.name === "responder_cliente") continue;
-      const executor = wrappedExecutors[toolUse.name];
+    messages.push({
+      role: "assistant_tools",
+      text: response.text || null,
+      calls: response.toolCalls,
+    });
+    const results: ToolResultMsg[] = [];
+    for (const toolCall of response.toolCalls) {
+      if (toolCall.name === "responder_cliente") {
+        // Chegou aqui = balões vazios/inválidos; todo tool call precisa de
+        // resposta (Anthropic e OpenAI exigem) — devolve a instrução de correção
+        results.push({
+          toolCallId: toolCall.id,
+          content: "Os balões vieram vazios. Chame responder_cliente de novo com 1 a 3 balões de texto.",
+          isError: true,
+        });
+        continue;
+      }
+      const executor = wrappedExecutors[toolCall.name];
       if (!executor) {
         results.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
+          toolCallId: toolCall.id,
           content: "Ferramenta indisponível.",
-          is_error: true,
+          isError: true,
         });
         continue;
       }
       try {
-        const output = await executor(toolUse.input as Record<string, unknown>);
-        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: output });
+        const output = await executor(toolCall.input);
+        results.push({ toolCallId: toolCall.id, content: output });
       } catch (err) {
         toolFailures += 1;
         results.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
+          toolCallId: toolCall.id,
           content: err instanceof Error ? err.message : "Falha na ferramenta.",
-          is_error: true,
+          isError: true,
         });
         if (toolFailures >= 2 && !escalated) {
           // Duas falhas seguidas: rede de segurança — escala
@@ -355,7 +358,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
         }
       }
     }
-    messages.push({ role: "user", content: results });
+    messages.push({ role: "tool_results", results });
   }
 
   // Loop esgotado sem resposta: fallback seguro + escala

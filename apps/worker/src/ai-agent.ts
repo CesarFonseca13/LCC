@@ -5,6 +5,7 @@ import {
   type AgentPersona,
   type AgentToolExecutors,
 } from "@clinicaos/ai/agent";
+import { resolveAiConfig } from "@clinicaos/ai/provider";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 
@@ -18,7 +19,7 @@ import { findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 const DEBOUNCE_MS = 10_000;
 
 export function aiEnabled(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return resolveAiConfig(process.env) !== null;
 }
 
 interface ClinicAiSettings {
@@ -495,6 +496,9 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
   };
 
   // ── Chamada do agente ────────────────────────────────────────────
+  const aiConfig = resolveAiConfig(process.env);
+  if (!aiConfig) return; // aiEnabled() já barrou antes — cinto de segurança
+
   const reply = await runAgentTurn(
     {
       persona: { assistantName: aiSettings.assistantName, tone: aiSettings.tone },
@@ -520,17 +524,13 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       history,
     },
     executors,
-    {
-      apiKey: process.env.ANTHROPIC_API_KEY!,
-      baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
-      model: process.env.AI_AGENT_MODEL || "claude-sonnet-5",
-    },
+    { config: aiConfig },
   );
 
   await db.insert(schema.aiUsage).values({
     clinicId: clinic.id,
     purpose: "agent",
-    model: process.env.AI_AGENT_MODEL || "claude-sonnet-5",
+    model: aiConfig.agentModel,
     inputTokens: reply.usage.inputTokens,
     outputTokens: reply.usage.outputTokens,
   });

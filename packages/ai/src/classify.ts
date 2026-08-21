@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { createLlmClient, type AiConfig } from "./provider";
 import { REPLY_INTENTS, type ReplyIntent } from "./index";
 
 /**
@@ -6,8 +6,8 @@ import { REPLY_INTENTS, type ReplyIntent } from "./index";
  *
  * Duas camadas:
  *  1. Palavras-chave (grátis, instantânea) — cobre a maioria dos "sim/pode confirmar".
- *  2. Claude Haiku (quando há ANTHROPIC_API_KEY) — pega o pt-BR coloquial
- *     ("blz", "n vou pd ir 😢").
+ *  2. Modelo barato do provedor configurado (Claude Haiku por default) — pega
+ *     o pt-BR coloquial ("blz", "n vou pd ir 😢").
  * Sem certeza → "other" (vai para atendimento humano; nunca age no escuro).
  */
 
@@ -76,29 +76,30 @@ export interface ClassifyContext {
   appointmentWhen: string; // "21/08 às 14:00"
 }
 
-/** Camada 2 — Claude Haiku com saída estruturada. */
-export async function classifyByClaude(
+/** Camada 2 — modelo barato do provedor configurado, com saída estruturada. */
+export async function classifyByLlm(
   text: string,
   context: ClassifyContext,
-  apiKey: string,
+  config: AiConfig,
 ): Promise<ReplyIntent> {
-  const client = new Anthropic({ apiKey });
-  const response = await client.messages.create({
-    model: "claude-haiku-4-5",
-    max_tokens: 60,
-    system:
+  const client = createLlmClient(config);
+  const response = await client.chat({
+    model: config.classifierModel,
+    maxTokens: 60,
+    system: [
       "Você classifica respostas de clientes de uma clínica estética a um lembrete de consulta no WhatsApp (pt-BR coloquial, com abreviações e emojis). Responda APENAS com a ferramenta.",
+    ],
     messages: [
       {
         role: "user",
-        content: `Lembrete enviado: consulta de ${context.procedureName ?? "procedimento"} em ${context.appointmentWhen}.\nResposta da cliente: "${text}"\n\nClassifique a intenção.`,
+        text: `Lembrete enviado: consulta de ${context.procedureName ?? "procedimento"} em ${context.appointmentWhen}.\nResposta da cliente: "${text}"\n\nClassifique a intenção.`,
       },
     ],
     tools: [
       {
         name: "classificar",
         description: "Classifica a intenção da resposta da cliente",
-        input_schema: {
+        inputSchema: {
           type: "object",
           properties: {
             intent: {
@@ -112,25 +113,25 @@ export async function classifyByClaude(
         },
       },
     ],
-    tool_choice: { type: "tool", name: "classificar" },
+    forceTool: "classificar",
   });
 
-  const toolUse = response.content.find((c) => c.type === "tool_use");
+  const toolUse = response.toolCalls.find((c) => c.name === "classificar");
   const intent = (toolUse?.input as { intent?: string } | undefined)?.intent;
   return REPLY_INTENTS.includes(intent as ReplyIntent) ? (intent as ReplyIntent) : "other";
 }
 
-/** Pipeline completo: keywords → Claude (se houver chave) → "other". */
+/** Pipeline completo: keywords → modelo (se configurado) → "other". */
 export async function classifyReply(
   text: string,
   context: ClassifyContext,
-  apiKey: string | undefined,
-): Promise<{ intent: ReplyIntent; via: "keywords" | "claude" | "fallback" }> {
+  config: AiConfig | null | undefined,
+): Promise<{ intent: ReplyIntent; via: "keywords" | "llm" | "fallback" }> {
   const byKeywords = classifyByKeywords(text);
   if (byKeywords) return { intent: byKeywords, via: "keywords" };
-  if (apiKey) {
+  if (config) {
     try {
-      return { intent: await classifyByClaude(text, context, apiKey), via: "claude" };
+      return { intent: await classifyByLlm(text, context, config), via: "llm" };
     } catch {
       return { intent: "other", via: "fallback" };
     }
