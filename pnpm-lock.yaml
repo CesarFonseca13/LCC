@@ -17,6 +17,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@clinicaos/ai':
+        specifier: workspace:^
+        version: link:../../packages/ai
       '@clinicaos/config':
         specifier: workspace:*
         version: link:../../packages/config

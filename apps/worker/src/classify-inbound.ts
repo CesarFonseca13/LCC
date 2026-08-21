@@ -1,7 +1,7 @@
 import { and, asc, eq, gt, inArray } from "drizzle-orm";
 import type { Logger } from "pino";
 import { classifyReply } from "@clinicaos/ai/classify";
-import { resolveAiConfig } from "@clinicaos/ai/provider";
+import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
@@ -52,7 +52,11 @@ export async function classifyInbound(
 
   const clinic = (
     await db
-      .select({ name: schema.clinics.name, timezone: schema.clinics.timezone })
+      .select({
+        name: schema.clinics.name,
+        timezone: schema.clinics.timezone,
+        settings: schema.clinics.settings,
+      })
       .from(schema.clinics)
       .where(eq(schema.clinics.id, clinicId))
       .limit(1)
@@ -80,7 +84,7 @@ export async function classifyInbound(
   const { intent, via } = await classifyReply(
     text,
     { procedureName, appointmentWhen: when },
-    resolveAiConfig(process.env),
+    resolveClinicAiConfig(clinic?.settings, process.env),
   );
   logger.info({ conversationId, intent, via }, "resposta classificada");
 

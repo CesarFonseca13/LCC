@@ -1,10 +1,12 @@
 import { eq } from "drizzle-orm";
+import { parseClinicAiProvider, resolveAiConfig } from "@clinicaos/ai/provider";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { AiCard } from "./ai-card";
+import { AiProviderCard } from "./ai-provider-card";
 import { BookingCard } from "./booking-card";
 import { WhatsAppCard } from "./whatsapp-card";
 
@@ -25,7 +27,7 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const { instance, aiSettings, booking } = await withTenant(
+  const { instance, aiProvider, aiSettings, booking } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const instance =
@@ -55,8 +57,10 @@ export default async function ConfiguracoesPage() {
       const ai = ((clinic?.settings ?? {}) as Record<string, unknown>).ai as
         | Record<string, unknown>
         | undefined;
+      const aiProvider = parseClinicAiProvider(clinic?.settings);
       return {
         instance,
+        aiProvider,
         aiSettings: {
           enabled: ai?.enabled === true,
           assistantName:
@@ -95,7 +99,30 @@ export default async function ConfiguracoesPage() {
           initialPhone={instance?.phoneE164 ? formatPhoneBR(instance.phoneE164) : null}
         />
 
-        <AiCard hasApiKey={Boolean(process.env.ANTHROPIC_API_KEY)} initial={aiSettings} />
+        <AiCard
+          hasApiKey={
+            resolveAiConfig(process.env) !== null || aiProvider.mode === "custom"
+          }
+          initial={aiSettings}
+        />
+
+        <AiProviderCard
+          initial={{
+            mode: aiProvider.mode,
+            provider: aiProvider.provider,
+            baseURL: aiProvider.baseURL ?? "",
+            agentModel: aiProvider.agentModel ?? "",
+            classifierModel: aiProvider.classifierModel ?? "",
+            keyHint: aiProvider.keyHint,
+          }}
+          systemDefaultLabel={(() => {
+            const config = resolveAiConfig(process.env);
+            if (!config) return null;
+            return config.provider === "anthropic"
+              ? `Claude (${config.agentModel})`
+              : config.agentModel;
+          })()}
+        />
 
         <BookingCard
           appUrl={process.env.APP_URL ?? "http://localhost:3000"}

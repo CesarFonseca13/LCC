@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { decryptSensitive } from "@clinicaos/core/crypto";
 
 /**
  * Camada de provedores de IA — um contrato neutro de "chat com ferramentas"
@@ -58,6 +59,89 @@ export function resolveAiConfig(
     baseURL: env.AI_BASE_URL || "https://api.openai.com/v1",
     agentModel: env.AI_AGENT_MODEL || "gpt-4o",
     classifierModel: env.AI_CLASSIFIER_MODEL || env.AI_AGENT_MODEL || "gpt-4o-mini",
+  };
+}
+
+// ── Configuração POR CLÍNICA (Configurações → Modelo de IA) ─────────
+
+/** Forma guardada em clinics.settings.aiProvider (chave sempre cifrada). */
+export interface ClinicAiProvider {
+  mode: "default" | "custom";
+  provider: AiProviderKind;
+  /** Chave cifrada com AES-GCM (SENSITIVE_DATA_KEY) — nunca em claro no banco. */
+  apiKeyEnc: string | null;
+  /** Últimos 4 caracteres, só para exibição ("terminando em abcd"). */
+  keyHint: string | null;
+  baseURL: string | null;
+  agentModel: string | null;
+  classifierModel: string | null;
+}
+
+export function parseClinicAiProvider(clinicSettings: unknown): ClinicAiProvider {
+  const raw = ((clinicSettings ?? {}) as Record<string, unknown>).aiProvider as
+    | Record<string, unknown>
+    | undefined;
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+  return {
+    mode: raw?.mode === "custom" ? "custom" : "default",
+    provider: raw?.provider === "openai" ? "openai" : "anthropic",
+    apiKeyEnc: str(raw?.apiKeyEnc),
+    keyHint: str(raw?.keyHint),
+    baseURL: str(raw?.baseURL),
+    agentModel: str(raw?.agentModel),
+    classifierModel: str(raw?.classifierModel),
+  };
+}
+
+/**
+ * Config efetiva de uma clínica: a própria (mode=custom, chave dela ou
+ * Ollama próprio) ou a padrão do sistema (env). Configuração custom
+ * incompleta/quebrada cai no padrão — a cliente final nunca fica sem
+ * resposta por causa de uma chave errada (o botão "Testar" na tela evita
+ * chegar aqui quebrado).
+ */
+export function resolveClinicAiConfig(
+  clinicSettings: unknown,
+  env: Record<string, string | undefined>,
+): AiConfig | null {
+  const custom = parseClinicAiProvider(clinicSettings);
+  if (custom.mode !== "custom") return resolveAiConfig(env);
+
+  let apiKey: string | null = null;
+  if (custom.apiKeyEnc && env.SENSITIVE_DATA_KEY) {
+    try {
+      apiKey = decryptSensitive(custom.apiKeyEnc, env.SENSITIVE_DATA_KEY);
+    } catch {
+      apiKey = null;
+    }
+  }
+
+  if (custom.provider === "anthropic") {
+    if (!apiKey) return resolveAiConfig(env);
+    return {
+      provider: "anthropic",
+      apiKey,
+      baseURL: undefined,
+      agentModel: custom.agentModel ?? "claude-sonnet-5",
+      classifierModel: custom.classifierModel ?? "claude-haiku-4-5",
+    };
+  }
+
+  const baseURL = (custom.baseURL ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  const isOfficialOpenAi = baseURL.includes("api.openai.com");
+  // OpenAI oficial exige chave; servidor próprio (Ollama/vLLM) dispensa,
+  // mas aí o nome do modelo é obrigatório (não dá para adivinhar)
+  if (isOfficialOpenAi && !apiKey) return resolveAiConfig(env);
+  const agentModel = custom.agentModel ?? (isOfficialOpenAi ? "gpt-4o" : null);
+  if (!agentModel) return resolveAiConfig(env);
+  return {
+    provider: "openai",
+    apiKey: apiKey ?? "sem-chave",
+    baseURL,
+    agentModel,
+    classifierModel:
+      custom.classifierModel ?? (isOfficialOpenAi ? "gpt-4o-mini" : agentModel),
   };
 }
 

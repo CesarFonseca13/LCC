@@ -1,8 +1,9 @@
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { encryptSensitive } from "@clinicaos/core/crypto";
 import { runAgentTurn, type AgentToolExecutors } from "./agent";
 import { classifyReply } from "./classify";
-import { resolveAiConfig, type AiConfig } from "./provider";
+import { resolveAiConfig, resolveClinicAiConfig, type AiConfig } from "./provider";
 
 /**
  * Provedor OpenAI-compatível de mentira: roteiro fixo de respostas por
@@ -186,5 +187,64 @@ describe("provedor OpenAI-compatível", () => {
     // Sem chave = IA desligada (nunca explode)
     expect(resolveAiConfig({})).toBeNull();
     expect(resolveAiConfig({ AI_PROVIDER: "openai" })).toBeNull();
+  });
+
+  it("resolveClinicAiConfig: chave própria cifrada, Ollama sem chave e fallbacks", () => {
+    const dataKey = Buffer.alloc(32, 7).toString("base64");
+    const env = { SENSITIVE_DATA_KEY: dataKey, ANTHROPIC_API_KEY: "chave-do-sistema" };
+
+    // Clínica com chave própria da Groq (cifrada no banco)
+    const groq = resolveClinicAiConfig(
+      {
+        aiProvider: {
+          mode: "custom",
+          provider: "openai",
+          apiKeyEnc: encryptSensitive("gsk_chave_da_clinica", dataKey),
+          baseURL: "https://api.groq.com/openai/v1",
+          agentModel: "llama-3.3-70b-versatile",
+        },
+      },
+      env,
+    );
+    expect(groq).toMatchObject({
+      provider: "openai",
+      apiKey: "gsk_chave_da_clinica",
+      baseURL: "https://api.groq.com/openai/v1",
+      agentModel: "llama-3.3-70b-versatile",
+      classifierModel: "llama-3.3-70b-versatile",
+    });
+
+    // Ollama próprio: sem chave, mas modelo obrigatório
+    expect(
+      resolveClinicAiConfig(
+        {
+          aiProvider: {
+            mode: "custom",
+            provider: "openai",
+            baseURL: "http://localhost:11434/v1",
+            agentModel: "qwen3:32b",
+          },
+        },
+        env,
+      ),
+    ).toMatchObject({ apiKey: "sem-chave", agentModel: "qwen3:32b" });
+
+    // Custom incompleto (servidor próprio SEM modelo) → cai no padrão do sistema
+    expect(
+      resolveClinicAiConfig(
+        {
+          aiProvider: {
+            mode: "custom",
+            provider: "openai",
+            baseURL: "http://localhost:11434/v1",
+          },
+        },
+        env,
+      ),
+    ).toMatchObject({ provider: "anthropic", apiKey: "chave-do-sistema" });
+
+    // Sem configuração da clínica → padrão do sistema; sem nada → null
+    expect(resolveClinicAiConfig({}, env)).toMatchObject({ provider: "anthropic" });
+    expect(resolveClinicAiConfig({}, {})).toBeNull();
   });
 });

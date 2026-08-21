@@ -5,7 +5,7 @@ import {
   type AgentPersona,
   type AgentToolExecutors,
 } from "@clinicaos/ai/agent";
-import { resolveAiConfig } from "@clinicaos/ai/provider";
+import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 
@@ -18,9 +18,6 @@ import { findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 
 const DEBOUNCE_MS = 10_000;
 
-export function aiEnabled(): boolean {
-  return resolveAiConfig(process.env) !== null;
-}
 
 interface ClinicAiSettings {
   enabled: boolean;
@@ -52,9 +49,9 @@ export async function scheduleAiTurn(conversationId: string): Promise<void> {
     .where(eq(schema.conversations.id, conversationId));
 }
 
-/** A clínica tem IA ligada? (persona configurada em Configurações) */
+/** A clínica tem IA ligada? Persona ativa + algum provedor utilizável
+ *  (o dela própria em Configurações OU o padrão do sistema no env). */
 export async function clinicHasAiEnabled(clinicId: string): Promise<boolean> {
-  if (!aiEnabled()) return false;
   const db = unsafeGlobalDb();
   const clinic = (
     await db
@@ -63,12 +60,13 @@ export async function clinicHasAiEnabled(clinicId: string): Promise<boolean> {
       .where(eq(schema.clinics.id, clinicId))
       .limit(1)
   )[0];
-  return clinic ? parseAiSettings(clinic.settings).enabled : false;
+  if (!clinic || !parseAiSettings(clinic.settings).enabled) return false;
+  return resolveClinicAiConfig(clinic.settings, process.env) !== null;
 }
 
-/** Sweep: processa conversas com turno vencido. */
+/** Sweep: processa conversas com turno vencido. (Sem gate global de env:
+ *  clínica pode ter chave própria mesmo sem chave padrão no servidor.) */
 export async function processAiTurns(logger: Logger): Promise<void> {
-  if (!aiEnabled()) return;
   const db = unsafeGlobalDb();
   const due = await db
     .select({ id: schema.conversations.id })
@@ -496,8 +494,9 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
   };
 
   // ── Chamada do agente ────────────────────────────────────────────
-  const aiConfig = resolveAiConfig(process.env);
-  if (!aiConfig) return; // aiEnabled() já barrou antes — cinto de segurança
+  // Provedor da própria clínica (Configurações) ou o padrão do sistema
+  const aiConfig = resolveClinicAiConfig(clinic.settings, process.env);
+  if (!aiConfig) return; // clinicHasAiEnabled já barrou antes — cinto de segurança
 
   const reply = await runAgentTurn(
     {
