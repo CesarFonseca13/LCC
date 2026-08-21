@@ -13,3 +13,4 @@ export * from "./intelligence";
 export * from "./stock";
 export * from "./commissions";
 export * from "./funnel";
+export * from "./campaigns";

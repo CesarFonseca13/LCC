@@ -6,6 +6,7 @@ import {
   Banknote,
   BarChart3,
   Brain,
+  Megaphone,
   CalendarDays,
   CheckSquare,
   FileSignature,
@@ -62,6 +63,7 @@ const GROUPS: NavGroup[] = [
     label: "Gestão",
     items: [
       { href: "/automacoes", label: "Automações", icon: Sparkles },
+      { href: "/campanhas", label: "Campanhas", icon: Megaphone },
       { href: "/financeiro", label: "Financeiro", icon: Banknote },
       { href: "/relatorios", label: "Relatórios", icon: BarChart3 },
     ],

@@ -13,6 +13,7 @@ import pino from "pino";
 import { processAiTurns } from "./ai-agent";
 import { expireApprovals, processAutomationTick, processBirthdays } from "./automations";
 import { processPdfGeneration } from "./documents";
+import { processCampaignsSweep } from "./campaigns";
 import { processGrowthSweep } from "./growth";
 import { processReactivationSweep } from "./reactivation";
 import { processScoresSweep } from "./scores";
@@ -48,6 +49,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("scores-sweep", { every: 600_000 });
   await schedulerQueue.upsertJobScheduler("reactivation-sweep", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("growth-sweep", { every: 120_000 });
+  await schedulerQueue.upsertJobScheduler("campaigns-sweep", { every: 60_000 });
 
   const worker = new Worker(
     "q-scheduler",
@@ -85,6 +87,9 @@ async function main() {
           break;
         case "growth-sweep":
           await processGrowthSweep(logger);
+          break;
+        case "campaigns-sweep":
+          await processCampaignsSweep(logger);
           break;
       }
     },
