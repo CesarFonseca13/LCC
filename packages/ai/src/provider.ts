@@ -349,26 +349,47 @@ class OpenAiCompatClient implements LlmClient {
                 parameters: t.inputSchema,
               },
             })),
+            // OpenAI oficial: "required" força TODA resposta a ser chamada de
+            // ferramenta — elimina o modo texto que vaza sintaxe para a
+            // cliente. Servidores compatíveis variam no suporte → "auto"
+            // (o resgate no loop do agente cobre o vazamento lá).
             tool_choice: req.forceTool
               ? { type: "function", function: { name: req.forceTool } }
-              : "auto",
+              : isOfficialOpenAi
+                ? "required"
+                : "auto",
           }
         : {}),
     };
 
-    const res = await fetch(`${baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json().catch(() => ({}))) as OpenAiResponse;
-    if (!res.ok) {
-      throw new Error(
-        `IA (${this.config.provider}/${req.model}): HTTP ${res.status} — ${data.error?.message ?? "sem detalhe"}`,
-      );
+    // Soluço transitório (429/5xx/rede) ganha 2 novas tentativas com espera —
+    // um turno de conversa não pode morrer por um blip da API
+    let res: Response | undefined;
+    let data: OpenAiResponse = {};
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        res = await fetch(`${baseURL}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.config.apiKey}`,
+          },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        if (attempt === 3) throw err;
+        await new Promise((r) => setTimeout(r, 2_000 * attempt));
+        continue;
+      }
+      data = (await res.json().catch(() => ({}))) as OpenAiResponse;
+      if (res.ok) break;
+      const transient = res.status === 429 || res.status >= 500;
+      if (!transient || attempt === 3) {
+        throw new Error(
+          `IA (${this.config.provider}/${req.model}): HTTP ${res.status} — ${data.error?.message ?? "sem detalhe"}`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 3_000 * attempt));
     }
 
     const message = data.choices?.[0]?.message;

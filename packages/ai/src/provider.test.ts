@@ -1,7 +1,12 @@
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { encryptSensitive } from "@clinicaos/core/crypto";
-import { runAgentTurn, type AgentToolExecutors } from "./agent";
+import {
+  hasToolSyntaxLeak,
+  runAgentTurn,
+  salvageBalloons,
+  type AgentToolExecutors,
+} from "./agent";
 import { classifyReply } from "./classify";
 import { resolveAiConfig, resolveClinicAiConfig, type AiConfig } from "./provider";
 
@@ -248,5 +253,31 @@ describe("provedor OpenAI-compatível", () => {
     // Sem configuração da clínica → padrão do sistema; sem nada → null
     expect(resolveClinicAiConfig({}, env)).toMatchObject({ provider: "anthropic" });
     expect(resolveClinicAiConfig({}, {})).toBeNull();
+  });
+
+  it("resgata balões quando o modelo escreve a ferramenta como texto (bug real)", () => {
+    // Texto EXATO que vazou para a cliente na tela do Paulo
+    const leaked = `Perfeito, Bia! Antes de confirmar, qual é seu nome completo? 💛
+
+(responda com seu nome completo que já já eu confirmo o horário das 09:00 pra você)
+
+responder_cliente({"balloons":["Perfeito, Bia! Antes de confirmar, qual é seu nome completo? 💛 "]})`;
+
+    expect(hasToolSyntaxLeak(leaked)).toBe(true);
+    expect(salvageBalloons(leaked)).toEqual([
+      "Perfeito, Bia! Antes de confirmar, qual é seu nome completo? 💛 ",
+    ]);
+
+    // Texto normal de conversa NUNCA é tratado como vazamento
+    const normal = "Oi Bia! Temos 09:00 ou 10:30 amanhã — qual prefere? 💛";
+    expect(hasToolSyntaxLeak(normal)).toBe(false);
+    expect(salvageBalloons(normal)).toBeNull();
+
+    // Balões com chaves/aspas dentro não quebram a varredura
+    const tricky = `responder_cliente({"balloons":["Custa R$ 180,00 (à vista) — \\"vale muito\\"!","Quer marcar? 💛"]})`;
+    expect(salvageBalloons(tricky)).toEqual([
+      'Custa R$ 180,00 (à vista) — "vale muito"!',
+      "Quer marcar? 💛",
+    ]);
   });
 });

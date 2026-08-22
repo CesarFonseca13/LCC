@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import {
   runAgentTurn,
@@ -99,6 +99,19 @@ export async function processAiTurns(logger: Logger): Promise<void> {
         { conversationId: id, err: err instanceof Error ? err.message : String(err) },
         "falha no turno da IA",
       );
+      // Turno com erro NÃO deixa a cliente no vácuo: reagenda a tentativa
+      // (só enquanto a conversa está quente — evita retry infinito)
+      const recent =
+        conversation.lastInboundAt &&
+        Date.now() - new Date(conversation.lastInboundAt).getTime() < 30 * 60_000;
+      if (recent) {
+        await db
+          .update(schema.conversations)
+          .set({ aiTurnAfter: new Date(Date.now() + 60_000) })
+          .where(
+            and(eq(schema.conversations.id, id), isNull(schema.conversations.aiTurnAfter)),
+          );
+      }
     }
   }
 }
@@ -270,6 +283,11 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
 
   // ── Executores das ferramentas ───────────────────────────────────
   let escalationReason: string | null = null;
+  // Apelidos curtos de slot (H1, H2...) → id real. Modelo econômico erra ao
+  // copiar ids longos (uuid+ISO); apelido de 2 letras é à prova de digitação.
+  const slotAliases = new Map<string, string>();
+  const resolveSlotId = (raw: string): string =>
+    slotAliases.get(raw.trim().toUpperCase()) ?? raw;
   const executors: AgentToolExecutors = {
     async consultarHorarios(procedimentoNome) {
       const proc = matchProcedure(procedures, procedimentoNome);
@@ -280,8 +298,13 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       if (slots.length === 0) {
         return "Nenhum horário livre nos próximos 7 dias — ofereça passar para a equipe verificar outras opções.";
       }
+      slotAliases.clear();
       return `Horários livres para ${proc.name}:\n${slots
-        .map((s) => `- ${s.label} [slot_id: ${s.slotId}]`)
+        .map((s, i) => {
+          const alias = `H${i + 1}`;
+          slotAliases.set(alias, s.slotId);
+          return `- ${s.label} [slot_id: ${alias}]`;
+        })
         .join("\n")}`;
     },
 
@@ -301,7 +324,7 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       }
       const proc = matchProcedure(procedures, procedimentoNome);
       if (!proc) throw new Error("Procedimento não encontrado.");
-      const parsed = parseSlotId(slotId);
+      const parsed = parseSlotId(resolveSlotId(slotId));
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
       if (startsAt.getTime() < Date.now()) throw new Error("Esse horário já passou.");
@@ -329,6 +352,21 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
         source: "ai_agent",
       });
       await materializeRuns(clinic.id, created.id, customer.id, startsAt);
+      // Funil corre sozinho: agendou → card vai para "Agendou avaliação"
+      await db.execute(sql`
+        INSERT INTO pipeline_stages (clinic_id, name, sort)
+        SELECT ${clinic.id}, 'Agendou avaliação', 3
+        WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
+                          WHERE clinic_id = ${clinic.id} AND name = 'Agendou avaliação')
+      `);
+      await db.execute(sql`
+        UPDATE deals d SET stage_id = s.id, updated_at = now()
+        FROM pipeline_stages s
+        WHERE d.clinic_id = ${clinic.id} AND d.customer_id = ${customer.id}
+          AND d.status = 'open'
+          AND s.clinic_id = d.clinic_id AND s.name = 'Agendou avaliação'
+          AND (d.stage_id IS DISTINCT FROM s.id)
+      `);
       const z = utcToZoned(startsAt, tz);
       const [, m2, d2] = z.dateISO.split("-");
       return `Agendado com sucesso: ${proc.name} em ${d2}/${m2} às ${z.timeHHMM} (id: ${created.id}).`;
@@ -350,7 +388,7 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       if (!original || !["scheduled", "confirmed"].includes(original.status)) {
         throw new Error("Agendamento não encontrado ou não pode ser remarcado.");
       }
-      const parsed = parseSlotId(slotId);
+      const parsed = parseSlotId(resolveSlotId(slotId));
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
       const duration =
@@ -746,6 +784,7 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       escalated: reply.escalated,
       reason: escalationReason,
       tokens: reply.usage,
+      tools: reply.toolTrace,
     },
     "turno da IA concluído",
   );

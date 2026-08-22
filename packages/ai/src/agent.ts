@@ -54,6 +54,8 @@ export interface AgentReply {
   confidence: "alta" | "media" | "baixa";
   escalated: boolean;
   usage: { inputTokens: number; outputTokens: number; calls: number };
+  /** Ferramentas chamadas por iteração (diagnóstico de loops). */
+  toolTrace: string[];
 }
 
 /** Executores das ferramentas — implementados pelo worker com acesso ao banco. */
@@ -104,10 +106,74 @@ REGRAS INEGOCIÁVEIS
 5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano. Atenção: pedir para remarcar ou cancelar NÃO é frustração — isso é o seu trabalho de todo dia, resolva você mesma com reagendar/cancelar sem escalar.
 6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.
 7. Escreva como no WhatsApp: mensagens curtas, informais na medida do tom, sem listas numeradas, sem markdown, sem assinatura. Varie as aberturas (nunca comece toda resposta do mesmo jeito). No máximo 1 emoji por balão.
-8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.
+8. SEMPRE finalize a sua vez CHAMANDO a ferramenta responder_cliente com 1 a 3 balões. Sem exceção. responder_cliente é uma FERRAMENTA — nunca escreva a chamada como texto dentro da mensagem, e nunca acrescente instruções entre parênteses para a cliente.
 9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.
 10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.
 11. Dados pessoais que a cliente informar na conversa (nome completo, e-mail, CPF, RG, nascimento, endereço, convênio/plano) → guarde na hora com atualizar_cadastro e siga a conversa com naturalidade, sem dizer "atualizei no sistema". NUNCA transforme a conversa em formulário pedindo dados em sequência — no máximo, pergunte o nome completo na hora de marcar pela primeira vez. Para remarcar ou cancelar, use o id do agendamento que está no seu contexto.`;
+}
+
+const TOOL_NAMES = [
+  "consultar_horarios",
+  "agendar",
+  "reagendar",
+  "cancelar",
+  "confirmar_presenca",
+  "consultar_pacote",
+  "escalar_para_humano",
+  "registrar_opt_out",
+  "atualizar_cadastro",
+  "responder_cliente",
+] as const;
+
+/** O texto contém sintaxe de ferramenta vazada? (modelo fraco em modo texto) */
+export function hasToolSyntaxLeak(text: string): boolean {
+  if (/\{\s*"balloons"/.test(text)) return true;
+  return TOOL_NAMES.some((name) => new RegExp(`\\b${name}\\s*\\(`).test(text));
+}
+
+/**
+ * Resgate: o modelo escreveu `responder_cliente({"balloons":[...]})` como
+ * TEXTO em vez de chamar a ferramenta. A intenção está clara — extrai os
+ * balões do JSON e joga fora o resto (meta-instruções, sintaxe, tudo).
+ */
+export function salvageBalloons(text: string): string[] | null {
+  const start = text.search(/responder_cliente\s*\(/);
+  if (start === -1) return null;
+  const braceStart = text.indexOf("{", start);
+  if (braceStart === -1) return null;
+  // Varredura de chaves ciente de strings (textos de balão têm chaves/aspas)
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = braceStart; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+    if (inString) continue;
+    if (ch === "{") depth++;
+    if (ch === "}") depth--;
+    if (depth === 0) {
+      try {
+        const parsed = JSON.parse(text.slice(braceStart, i + 1)) as { balloons?: unknown };
+        const balloons = Array.isArray(parsed.balloons)
+          ? parsed.balloons
+              .filter((b): b is string => typeof b === "string" && b.trim().length > 0)
+              .slice(0, 3)
+          : [];
+        return balloons.length > 0 ? balloons : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 const TOOLS: ToolDef[] = [
@@ -324,6 +390,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     },
   };
 
+  const toolTrace: string[] = [];
   let toolFailures = 0;
   for (let i = 0; i < maxIterations; i++) {
     const response = await client.chat({
@@ -336,6 +403,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     usage.inputTokens += response.usage.inputTokens;
     usage.outputTokens += response.usage.outputTokens;
     usage.calls += 1;
+    toolTrace.push(response.toolCalls.map((c) => c.name).join("+") || "(texto)");
 
     // Resposta final?
     const responder = response.toolCalls.find((t) => t.name === "responder_cliente");
@@ -356,19 +424,44 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
             raw.confianca === "baixa" ? "baixa" : raw.confianca === "media" ? "media" : "alta",
           escalated,
           usage,
+          toolTrace,
         };
       }
     }
 
     if (response.toolCalls.length === 0) {
-      // Sem ferramentas: usa o texto como balão único (fallback)
       if (response.text) {
+        // Modelo escreveu a chamada da ferramenta como TEXTO? Resgata só os
+        // balões do JSON — a cliente JAMAIS pode ver sintaxe de sistema
+        const salvaged = salvageBalloons(response.text);
+        if (salvaged) {
+          return {
+            balloons: ensureGreeting(salvaged),
+            internalNote: "Resgatado: modelo escreveu responder_cliente como texto.",
+            confidence: "media",
+            escalated,
+            usage,
+            toolTrace,
+          };
+        }
+        if (hasToolSyntaxLeak(response.text)) {
+          // Vazou sintaxe e não deu para resgatar: manda o modelo refazer
+          // (nunca envia texto com cara de código para a cliente)
+          messages.push({ role: "assistant", text: response.text });
+          messages.push({
+            role: "user",
+            text: "[sistema] Sua última resposta continha sintaxe de ferramenta como texto e NÃO foi enviada. Chame a ferramenta responder_cliente de verdade, com 1 a 3 balões limpos.",
+          });
+          continue;
+        }
+        // Texto limpo sem ferramenta: vira balão único (fallback)
         return {
           balloons: ensureGreeting([response.text]),
           internalNote: null,
           confidence: "media",
           escalated,
           usage,
+          toolTrace,
         };
       }
       break;
@@ -432,5 +525,6 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     confidence: "baixa",
     escalated,
     usage,
+    toolTrace,
   };
 }

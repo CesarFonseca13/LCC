@@ -273,6 +273,23 @@ async function applyShowedEffects(
   await applyStockConsumption(tx, clinicId, appointment);
   await applyCommission(tx, clinicId, appointment);
 
+  // Funil corre sozinho: compareceu → negociação aberta fecha como GANHA
+  // (valor herda o do atendimento se a dona não preencheu) e lead vira cliente
+  await tx.execute(sql`
+    UPDATE deals SET status = 'won', won_at = now(), updated_at = now(),
+                     value = COALESCE(value, ${appointment.price})
+    WHERE customer_id = ${appointment.customerId} AND status = 'open'
+  `);
+  await tx
+    .update(schema.customers)
+    .set({ status: "active" })
+    .where(
+      and(
+        eq(schema.customers.id, appointment.customerId),
+        eq(schema.customers.status, "lead"),
+      ),
+    );
+
   if (appointment.customerPackageId) {
     // Sessão de pacote (pré-paga): débito ATÔMICO com guarda — pacote esgotado,
     // vencido ou cancelado NÃO cobre a sessão; o atendimento vira cobrança avulsa
@@ -610,6 +627,20 @@ export const createAppointment = authAction({
           startsAt,
           input.procedureId,
         );
+        // Funil corre sozinho: agendou → card vai para "Agendou avaliação"
+        await tx.execute(sql`
+          INSERT INTO pipeline_stages (clinic_id, name, sort)
+          SELECT ${auth.clinicId}, 'Agendou avaliação', 3
+          WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
+                            WHERE clinic_id = ${auth.clinicId} AND name = 'Agendou avaliação')
+        `);
+        await tx.execute(sql`
+          UPDATE deals d SET stage_id = s.id, updated_at = now()
+          FROM pipeline_stages s
+          WHERE d.customer_id = ${customerId} AND d.status = 'open'
+            AND s.clinic_id = d.clinic_id AND s.name = 'Agendou avaliação'
+            AND (d.stage_id IS DISTINCT FROM s.id)
+        `);
       }
 
       revalidatePath("/agenda");

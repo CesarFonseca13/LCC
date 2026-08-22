@@ -99,6 +99,32 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
       // (nunca "fala por cima" de quem acabou de responder) — qualquer tipo de mensagem
       if ((inserted.rowCount ?? 0) > 0) {
         await pauseReactivationOnReply(event.clinicId, customerId);
+        // Funil corre sozinho: o card sai de "Novo contato" para "Conversando"
+        // quando o diálogo ENGATOU (ela voltou a escrever depois de ser
+        // respondida) — a primeira mensagem fica em Novo contato.
+        // Etapas nascem sob demanda (mesma regra das actions do funil)
+        await db.execute(sql`
+          INSERT INTO pipeline_stages (clinic_id, name, sort)
+          SELECT ${event.clinicId}, 'Conversando', 1
+          WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
+                            WHERE clinic_id = ${event.clinicId} AND name = 'Conversando')
+        `);
+        await db.execute(sql`
+          UPDATE deals d SET stage_id = s2.id, updated_at = now()
+          FROM pipeline_stages s2
+          WHERE d.clinic_id = ${event.clinicId} AND d.customer_id = ${customerId}
+            AND d.status = 'open'
+            AND s2.clinic_id = d.clinic_id AND s2.name = 'Conversando'
+            AND (d.stage_id IS NULL OR d.stage_id IN (
+              SELECT id FROM pipeline_stages s1
+              WHERE s1.clinic_id = d.clinic_id AND s1.name = 'Novo contato'
+            ))
+            AND EXISTS (
+              SELECT 1 FROM messages m
+              JOIN conversations c2 ON c2.id = m.conversation_id
+              WHERE c2.customer_id = d.customer_id AND m.direction = 'outbound'
+            )
+        `);
       }
 
       // Roteamento (só mensagens de texto novas; dedupe não reprocessa):

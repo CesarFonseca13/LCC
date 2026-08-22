@@ -218,6 +218,20 @@ export async function bookOnline(rawInput: unknown): Promise<BookResult> {
         refTable: "appointments",
         refId: created.id,
       });
+      // Funil corre sozinho: agendou online → card vai para "Agendou avaliação"
+      await tx.execute(sql`
+        INSERT INTO pipeline_stages (clinic_id, name, sort)
+        SELECT ${clinic.id}, 'Agendou avaliação', 3
+        WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
+                          WHERE clinic_id = ${clinic.id} AND name = 'Agendou avaliação')
+      `);
+      await tx.execute(sql`
+        UPDATE deals d SET stage_id = s.id, updated_at = now()
+        FROM pipeline_stages s
+        WHERE d.customer_id = ${customer.id} AND d.status = 'open'
+          AND s.clinic_id = d.clinic_id AND s.name = 'Agendou avaliação'
+          AND (d.stage_id IS DISTINCT FROM s.id)
+      `);
 
       const z2 = new Intl.DateTimeFormat("pt-BR", {
         weekday: "long",
