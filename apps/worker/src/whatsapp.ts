@@ -406,6 +406,7 @@ export async function processOutbound(
         clinicId: schema.messages.clinicId,
         conversationId: schema.messages.conversationId,
         body: schema.messages.body,
+        error: schema.messages.error,
       });
     const msg = claimed[0];
     if (!msg?.body) continue;
@@ -457,11 +458,29 @@ export async function processOutbound(
       sent++;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error({ messageId: msg.id, err: message }, "falha no envio");
-      await db
-        .update(schema.messages)
-        .set({ status: "failed", error: message })
-        .where(eq(schema.messages.id, msg.id));
+      // Rejeição com status HTTP (4xx/5xx) ou conexão que nem abriu = a
+      // mensagem COM CERTEZA não saiu → UMA nova tentativa é segura.
+      // Timeout/abort é ambíguo (pode ter chegado): aí nunca reenvia —
+      // mensagem duplicada é a cara de robô mais barata que existe.
+      const definitelyNotSent =
+        /→ \d{3}\b/.test(message) || /ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message);
+      if (definitelyNotSent && !msg.error) {
+        logger.warn({ messageId: msg.id, err: message }, "envio rejeitado — nova tentativa em ~30s");
+        await db
+          .update(schema.messages)
+          .set({
+            status: "queued",
+            error: message,
+            scheduledFor: new Date(Date.now() + 20_000 + Math.floor(Math.random() * 20_000)),
+          })
+          .where(eq(schema.messages.id, msg.id));
+      } else {
+        logger.error({ messageId: msg.id, err: message }, "falha no envio");
+        await db
+          .update(schema.messages)
+          .set({ status: "failed", error: message })
+          .where(eq(schema.messages.id, msg.id));
+      }
     }
   }
   return sent;

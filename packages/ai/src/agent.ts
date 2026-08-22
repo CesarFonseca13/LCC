@@ -100,7 +100,8 @@ REGRAS INEGOCIÁVEIS
 6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.
 7. Escreva como no WhatsApp: mensagens curtas, informais na medida do tom, sem listas numeradas, sem markdown, sem assinatura. Varie as aberturas (nunca comece toda resposta do mesmo jeito). No máximo 1 emoji por balão.
 8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.
-9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.`;
+9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.
+10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.`;
 }
 
 const TOOLS: ToolDef[] = [
@@ -246,6 +247,30 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
 
   let escalated = false;
   const usage = { inputTokens: 0, outputTokens: 0, calls: 0 };
+
+  // Garantia MECÂNICA de boas-vindas: modelo econômico esquece a regra 10
+  // de vez em quando — na primeira resposta da conversa, se o 1º balão não
+  // cumprimenta, o cumprimento entra por código (variado, nunca template fixo)
+  const isFirstReply = !input.history.some((m) => m.role === "assistant");
+  const GREETING_RE =
+    /\b(oi+|olá|ola|bom dia|boa tarde|boa noite|bem[- ]vind|tudo bem|que bom)\b/i;
+  const ensureGreeting = (balloons: string[]): string[] => {
+    if (!isFirstReply || balloons.length === 0 || GREETING_RE.test(balloons[0]!)) {
+      return balloons;
+    }
+    const variants = [
+      `Oi, ${input.customer.firstName}! `,
+      `Olá, ${input.customer.firstName}, tudo bem? `,
+      `Oi, ${input.customer.firstName}, tudo bem? 💛 `,
+    ];
+    const pick =
+      variants[
+        Math.abs([...input.customer.firstName].reduce((a, c) => a + c.charCodeAt(0), 0)) %
+          variants.length
+      ]!;
+    const first = balloons[0]!;
+    return [pick + first.charAt(0).toLowerCase() + first.slice(1), ...balloons.slice(1)];
+  };
   const wrappedExecutors: Record<string, (raw: Record<string, unknown>) => Promise<string>> = {
     consultar_horarios: (raw) =>
       executors.consultarHorarios(typeof raw.procedimento_nome === "string" ? raw.procedimento_nome : null),
@@ -291,7 +316,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
         : [];
       if (balloons.length > 0) {
         return {
-          balloons,
+          balloons: ensureGreeting(balloons),
           internalNote: typeof raw.nota_interna === "string" ? raw.nota_interna : null,
           confidence:
             raw.confianca === "baixa" ? "baixa" : raw.confianca === "media" ? "media" : "alta",
@@ -305,7 +330,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       // Sem ferramentas: usa o texto como balão único (fallback)
       if (response.text) {
         return {
-          balloons: [response.text],
+          balloons: ensureGreeting([response.text]),
           internalNote: null,
           confidence: "media",
           escalated,
