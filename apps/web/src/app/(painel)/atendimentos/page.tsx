@@ -6,6 +6,7 @@ import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
+import { NovoAtendimentoButton } from "./novo-atendimento";
 
 export const metadata = { title: "Atendimentos" };
 
@@ -146,12 +147,51 @@ export default async function AtendimentosPage({
         .where(eq(schema.professionals.active, true))
         .orderBy(schema.professionals.name);
 
-      return { rows, counts, professionals, tz, month, statusFilter, profFilter };
+      // Para o formulário de criação manual
+      const customersList = await tx
+        .select({ id: schema.customers.id, name: schema.customers.fullName })
+        .from(schema.customers)
+        .where(sql`deleted_at IS NULL`)
+        .orderBy(schema.customers.fullName)
+        .limit(500);
+      const proceduresList = await tx
+        .select({ id: schema.procedures.id, name: schema.procedures.name })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.active, true))
+        .orderBy(schema.procedures.name);
+      const roomsList = await tx
+        .select({ id: schema.rooms.id, name: schema.rooms.name })
+        .from(schema.rooms)
+        .orderBy(schema.rooms.name);
+
+      return {
+        rows,
+        counts,
+        professionals,
+        customersList,
+        proceduresList,
+        roomsList,
+        tz,
+        month,
+        statusFilter,
+        profFilter,
+      };
     },
     auth.userId,
   );
 
-  const { rows, counts, professionals, tz, month, statusFilter, profFilter } = data;
+  const {
+    rows,
+    counts,
+    professionals,
+    customersList,
+    proceduresList,
+    roomsList,
+    tz,
+    month,
+    statusFilter,
+    profFilter,
+  } = data;
   const byStatus = (s: string) => counts.find((c) => c.status === s)?.count ?? 0;
   const realizadoValor = counts.reduce((acc, c) => acc + Number(c.value ?? 0), 0);
   const total = counts.reduce((acc, c) => acc + c.count, 0);
@@ -192,22 +232,31 @@ export default async function AtendimentosPage({
             Tudo que foi feito e tudo que está marcado — com profissional, sala e valor.
           </p>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Link
-            href={link({ m: monthShift(month, -1) })}
-            className="rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 hover:border-stone-300"
-          >
-            ←
-          </Link>
-          <span className="min-w-36 text-center font-medium capitalize text-stone-700">
-            {monthLabel}
-          </span>
-          <Link
-            href={link({ m: monthShift(month, 1) })}
-            className="rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 hover:border-stone-300"
-          >
-            →
-          </Link>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-sm">
+            <Link
+              href={link({ m: monthShift(month, -1) })}
+              className="rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 hover:border-stone-300"
+            >
+              ←
+            </Link>
+            <span className="min-w-36 text-center font-medium capitalize text-stone-700">
+              {monthLabel}
+            </span>
+            <Link
+              href={link({ m: monthShift(month, 1) })}
+              className="rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 hover:border-stone-300"
+            >
+              →
+            </Link>
+          </div>
+          <NovoAtendimentoButton
+            customers={customersList}
+            procedures={proceduresList}
+            professionals={professionals}
+            rooms={roomsList}
+            todayISO={todayISO(tz)}
+          />
         </div>
       </div>
 
