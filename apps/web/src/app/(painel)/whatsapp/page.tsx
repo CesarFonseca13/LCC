@@ -23,7 +23,7 @@ const FILTERS: [Filter, string][] = [
 export default async function WhatsAppPage({
   searchParams,
 }: {
-  searchParams: Promise<{ c?: string; f?: string }>;
+  searchParams: Promise<{ c?: string; f?: string; n?: string }>;
 }) {
   const auth = await requireAuth();
   if (!auth.clinicId || !auth.role) return null;
@@ -54,6 +54,19 @@ export default async function WhatsAppPage({
       )[0];
       const tz = clinic?.timezone ?? "America/Sao_Paulo";
 
+      // Abas por número (multi-número): só aparecem quando há mais de um
+      const instances = await tx
+        .select({
+          id: schema.whatsappInstances.id,
+          label: schema.whatsappInstances.label,
+          status: schema.whatsappInstances.status,
+          isPrimary: schema.whatsappInstances.isPrimary,
+        })
+        .from(schema.whatsappInstances)
+        .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
+        .orderBy(schema.whatsappInstances.createdAt);
+      const activeInstanceId = instances.some((i) => i.id === sp.n) ? sp.n! : null;
+
       const conversations = await tx
         .select({
           id: schema.conversations.id,
@@ -62,6 +75,7 @@ export default async function WhatsAppPage({
           lastMessageAt: schema.conversations.lastMessageAt,
           remoteJid: schema.conversations.remoteJid,
           customerId: schema.conversations.customerId,
+          instanceId: schema.conversations.instanceId,
           customerName: schema.customers.fullName,
           customerStatus: schema.customers.status,
           lastBody: sql<string | null>`(
@@ -74,7 +88,18 @@ export default async function WhatsAppPage({
         .leftJoin(schema.customers, eq(schema.customers.id, schema.conversations.customerId))
         .orderBy(desc(schema.conversations.lastMessageAt));
 
-      const filtered = conversations.filter((c) => {
+      // Aba de número primeiro; badge "precisa de você" conta POR ABA
+      const byInstance = activeInstanceId
+        ? conversations.filter((c) => c.instanceId === activeInstanceId)
+        : conversations;
+      const needByInstance = new Map<string, number>();
+      for (const c of conversations) {
+        if (c.mode === "waiting_human") {
+          needByInstance.set(c.instanceId, (needByInstance.get(c.instanceId) ?? 0) + 1);
+        }
+      }
+
+      const filtered = byInstance.filter((c) => {
         if (filter === "precisam") return c.mode === "waiting_human";
         if (filter === "humano") return c.mode === "human";
         if (filter === "auto") return c.mode === "ai";
@@ -82,7 +107,7 @@ export default async function WhatsAppPage({
       });
 
       const selectedId =
-        sp.c && conversations.some((c) => c.id === sp.c)
+        sp.c && byInstance.some((c) => c.id === sp.c)
           ? sp.c
           : (filtered[0]?.id ?? null);
 
@@ -176,18 +201,81 @@ export default async function WhatsAppPage({
         };
       }
 
-      return { conversations: filtered, allCount: conversations.length, selectedId, selected, thread, panel, tz };
+      return {
+        conversations: filtered,
+        allCount: byInstance.length,
+        instances,
+        activeInstanceId,
+        needByInstance: Object.fromEntries(needByInstance),
+        selectedId,
+        selected,
+        thread,
+        panel,
+        tz,
+      };
     },
     auth.userId,
   );
 
-  const needCount = data.conversations.filter((c) => c.mode === "waiting_human").length;
-  void needCount;
+  const { instances, activeInstanceId } = data;
+  const instanceLabel = (id: string) =>
+    instances.find((i) => i.id === id)?.label ??
+    (instances.find((i) => i.id === id)?.isPrimary ? "Principal" : "Número");
+  const nParam = activeInstanceId ? `&n=${activeInstanceId}` : "";
+  const totalNeed = Object.values(data.needByInstance).reduce((a, b) => a + b, 0);
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col">
       <AutoRefresh seconds={8} />
 
+      {/* Abas por número — estilo navegador (só com 2+ números) */}
+      {instances.length > 1 ? (
+        <div className="flex items-end gap-1 border-b border-stone-200 bg-stone-100 px-4 pt-2">
+          <a
+            href={`/whatsapp?f=${filter}`}
+            className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-sm ${
+              !activeInstanceId
+                ? "-mb-px border border-b-0 border-stone-200 bg-white font-medium text-stone-800"
+                : "text-stone-500 hover:text-stone-700"
+            }`}
+          >
+            Todos os números
+            {totalNeed > 0 ? (
+              <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+                {totalNeed}
+              </span>
+            ) : null}
+          </a>
+          {instances.map((inst, i) => {
+            const need = data.needByInstance[inst.id] ?? 0;
+            return (
+              <a
+                key={inst.id}
+                href={`/whatsapp?f=${filter}&n=${inst.id}`}
+                className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-sm ${
+                  activeInstanceId === inst.id
+                    ? "-mb-px border border-b-0 border-stone-200 bg-white font-medium text-stone-800"
+                    : "text-stone-500 hover:text-stone-700"
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    inst.status === "connected" ? "bg-emerald-500" : "bg-red-400"
+                  }`}
+                />
+                {inst.label ?? (inst.isPrimary ? "Principal" : `Número ${i + 1}`)}
+                {need > 0 ? (
+                  <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+                    {need}
+                  </span>
+                ) : null}
+              </a>
+            );
+          })}
+        </div>
+      ) : null}
+
+      <div className="flex min-h-0 flex-1">
       {/* Coluna 1: conversas */}
       <div className="flex w-80 shrink-0 flex-col border-r border-stone-200 bg-white">
         <div className="border-b border-stone-100 p-4">
@@ -196,7 +284,7 @@ export default async function WhatsAppPage({
             {FILTERS.map(([key, label]) => (
               <Link
                 key={key}
-                href={`/whatsapp?f=${key}`}
+                href={`/whatsapp?f=${key}${nParam}`}
                 className={
                   filter === key
                     ? "rounded-full bg-teal-700 px-2.5 py-1 text-xs font-medium text-white"
@@ -223,7 +311,7 @@ export default async function WhatsAppPage({
               return (
                 <Link
                   key={c.id}
-                  href={`/whatsapp?f=${filter}&c=${c.id}`}
+                  href={`/whatsapp?f=${filter}${nParam}&c=${c.id}`}
                   className={`block border-b border-stone-100 px-4 py-3 transition ${
                     active ? "bg-teal-50/60" : "hover:bg-stone-50"
                   }`}
@@ -248,6 +336,9 @@ export default async function WhatsAppPage({
                       : c.mode === "human"
                         ? "com atendente"
                         : "automático"}
+                    {instances.length > 1 && !activeInstanceId
+                      ? ` · ${instanceLabel(c.instanceId)}`
+                      : ""}
                   </p>
                 </Link>
               );
@@ -364,6 +455,7 @@ export default async function WhatsAppPage({
           </div>
         </div>
       ) : null}
+      </div>
     </div>
   );
 }
