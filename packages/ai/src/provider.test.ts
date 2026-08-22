@@ -107,6 +107,7 @@ const executors: AgentToolExecutors = {
   consultarPacote: async () => "sem pacotes",
   escalarParaHumano: async () => "escalado",
   registrarOptOut: async () => "opt-out",
+  atualizarCadastro: async () => "guardado",
 };
 
 describe("provedor OpenAI-compatível", () => {

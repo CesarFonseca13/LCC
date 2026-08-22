@@ -155,6 +155,46 @@ export default async function InicioPage() {
           ),
         );
 
+      // Atividade recente: o diário de bordo da clínica — marcações,
+      // confirmações, remarcações, cancelamentos e presenças de QUALQUER dia
+      // (a agenda acima é só a de hoje), com a origem de cada uma
+      const activityRaw = await tx.execute(sql`
+        SELECT h.from_status, h.to_status, h.source, h.created_at,
+               a.starts_at, cu.full_name AS customer_name,
+               COALESCE(p.name, 'atendimento') AS procedure_name
+        FROM appointment_status_history h
+        JOIN appointments a ON a.id = h.appointment_id
+        JOIN customers cu ON cu.id = a.customer_id
+        LEFT JOIN procedures p ON p.id = a.procedure_id
+        ORDER BY h.created_at DESC
+        LIMIT 12
+      `);
+      const activity = (
+        activityRaw.rows as unknown as {
+          from_status: string | null;
+          to_status: string;
+          source: string | null;
+          created_at: string;
+          starts_at: string;
+          customer_name: string;
+          procedure_name: string;
+        }[]
+      ).map((r) => {
+        const at = utcToZoned(new Date(r.created_at), tz);
+        const st = utcToZoned(new Date(r.starts_at), tz);
+        const [, sm, sd] = st.dateISO.split("-");
+        return {
+          createdDateISO: at.dateISO,
+          createdTime: at.timeHHMM,
+          toStatus: r.to_status,
+          isCreation: r.from_status === null,
+          source: r.source ?? "",
+          customerName: r.customer_name,
+          procedureName: r.procedure_name,
+          apptLabel: `${sd}/${sm} às ${st.timeHHMM}`,
+        };
+      });
+
       const now = new Date();
       const appointments = rows.map((r) => ({
         id: r.id,
@@ -171,6 +211,9 @@ export default async function InicioPage() {
 
       return {
         appointments,
+        activity,
+        todayISO: todayISO(tz),
+        yesterdayISO: addDaysISO(todayISO(tz), -1),
         horaLocal,
         tz,
         onboardingDone: clinicSettings.onboarding_done === true,
@@ -195,7 +238,35 @@ export default async function InicioPage() {
     redirect("/implantacao");
   }
 
-  const { appointments, automationsToday, checklist } = data;
+  const { appointments, activity, automationsToday, checklist } = data;
+
+  const ACTIVITY_LINE: Record<string, (a: (typeof activity)[number]) => string> = {
+    created: (a) => `📅 ${a.customerName} — ${a.procedureName} marcado para ${a.apptLabel}`,
+    confirmed: (a) => `✅ ${a.customerName} confirmou ${a.procedureName} de ${a.apptLabel}`,
+    cancelled: (a) => `✖ ${a.customerName} cancelou ${a.procedureName} de ${a.apptLabel}`,
+    rescheduled: (a) => `🔁 ${a.customerName} remarcou ${a.procedureName} de ${a.apptLabel}`,
+    showed: (a) => `💚 ${a.customerName} compareceu — ${a.procedureName}`,
+    no_show: (a) => `⚠ ${a.customerName} faltou — ${a.procedureName} de ${a.apptLabel}`,
+  };
+  const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
+    ai_agent: { label: "✨ assistente", className: "bg-violet-50 text-violet-700" },
+    customer_whatsapp: { label: "cliente no WhatsApp", className: "bg-emerald-50 text-emerald-700" },
+    online_booking: { label: "agendamento online", className: "bg-sky-50 text-sky-700" },
+  };
+  const activityItems = activity
+    .map((a) => {
+      const kind = a.isCreation && a.toStatus === "scheduled" ? "created" : a.toStatus;
+      const line = ACTIVITY_LINE[kind];
+      if (!line) return null;
+      const when =
+        a.createdDateISO === data.todayISO
+          ? `hoje ${a.createdTime}`
+          : a.createdDateISO === data.yesterdayISO
+            ? `ontem ${a.createdTime}`
+            : `${a.createdDateISO.slice(8, 10)}/${a.createdDateISO.slice(5, 7)} ${a.createdTime}`;
+      return { text: line(a), when, badge: SOURCE_BADGE[a.source] ?? null };
+    })
+    .filter((i): i is NonNullable<typeof i> => i !== null);
   const checklistItems = [
     { done: checklist.whatsappConnected, label: "Conectar o WhatsApp", href: "/configuracoes" },
     { done: checklist.hasProcedures, label: "Cadastrar procedimentos", href: "/servicos" },
@@ -351,6 +422,44 @@ export default async function InicioPage() {
               </Link>
             ) : null}
           </div>
+        )}
+      </section>
+
+      {/* Diário de bordo: tudo que aconteceu, de qualquer dia, com a origem */}
+      <section className="mt-6 rounded-xl border border-stone-200 bg-white">
+        <div className="border-b border-stone-100 px-6 py-4">
+          <h2 className="text-sm font-medium text-stone-700">Aconteceu por aqui</h2>
+          <p className="mt-0.5 text-xs text-stone-400">
+            Marcações, confirmações e mudanças — inclusive as que a assistente resolveu
+            sozinha.
+          </p>
+        </div>
+        {activityItems.length === 0 ? (
+          <p className="px-6 py-8 text-center text-sm text-stone-500">
+            Ainda nada por aqui — assim que a primeira consulta for marcada, ela aparece
+            nesta lista.
+          </p>
+        ) : (
+          <ul>
+            {activityItems.map((item, i) => (
+              <li
+                key={i}
+                className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 px-6 py-2.5 last:border-0"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="whitespace-nowrap text-xs text-stone-400">{item.when}</span>
+                  <span className="truncate text-sm text-stone-700">{item.text}</span>
+                </div>
+                {item.badge ? (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-medium ${item.badge.className}`}
+                  >
+                    {item.badge.label}
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
         )}
       </section>
     </div>

@@ -66,7 +66,14 @@ const customerSchema = z.object({
   phone: phoneField,
   email: z.string().trim().transform((v) => v || null),
   cpf: z.string().trim().transform((v) => v || null),
+  rg: z.string().trim().default("").transform((v) => v || null),
   birthDate: optionalDate,
+  sex: z
+    .enum(["feminino", "masculino", "outro", ""])
+    .default("")
+    .transform((v) => (v === "" ? null : v)),
+  insuranceName: z.string().trim().default("").transform((v) => v || null),
+  insurancePlan: z.string().trim().default("").transform((v) => v || null),
   socialName: z.string().trim().transform((v) => v || null),
   instagram: z.string().trim().transform((v) => v || null),
   source: z.string().trim().transform((v) => v || null),
@@ -89,7 +96,11 @@ export const saveCustomer = authAction({
       phoneE164: input.phone,
       email: input.email,
       cpf: input.cpf,
+      rg: input.rg,
       birthDate: input.birthDate,
+      sex: input.sex,
+      insuranceName: input.insuranceName,
+      insurancePlan: input.insurancePlan,
       socialName: input.socialName,
       instagram: input.instagram,
       source: input.source,

@@ -63,6 +63,8 @@ export interface AgentToolExecutors {
   consultarPacote(): Promise<string>;
   escalarParaHumano(motivo: string, urgencia: "alta" | "normal"): Promise<string>;
   registrarOptOut(): Promise<string>;
+  /** Completa a ficha APENAS nos campos vazios — nunca sobrescreve. */
+  atualizarCadastro(dados: Record<string, string>): Promise<string>;
 }
 
 const TONE_STYLES: Record<AgentPersona["tone"], string> = {
@@ -96,12 +98,13 @@ REGRAS INEGOCIÁVEIS
 2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar.
 3. NUNCA invente preço, desconto ou condição de pagamento. Os únicos valores que você pode citar são os do catálogo acima ("a partir de"). Pedido de desconto ou negociação → escalar_para_humano.
 4. Qualquer assunto de saúde — dor, inchaço, reação, alergia, medicamento, gravidez, "deu errado", resultado do procedimento — é assunto da equipe clínica: acolha com UMA frase gentil (sem opinião técnica) e use escalar_para_humano com urgência alta.
-5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano.
+5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano. Atenção: pedir para remarcar ou cancelar NÃO é frustração — isso é o seu trabalho de todo dia, resolva você mesma com reagendar/cancelar sem escalar.
 6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.
 7. Escreva como no WhatsApp: mensagens curtas, informais na medida do tom, sem listas numeradas, sem markdown, sem assinatura. Varie as aberturas (nunca comece toda resposta do mesmo jeito). No máximo 1 emoji por balão.
 8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.
 9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.
-10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.`;
+10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.
+11. Dados pessoais que a cliente informar na conversa (nome completo, e-mail, CPF, RG, nascimento, endereço, convênio/plano) → guarde na hora com atualizar_cadastro e siga a conversa com naturalidade, sem dizer "atualizei no sistema". NUNCA transforme a conversa em formulário pedindo dados em sequência — no máximo, pergunte o nome completo na hora de marcar pela primeira vez. Para remarcar ou cancelar, use o id do agendamento que está no seu contexto.`;
 }
 
 const TOOLS: ToolDef[] = [
@@ -188,6 +191,27 @@ const TOOLS: ToolDef[] = [
     name: "registrar_opt_out",
     description: "Registra que a cliente não quer mais receber mensagens da clínica.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "atualizar_cadastro",
+    description:
+      "Guarda na ficha dados pessoais que a CLIENTE INFORMOU nesta conversa. Só completa campos que estão vazios — nunca apaga nem substitui o que a clínica já preencheu. Use quando ela contar espontaneamente (novo e-mail, mudou de endereço, informou CPF para o convênio etc.).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        nome_completo: { type: "string" },
+        email: { type: "string" },
+        cpf: { type: "string" },
+        rg: { type: "string" },
+        data_nascimento: { type: "string", description: "dd/mm/aaaa" },
+        convenio: { type: "string", description: "Nome do convênio (ex.: Unimed)" },
+        plano: { type: "string", description: "Plano do convênio" },
+        endereco_rua: { type: "string" },
+        endereco_numero: { type: "string" },
+        endereco_bairro: { type: "string" },
+        endereco_cidade: { type: "string" },
+      },
+    },
   },
   {
     name: "responder_cliente",
@@ -288,6 +312,13 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       );
     },
     registrar_opt_out: () => executors.registrarOptOut(),
+    atualizar_cadastro: (raw) => {
+      const dados: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        if (typeof value === "string" && value.trim()) dados[key] = value.trim();
+      }
+      return executors.atualizarCadastro(dados);
+    },
   };
 
   let toolFailures = 0;

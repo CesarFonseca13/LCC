@@ -5,13 +5,32 @@ import { useState, useTransition } from "react";
 import { Button, FieldError, Input, Label, Textarea } from "@/components/ui";
 import { saveCustomer } from "../actions";
 
+/** "34 anos" a partir de dd/mm/aaaa — idade nunca é guardada, só derivada. */
+function ageLabel(birthBR: string): string | null {
+  const m = birthBR.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const birth = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  if (Number.isNaN(birth.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const beforeBirthday =
+    now.getMonth() < birth.getMonth() ||
+    (now.getMonth() === birth.getMonth() && now.getDate() < birth.getDate());
+  if (beforeBirthday) age -= 1;
+  return age >= 0 && age < 130 ? `${age} anos` : null;
+}
+
 export interface DadosInitial {
   id: string;
   fullName: string;
   phone: string;
   email: string;
   cpf: string;
+  rg: string;
   birthDate: string;
+  sex: string;
+  insuranceName: string;
+  insurancePlan: string;
   socialName: string;
   instagram: string;
   source: string;
@@ -48,7 +67,11 @@ export function DadosForm({
           phone: get("phone"),
           email: get("email"),
           cpf: get("cpf"),
+          rg: get("rg"),
           birthDate: get("birthDate"),
+          sex: get("sex") as "feminino" | "masculino" | "outro" | "",
+          insuranceName: get("insuranceName"),
+          insurancePlan: get("insurancePlan"),
           socialName: get("socialName"),
           instagram: get("instagram"),
           source: get("source"),
@@ -104,13 +127,45 @@ export function DadosForm({
           <Input id="d-cpf" name="cpf" defaultValue={initial.cpf} />
         </div>
         <div>
-          <Label htmlFor="d-birth" hint="opcional">Nascimento</Label>
+          <Label htmlFor="d-rg" hint="opcional">RG</Label>
+          <Input id="d-rg" name="rg" defaultValue={initial.rg} />
+        </div>
+        <div>
+          <Label htmlFor="d-sex" hint="opcional">Sexo</Label>
+          <select
+            id="d-sex"
+            name="sex"
+            defaultValue={initial.sex}
+            className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800 focus:border-teal-600 focus:outline-none"
+          >
+            <option value="">—</option>
+            <option value="feminino">Feminino</option>
+            <option value="masculino">Masculino</option>
+            <option value="outro">Outro</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <div>
+          <Label htmlFor="d-birth" hint={ageLabel(initial.birthDate) ?? "opcional"}>
+            Nascimento
+          </Label>
           <Input id="d-birth" name="birthDate" defaultValue={initial.birthDate} placeholder="dd/mm/aaaa" />
         </div>
         <div>
-          <Label htmlFor="d-instagram" hint="opcional">Instagram</Label>
-          <Input id="d-instagram" name="instagram" defaultValue={initial.instagram} placeholder="@usuario" />
+          <Label htmlFor="d-insurance" hint="opcional">Convênio</Label>
+          <Input id="d-insurance" name="insuranceName" defaultValue={initial.insuranceName} placeholder="Unimed, Amil..." />
         </div>
+        <div>
+          <Label htmlFor="d-plan" hint="opcional">Plano</Label>
+          <Input id="d-plan" name="insurancePlan" defaultValue={initial.insurancePlan} />
+        </div>
+      </div>
+
+      <div>
+        <Label htmlFor="d-instagram" hint="opcional">Instagram</Label>
+        <Input id="d-instagram" name="instagram" defaultValue={initial.instagram} placeholder="@usuario" />
       </div>
 
       <div>

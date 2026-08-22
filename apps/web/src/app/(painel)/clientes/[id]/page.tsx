@@ -316,9 +316,13 @@ export default async function ClientePage({
               phone: formatPhoneBR(customer.phoneE164),
               email: customer.email ?? "",
               cpf: customer.cpf ?? "",
+              rg: customer.rg ?? "",
               birthDate: customer.birthDate
                 ? new Date(`${customer.birthDate}T12:00:00`).toLocaleDateString("pt-BR")
                 : "",
+              sex: customer.sex ?? "",
+              insuranceName: customer.insuranceName ?? "",
+              insurancePlan: customer.insurancePlan ?? "",
               socialName: customer.socialName ?? "",
               instagram: customer.instagram ?? "",
               source: customer.source ?? "",

@@ -347,6 +347,15 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
         .update(schema.appointments)
         .set({ status: "rescheduled", statusChangedAt: new Date() })
         .where(eq(schema.appointments.id, original.id));
+      // Transição do agendamento antigo também vai para o diário de bordo
+      await db.insert(schema.appointmentStatusHistory).values({
+        clinicId: clinic.id,
+        appointmentId: original.id,
+        fromStatus: original.status,
+        toStatus: "rescheduled",
+        source: "ai_agent",
+        reason: "remarcado pela cliente via assistente",
+      });
       await db
         .update(schema.automationRuns)
         .set({ status: "cancelled", stopReason: "remarcado pela IA", nextRunAt: null, finishedAt: new Date() })
@@ -420,6 +429,123 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
           ),
         );
       return "Cancelado com sucesso.";
+    },
+
+    async atualizarCadastro(dados) {
+      const fresh = (
+        await db
+          .select()
+          .from(schema.customers)
+          .where(eq(schema.customers.id, customer.id))
+          .limit(1)
+      )[0];
+      if (!fresh) return "Ficha não encontrada.";
+
+      const clean = (v: string | undefined, max: number): string | null =>
+        typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
+
+      type Fillable = Partial<{
+        fullName: string;
+        email: string;
+        cpf: string;
+        rg: string;
+        birthDate: string;
+        insuranceName: string;
+        insurancePlan: string;
+        addressStreet: string;
+        addressNumber: string;
+        addressDistrict: string;
+        addressCity: string;
+      }>;
+      const updates: Fillable & { updatedAt?: Date } = {};
+      const saved: string[] = [];
+      const kept: string[] = [];
+      const fill = (
+        key: keyof Fillable,
+        label: string,
+        current: unknown,
+        value: string | null,
+      ) => {
+        if (!value) return;
+        // SÓ completa campo vazio — o que a clínica preencheu é intocável
+        if (current && String(current).trim()) {
+          kept.push(label);
+          return;
+        }
+        updates[key] = value;
+        saved.push(label);
+      };
+
+      // Nome: telefone-como-nome ou só o primeiro nome (pushName) conta como
+      // "não preenchido de verdade"; nome completo digitado pela clínica fica
+      const nome = clean(dados.nome_completo, 120);
+      if (nome && nome.split(/\s+/).length >= 2) {
+        const current = fresh.fullName.trim();
+        if (/^\+?\d+$/.test(current) || current.split(/\s+/).length < 2) {
+          updates.fullName = nome;
+          saved.push("nome completo");
+        } else {
+          kept.push("nome");
+        }
+      }
+
+      const email = clean(dados.email, 160)?.toLowerCase() ?? null;
+      fill(
+        "email",
+        "e-mail",
+        fresh.email,
+        email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : null,
+      );
+      const cpfDigits = (dados.cpf ?? "").replace(/\D/g, "");
+      fill(
+        "cpf",
+        "CPF",
+        fresh.cpf,
+        cpfDigits.length === 11
+          ? cpfDigits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")
+          : null,
+      );
+      fill("rg", "RG", fresh.rg, clean(dados.rg, 20));
+
+      const birthMatch = (dados.data_nascimento ?? "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      let birthISO: string | null = null;
+      if (birthMatch) {
+        const iso = `${birthMatch[3]}-${birthMatch[2]}-${birthMatch[1]}`;
+        const parsed = new Date(`${iso}T12:00:00`);
+        if (
+          !Number.isNaN(parsed.getTime()) &&
+          parsed.getTime() < Date.now() &&
+          Number(birthMatch[3]) > 1900
+        ) {
+          birthISO = iso;
+        }
+      }
+      fill("birthDate", "nascimento", fresh.birthDate, birthISO);
+      fill("insuranceName", "convênio", fresh.insuranceName, clean(dados.convenio, 80));
+      fill("insurancePlan", "plano", fresh.insurancePlan, clean(dados.plano, 80));
+      fill("addressStreet", "rua", fresh.addressStreet, clean(dados.endereco_rua, 160));
+      fill("addressNumber", "número", fresh.addressNumber, clean(dados.endereco_numero, 20));
+      fill("addressDistrict", "bairro", fresh.addressDistrict, clean(dados.endereco_bairro, 80));
+      fill("addressCity", "cidade", fresh.addressCity, clean(dados.endereco_cidade, 80));
+
+      if (saved.length > 0) {
+        updates.updatedAt = new Date();
+        await db
+          .update(schema.customers)
+          .set(updates)
+          .where(eq(schema.customers.id, customer.id));
+      }
+
+      const parts: string[] = [];
+      if (saved.length) parts.push(`Guardado na ficha: ${saved.join(", ")}.`);
+      if (kept.length) {
+        parts.push(
+          `Já preenchidos pela clínica (mantidos — se a cliente pediu correção, escale para a equipe): ${kept.join(", ")}.`,
+        );
+      }
+      if (!parts.length) parts.push("Nenhum dado válido para guardar.");
+      parts.push("Siga a conversa naturalmente, sem mencionar sistema ou ficha.");
+      return parts.join(" ");
     },
 
     async confirmarPresenca(agendamentoId) {
@@ -560,9 +686,14 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       .where(eq(schema.conversations.id, conversation.id))
       .limit(1)
   )[0];
+  // Exceção: quando foi o PRÓPRIO turno que escalou (waiting_human), a
+  // despedida ("vou chamar alguém da equipe") PRECISA sair — sem ela a
+  // cliente fica no vácuo
+  const modeOk =
+    live?.mode === "ai" || (live?.mode === "waiting_human" && reply.escalated);
   if (
     !live ||
-    live.mode !== "ai" ||
+    !modeOk ||
     (live.lastInboundAt &&
       conversation.lastInboundAt &&
       live.lastInboundAt > conversation.lastInboundAt)
