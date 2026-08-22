@@ -59,8 +59,14 @@ export async function materializeConfirmationRuns(
   for (const item of plan) {
     if (!enabledSet.has(item.automationId)) continue;
     const idealAt = startsAt.getTime() - item.offsetMs;
-    // Marco já passou: dispara agora se ainda houver folga útil; senão pula
-    if (idealAt <= now && untilStart < item.minGapMs) continue;
+    // Marco que já passou NÃO dispara na hora — "posso confirmar sua
+    // presença?" minutos depois de a cliente acabar de marcar é cara de
+    // robô; o próximo marco da cadência cobre a confirmação. Exceção:
+    // pré-cuidados ainda são úteis na hora se houver folga (informação
+    // nova, não pergunta redundante).
+    if (idealAt <= now) {
+      if (item.automationId !== "pre_care" || untilStart < item.minGapMs) continue;
+    }
     const nextRunAt = new Date(Math.max(idealAt, now));
     await tx
       .insert(schema.automationRuns)

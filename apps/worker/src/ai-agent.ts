@@ -658,16 +658,18 @@ async function materializeRuns(
     );
   const enabledSet = new Set(enabled.map((e) => e.automationId));
   const now = Date.now();
-  const untilStart = startsAt.getTime() - now;
   const plan = [
-    { automationId: "reminder_24h", offsetMs: 24 * 3_600_000, minGapMs: 2 * 3_600_000 },
-    { automationId: "confirm_2h", offsetMs: 2 * 3_600_000, minGapMs: 20 * 60_000 },
-    { automationId: "reminder_45min", offsetMs: 45 * 60_000, minGapMs: 10 * 60_000 },
+    { automationId: "reminder_24h", offsetMs: 24 * 3_600_000 },
+    { automationId: "confirm_2h", offsetMs: 2 * 3_600_000 },
+    { automationId: "reminder_45min", offsetMs: 45 * 60_000 },
   ];
   for (const item of plan) {
     if (!enabledSet.has(item.automationId)) continue;
     const idealAt = startsAt.getTime() - item.offsetMs;
-    if (idealAt <= now && untilStart < item.minGapMs) continue;
+    // Marco que já passou não dispara na hora — a cliente ACABOU de marcar
+    // nesta conversa; pedir confirmação em seguida é cara de robô. O
+    // próximo marco da cadência (2h/45min) cobre a confirmação.
+    if (idealAt <= now) continue;
     await db
       .insert(schema.automationRuns)
       .values({
@@ -675,7 +677,7 @@ async function materializeRuns(
         automationId: item.automationId,
         customerId,
         appointmentId,
-        nextRunAt: new Date(Math.max(idealAt, now)),
+        nextRunAt: new Date(idealAt),
       })
       .onConflictDoNothing();
   }
