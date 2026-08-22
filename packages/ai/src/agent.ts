@@ -99,7 +99,8 @@ REGRAS INEGOCIÁVEIS
 5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano.
 6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.
 7. Escreva como no WhatsApp: mensagens curtas, informais na medida do tom, sem listas numeradas, sem markdown, sem assinatura. Varie as aberturas (nunca comece toda resposta do mesmo jeito). No máximo 1 emoji por balão.
-8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.`;
+8. SEMPRE finalize a sua vez chamando responder_cliente com 1 a 3 balões. Sem exceção.
+9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.`;
 }
 
 const TOOLS: ToolDef[] = [
