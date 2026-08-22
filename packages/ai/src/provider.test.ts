@@ -123,6 +123,7 @@ describe("provedor OpenAI-compatível", () => {
         },
         customer: {
           firstName: "Maria",
+          nameConfirmed: true,
           isNew: false,
           visitsCount: 3,
           upcomingAppointment: null,

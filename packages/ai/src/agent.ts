@@ -28,7 +28,10 @@ export interface AgentClinicInfo {
 }
 
 export interface AgentCustomerContext {
+  /** Vazio quando a ficha não tem nome utilizável (perfil do WhatsApp sem nome). */
   firstName: string;
+  /** true = a ficha tem nome completo de verdade (2+ palavras, não-telefone). */
+  nameConfirmed: boolean;
   isNew: boolean;
   visitsCount: number;
   upcomingAppointment: string | null; // "Limpeza de Pele, sex 22/08 às 14:00 (id: ...)"
@@ -258,7 +261,8 @@ export async function runAgentTurn(
     `AGORA: ${input.nowLabel}.
 
 SOBRE ESTA CLIENTE
-Nome: ${input.customer.firstName}${input.customer.isNew ? " (primeira conversa — ainda não é cliente)" : ` (${input.customer.visitsCount} visita(s) anteriores)`}.
+Nome: ${input.customer.firstName || "ainda não sabemos (o perfil do WhatsApp não tem nome utilizável)"}${input.customer.isNew ? " (primeira conversa — ainda não é cliente)" : ` (${input.customer.visitsCount} visita(s) anteriores)`}.
+${input.customer.nameConfirmed ? "" : "ATENÇÃO: a ficha ainda NÃO tem o nome completo confirmado. Antes de finalizar um agendamento, pergunte o nome completo dela com naturalidade e guarde com atualizar_cadastro — a ferramenta agendar não funciona sem isso."}
 ${input.customer.upcomingAppointment ? `Próximo agendamento: ${input.customer.upcomingAppointment}.` : "Sem agendamento futuro."}
 ${input.customer.packageSummary ? `Pacotes: ${input.customer.packageSummary}.` : ""}
 ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo — ${input.customer.activeGoal}.` : ""}`,
@@ -282,14 +286,13 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     if (!isFirstReply || balloons.length === 0 || GREETING_RE.test(balloons[0]!)) {
       return balloons;
     }
-    const variants = [
-      `Oi, ${input.customer.firstName}! `,
-      `Olá, ${input.customer.firstName}, tudo bem? `,
-      `Oi, ${input.customer.firstName}, tudo bem? 💛 `,
-    ];
+    const nome = input.customer.firstName;
+    const variants = nome
+      ? [`Oi, ${nome}! `, `Olá, ${nome}, tudo bem? `, `Oi, ${nome}, tudo bem? 💛 `]
+      : ["Oi! ", "Olá, tudo bem? ", "Oi, tudo bem? 💛 "];
     const pick =
       variants[
-        Math.abs([...input.customer.firstName].reduce((a, c) => a + c.charCodeAt(0), 0)) %
+        Math.abs([...(nome || "x")].reduce((a, c) => a + c.charCodeAt(0), 0)) %
           variants.length
       ]!;
     const first = balloons[0]!;

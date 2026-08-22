@@ -286,6 +286,19 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
     },
 
     async agendar(slotId, procedimentoNome) {
+      // Garantia mecânica: agendamento só nasce com nome completo de verdade
+      // na ficha (relê AGORA — atualizar_cadastro pode ter rodado neste turno)
+      const freshName =
+        (
+          await db
+            .select({ fullName: schema.customers.fullName })
+            .from(schema.customers)
+            .where(eq(schema.customers.id, customer.id))
+            .limit(1)
+        )[0]?.fullName ?? "";
+      if (!nameReliability(freshName).confirmed) {
+        return "NÃO AGENDADO: a ficha ainda não tem o nome completo da cliente. Pergunte o nome completo dela com naturalidade, registre com atualizar_cadastro e só então chame agendar de novo.";
+      }
       const proc = matchProcedure(procedures, procedimentoNome);
       if (!proc) throw new Error("Procedimento não encontrado.");
       const parsed = parseSlotId(slotId);
@@ -638,7 +651,8 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
         })),
       },
       customer: {
-        firstName: customer.fullName.split(" ")[0] ?? customer.fullName,
+        firstName: nameReliability(customer.fullName).firstName,
+        nameConfirmed: nameReliability(customer.fullName).confirmed,
         isNew: customer.status === "lead" && (visits?.count ?? 0) === 0,
         visitsCount: visits?.count ?? 0,
         upcomingAppointment: upcomingLabel,
@@ -738,6 +752,15 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
 }
 
 // ── Utilitários ──────────────────────────────────────────────────────
+
+/** Nome "de verdade" = 2+ palavras e não é telefone. Perfil do WhatsApp com
+ *  apelido de uma palavra serve para cumprimentar, não para agendar. */
+function nameReliability(fullName: string): { firstName: string; confirmed: boolean } {
+  const name = fullName.trim();
+  if (!name || /^\+?\d+$/.test(name)) return { firstName: "", confirmed: false };
+  const words = name.split(/\s+/);
+  return { firstName: words[0] ?? "", confirmed: words.length >= 2 };
+}
 
 function matchProcedure(
   procedures: { id: string; name: string; price: string; durationMinutes: number }[],
