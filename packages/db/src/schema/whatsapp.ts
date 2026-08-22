@@ -28,7 +28,7 @@ export const whatsappInstances = pgTable(
     evolutionInstanceName: text("evolution_instance_name").notNull().unique(),
     label: text("label"),
     phoneE164: text("phone_e164"),
-    isPrimary: boolean("is_primary").notNull().default(true),
+    isPrimary: boolean("is_primary").notNull().default(false),
     status: text("status", {
       enum: ["created", "qr_pending", "connecting", "connected", "disconnected", "banned"],
     })
@@ -38,6 +38,8 @@ export const whatsappInstances = pgTable(
     qrCode: text("qr_code"),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     lastDisconnectAt: timestamp("last_disconnect_at", { withTimezone: true }),
+    /** Ritmo anti-ban de campanha POR NÚMERO (45-180s entre envios). */
+    nextCampaignSendAt: timestamp("next_campaign_send_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }),
   },

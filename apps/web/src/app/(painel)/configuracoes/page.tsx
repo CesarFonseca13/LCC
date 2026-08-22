@@ -27,21 +27,22 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const { instance, aiProvider, aiSettings, booking } = await withTenant(
+  const { instances, aiProvider, aiSettings, booking } = await withTenant(
     auth.clinicId,
     async (tx) => {
-      const instance =
-        (
-          await tx
-            .select({
-              status: schema.whatsappInstances.status,
-              phoneE164: schema.whatsappInstances.phoneE164,
-              qrCode: schema.whatsappInstances.qrCode,
-            })
-            .from(schema.whatsappInstances)
-            .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
-            .limit(1)
-        )[0] ?? null;
+      const instances = await tx
+        .select({
+          id: schema.whatsappInstances.id,
+          label: schema.whatsappInstances.label,
+          status: schema.whatsappInstances.status,
+          phoneE164: schema.whatsappInstances.phoneE164,
+          qrCode: schema.whatsappInstances.qrCode,
+          isPrimary: schema.whatsappInstances.isPrimary,
+          createdAt: schema.whatsappInstances.createdAt,
+        })
+        .from(schema.whatsappInstances)
+        .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
+        .orderBy(schema.whatsappInstances.createdAt);
       const clinic = (
         await tx
           .select({
@@ -59,7 +60,7 @@ export default async function ConfiguracoesPage() {
         | undefined;
       const aiProvider = parseClinicAiProvider(clinic?.settings);
       return {
-        instance,
+        instances,
         aiProvider,
         aiSettings: {
           enabled: ai?.enabled === true,
@@ -94,9 +95,14 @@ export default async function ConfiguracoesPage() {
 
       <div className="mt-6 max-w-2xl space-y-6">
         <WhatsAppCard
-          initialStatus={instance?.status ?? "none"}
-          initialQr={instance?.qrCode ?? null}
-          initialPhone={instance?.phoneE164 ? formatPhoneBR(instance.phoneE164) : null}
+          initialInstances={instances.map((inst, i) => ({
+            id: inst.id,
+            label: inst.label ?? (inst.isPrimary ? "Principal" : `Número ${i + 1}`),
+            phone: inst.phoneE164 ? formatPhoneBR(inst.phoneE164) : null,
+            status: inst.status,
+            qr: inst.qrCode,
+            isPrimary: inst.isPrimary,
+          }))}
         />
 
         <AiCard

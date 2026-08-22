@@ -6,21 +6,22 @@ import { unsafeGlobalDb } from "@clinicaos/db";
 
 /**
  * Campanhas: envio GRADUAL para a base cadastrada — nunca rajada.
- * O ritmo (45-180s) e o teto diário valem POR NÚMERO (clínica), não por
- * campanha: duas campanhas ligadas dividem a mesma cadência. Janela 9-18h
- * local, revalidação da cliente na hora, claim transacional (crash não
- * perde destinatária) e template inválido PAUSA a campanha em vez de
- * queimar a lista em silêncio.
+ * MULTI-NÚMERO: o ritmo (45-180s) e o teto diário valem POR NÚMERO — com 2
+ * números conectados, a campanha alcança 2x mais gente por dia dividindo o
+ * risco. Regra de ouro: cliente que já conversa com um número continua nele;
+ * cliente nova vai para o número livre há mais tempo. Janela 9-18h local,
+ * revalidação na hora, claim transacional e template inválido PAUSA a campanha.
  */
 export async function processCampaignsSweep(logger: Logger): Promise<void> {
   const db = unsafeGlobalDb();
   const running = await db.execute(sql`
     SELECT ca.id, ca.clinic_id, ca.message_template, ca.daily_cap, ca.started_at,
-           c.timezone, c.name AS clinic_name, w.id AS instance_id
+           c.timezone, c.name AS clinic_name
     FROM campaigns ca
     JOIN clinics c ON c.id = ca.clinic_id
-    JOIN whatsapp_instances w ON w.clinic_id = ca.clinic_id AND w.status = 'connected'
     WHERE ca.status = 'running'
+      AND EXISTS (SELECT 1 FROM whatsapp_instances w
+                  WHERE w.clinic_id = ca.clinic_id AND w.status = 'connected')
     -- Rodízio justo: quem enviou há mais tempo (ou nunca) vai primeiro — duas
     -- campanhas ligadas se alternam em vez de a mais antiga monopolizar o ritmo
     ORDER BY ca.next_send_at ASC NULLS FIRST, ca.started_at ASC
@@ -43,7 +44,6 @@ interface CampaignRow {
   started_at: Date | string | null;
   timezone: string | null;
   clinic_name: string;
-  instance_id: string;
 }
 
 async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
@@ -85,31 +85,32 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
   const hour = Number(utcToZoned(new Date(), tz).timeHHMM.slice(0, 2));
   if (hour < 9 || hour >= 18) return;
 
-  // Ritmo POR NÚMERO: se qualquer campanha da clínica agendou o próximo envio
-  // para o futuro, todas esperam (45-180s entre mensagens do mesmo WhatsApp)
-  const clinicPacing = await db.execute(sql`
-    SELECT 1 FROM campaigns
+  // Teto: com caps diferentes entre campanhas ligadas, vale o MENOR — o mais
+  // conservador que a dona configurou (anti-ban em primeiro lugar). O teto e o
+  // ritmo são POR NÚMERO — a checagem final acontece na escolha do número.
+  const capRow = await db.execute(sql`
+    SELECT min(daily_cap) AS cap FROM campaigns
     WHERE clinic_id = ${campaign.clinic_id} AND status = 'running'
-      AND next_send_at > now()
+  `);
+  const perNumberCap = Number(
+    (capRow.rows[0] as { cap: number | null }).cap ?? campaign.daily_cap,
+  );
+
+  // Algum número disponível AGORA (ritmo vencido + teto do dia com folga)?
+  // Sem nenhum → espera a próxima varredura.
+  const anyReady = await db.execute(sql`
+    SELECT 1 FROM whatsapp_instances w
+    WHERE w.clinic_id = ${campaign.clinic_id} AND w.status = 'connected'
+      AND COALESCE(w.next_campaign_send_at <= now(), true)
+      AND (SELECT count(*) FROM campaign_recipients r2
+           JOIN messages m2 ON m2.id = r2.message_id
+           JOIN conversations c2 ON c2.id = m2.conversation_id
+           WHERE c2.instance_id = w.id AND r2.status = 'sent'
+             AND r2.sent_at >= (now() AT TIME ZONE ${tz})::date::timestamp AT TIME ZONE ${tz}
+          ) < ${perNumberCap}
     LIMIT 1
   `);
-  if ((clinicPacing.rowCount ?? 0) > 0) return;
-
-  // Teto diário POR NÚMERO (soma todas as campanhas da clínica no dia local).
-  // Com caps diferentes entre campanhas ligadas, vale o MENOR — o número segue
-  // o ritmo mais conservador que a dona configurou (anti-ban em primeiro lugar)
-  const sentToday = await db.execute(sql`
-    SELECT (SELECT count(*)::int
-            FROM campaign_recipients r
-            JOIN campaigns ca ON ca.id = r.campaign_id
-            WHERE ca.clinic_id = ${campaign.clinic_id} AND r.status = 'sent'
-              AND r.sent_at >= (now() AT TIME ZONE ${tz})::date::timestamp AT TIME ZONE ${tz}
-           ) AS n,
-           (SELECT min(daily_cap) FROM campaigns
-            WHERE clinic_id = ${campaign.clinic_id} AND status = 'running') AS cap
-  `);
-  const today = sentToday.rows[0] as { n: number; cap: number | null };
-  if (Number(today.n) >= Number(today.cap ?? campaign.daily_cap)) return;
+  if ((anyReady.rowCount ?? 0) === 0) return;
 
   // Tudo dentro de UMA transação: claim + mensagem ou nada (crash não perde
   // destinatária); advisory lock por clínica segura varreduras concorrentes
@@ -189,6 +190,40 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
       return false;
     }
 
+    // Escolha do NÚMERO: quem já conversa com a cliente FICA no mesmo número
+    // (gente de verdade não recebe a clínica de vários números); cliente nova
+    // vai para o número livre há mais tempo — rodízio que divide o risco
+    const instRows = await tx.execute(sql`
+      SELECT w.id,
+             EXISTS (SELECT 1 FROM conversations c
+                     WHERE c.instance_id = w.id AND c.customer_id = ${target.customer_id}) AS sticky,
+             COALESCE(w.next_campaign_send_at <= now(), true) AS ready,
+             (SELECT count(*)::int FROM campaign_recipients r2
+              JOIN messages m2 ON m2.id = r2.message_id
+              JOIN conversations c2 ON c2.id = m2.conversation_id
+              WHERE c2.instance_id = w.id AND r2.status = 'sent'
+                AND r2.sent_at >= (now() AT TIME ZONE ${tz})::date::timestamp AT TIME ZONE ${tz}
+             ) AS sent_today
+      FROM whatsapp_instances w
+      WHERE w.clinic_id = ${campaign.clinic_id} AND w.status = 'connected'
+      ORDER BY sticky DESC, w.next_campaign_send_at ASC NULLS FIRST
+    `);
+    const options = instRows.rows as unknown as {
+      id: string;
+      sticky: boolean;
+      ready: boolean;
+      sent_today: number;
+    }[];
+    if (options.length === 0) return false;
+    const available = (o: (typeof options)[number]) =>
+      o.ready && Number(o.sent_today) < perNumberCap;
+    const chosen = options[0]!.sticky
+      ? available(options[0]!)
+        ? options[0]!
+        : null // o número DELA está no ritmo/teto → espera (nunca troca de número)
+      : (options.find(available) ?? null);
+    if (!chosen) return false;
+
     const body = renderTemplate(
       campaign.message_template,
       { nome: firstName, clinica: campaign.clinic_name },
@@ -198,7 +233,7 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
     const remoteJid = `${target.phone_e164.replace("+", "")}@s.whatsapp.net`;
     const conversation = await tx.execute(sql`
       INSERT INTO conversations (clinic_id, instance_id, remote_jid, customer_id)
-      VALUES (${campaign.clinic_id}, ${campaign.instance_id}, ${remoteJid}, ${target.customer_id})
+      VALUES (${campaign.clinic_id}, ${chosen.id}, ${remoteJid}, ${target.customer_id})
       ON CONFLICT (instance_id, remote_jid) DO UPDATE SET customer_id = EXCLUDED.customer_id
       RETURNING id
     `);
@@ -216,7 +251,13 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
       SET status = 'sent', sent_at = now(), message_id = ${(message.rows[0] as { id: string }).id}
       WHERE id = ${target.recipient_id} AND status = 'pending'
     `);
-    // Ritmo do próximo envio do NÚMERO: 45-180s
+    // Ritmo do próximo envio DESTE NÚMERO: 45-180s (outros números seguem livres)
+    await tx.execute(sql`
+      UPDATE whatsapp_instances
+      SET next_campaign_send_at = now() + make_interval(secs => ${45 + Math.floor(Math.random() * 135)})
+      WHERE id = ${chosen.id}
+    `);
+    // Marcador da campanha continua alimentando o rodízio justo e a tela
     await tx.execute(sql`
       UPDATE campaigns SET next_send_at = now() + make_interval(secs => ${45 + Math.floor(Math.random() * 135)}),
                            updated_at = now()

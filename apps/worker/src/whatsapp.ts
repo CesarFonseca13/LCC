@@ -266,6 +266,32 @@ async function handleFromMe(
 }
 
 /**
+ * Multi-número: escolhe POR CLIENTE qual número da clínica fala com ela.
+ * Regra de ouro: quem já conversou com um número continua nele (cliente real
+ * não recebe a clínica de 3 números diferentes); cliente nova usa o principal;
+ * principal fora do ar → qualquer número conectado.
+ */
+export async function pickInstanceForCustomer(
+  clinicId: string,
+  customerId: string,
+): Promise<{ id: string; name: string } | null> {
+  const db = unsafeGlobalDb();
+  const rows = await db.execute(sql`
+    SELECT w.id, w.evolution_instance_name AS name
+    FROM whatsapp_instances w
+    WHERE w.clinic_id = ${clinicId} AND w.status = 'connected'
+    ORDER BY EXISTS (
+        SELECT 1 FROM conversations c
+        WHERE c.instance_id = w.id AND c.customer_id = ${customerId}
+      ) DESC,
+      w.is_primary DESC, w.created_at ASC
+    LIMIT 1
+  `);
+  const row = rows.rows[0] as { id: string; name: string } | undefined;
+  return row ?? null;
+}
+
+/**
  * Nome do perfil do WhatsApp vem como a pessoa quis: "Lari 💖✨", "★ Ju ★",
  * "Mãe da Duda 🌸"... Antes de virar nome de ficha, tira emoji/símbolo e
  * espaços duplicados. Sobrou nada utilizável → ficha nasce com o telefone

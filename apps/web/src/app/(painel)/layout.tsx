@@ -40,27 +40,36 @@ export default async function PainelLayout({
   }
 
   let whatsappStatus: string | null = null;
+  let whatsappCounts = { connected: 0, total: 0 };
   let approvalsCount = 0;
   if (auth.clinicId) {
     const info = await withTenant(
       auth.clinicId,
       async (tx) => {
-        const instance = (
+        const counts = (
           await tx
-            .select({ status: schema.whatsappInstances.status })
+            .select({
+              total: sql<number>`count(*)::int`,
+              connected: sql<number>`count(*) FILTER (WHERE status = 'connected')::int`,
+            })
             .from(schema.whatsappInstances)
             .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
-            .limit(1)
-        )[0];
+        )[0] ?? { total: 0, connected: 0 };
         const pending = await tx
           .select({ count: sql<number>`count(*)::int` })
           .from(schema.approvals)
           .where(eq(schema.approvals.status, "pending"));
-        return { status: instance?.status ?? null, pending: pending[0]?.count ?? 0 };
+        return { counts, pending: pending[0]?.count ?? 0 };
       },
       auth.userId,
     );
-    whatsappStatus = info.status;
+    whatsappCounts = info.counts;
+    whatsappStatus =
+      info.counts.total > 0 && info.counts.connected === info.counts.total
+        ? "connected"
+        : info.counts.total > 0
+          ? "disconnected"
+          : null;
     approvalsCount = info.pending;
   }
 
@@ -68,9 +77,10 @@ export default async function PainelLayout({
     <div className="flex h-screen bg-stone-50">
       <Sidebar approvalsCount={approvalsCount} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar auth={auth} whatsappStatus={whatsappStatus} />
+        <Topbar auth={auth} whatsappStatus={whatsappStatus} whatsappCounts={whatsappCounts} />
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
     </div>
   );
 }
+

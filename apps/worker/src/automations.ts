@@ -4,6 +4,7 @@ import { renderTemplate } from "@clinicaos/core/template-render";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { findSlots, schema, unsafeGlobalDb } from "@clinicaos/db";
 import { clampToSendWindow, mergedConfig } from "./reactivation";
+import { pickInstanceForCustomer } from "./whatsapp";
 
 /**
  * Motor de automações: varre automation_runs.next_run_at <= now() (a fila real
@@ -90,7 +91,7 @@ interface RunContext {
   professionalName: string | null;
   settings: typeof schema.automationSettings.$inferSelect | null;
   definition: typeof schema.automationDefinitions.$inferSelect;
-  instance: { id: string; status: string } | null;
+  instance: { id: string; name: string } | null;
 }
 
 /** Carrega tudo e aplica as guardas universais. Retorna null se a run deve morrer. */
@@ -147,14 +148,9 @@ async function loadContext(run: Run): Promise<RunContext | "postpone" | null> {
     return null;
   }
 
-  const instance = (
-    await db
-      .select({ id: schema.whatsappInstances.id, status: schema.whatsappInstances.status })
-      .from(schema.whatsappInstances)
-      .where(eq(schema.whatsappInstances.clinicId, run.clinicId))
-      .limit(1)
-  )[0];
-  if (!instance || instance.status !== "connected") {
+  // Multi-número: usa o número que JÁ conversa com a cliente (senão o principal)
+  const instance = await pickInstanceForCustomer(run.clinicId, run.customerId);
+  if (!instance) {
     // WhatsApp fora: adia 5 minutos sem perder o estado
     const db2 = unsafeGlobalDb();
     await db2

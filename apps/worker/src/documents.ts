@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { pickInstanceForCustomer } from "./whatsapp";
 
 /**
  * Geração do PDF do termo assinado (Gotenberg) com página de evidências:
@@ -151,14 +152,9 @@ async function generatePdf(
       .where(eq(schema.customers.id, doc.customerId))
       .limit(1)
   )[0];
-  const instance = (
-    await db
-      .select({ id: schema.whatsappInstances.id, status: schema.whatsappInstances.status })
-      .from(schema.whatsappInstances)
-      .where(eq(schema.whatsappInstances.clinicId, doc.clinicId))
-      .limit(1)
-  )[0];
-  if (customer && instance?.status === "connected") {
+  // Multi-número: a cópia sai pelo número que já conversa com a cliente
+  const instance = await pickInstanceForCustomer(doc.clinicId, doc.customerId);
+  if (customer && instance) {
     const remoteJid = `${customer.phoneE164.replace("+", "")}@s.whatsapp.net`;
     const conversation = (
       await db

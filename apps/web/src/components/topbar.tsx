@@ -5,14 +5,30 @@ import type { AuthContext } from "@/lib/session";
 export function Topbar({
   auth,
   whatsappStatus,
+  whatsappCounts,
 }: {
   auth: AuthContext;
   whatsappStatus: string | null;
+  /** Multi-número: {conectados, total}. */
+  whatsappCounts?: { connected: number; total: number };
 }) {
-  const connected = whatsappStatus === "connected";
-  const pill = connected
-    ? { dot: "bg-emerald-500", text: "WhatsApp conectado", cls: "bg-emerald-50 text-emerald-700" }
-    : { dot: "bg-red-400", text: "WhatsApp não conectado", cls: "bg-stone-100 text-stone-500" };
+  const total = whatsappCounts?.total ?? (whatsappStatus ? 1 : 0);
+  const connectedCount =
+    whatsappCounts?.connected ?? (whatsappStatus === "connected" ? 1 : 0);
+  const pill =
+    total > 0 && connectedCount === total
+      ? {
+          dot: "bg-emerald-500",
+          text: total > 1 ? `WhatsApp conectado · ${total} números` : "WhatsApp conectado",
+          cls: "bg-emerald-50 text-emerald-700",
+        }
+      : connectedCount > 0
+        ? {
+            dot: "bg-amber-500",
+            text: `${total - connectedCount} número${total - connectedCount === 1 ? "" : "s"} desconectado${total - connectedCount === 1 ? "" : "s"}`,
+            cls: "bg-amber-50 text-amber-700",
+          }
+        : { dot: "bg-red-400", text: "WhatsApp não conectado", cls: "bg-stone-100 text-stone-500" };
 
   return (
     <header className="flex h-14 items-center justify-between border-b border-stone-200 bg-white px-6">
@@ -48,3 +64,4 @@ export function Topbar({
     </header>
   );
 }
+

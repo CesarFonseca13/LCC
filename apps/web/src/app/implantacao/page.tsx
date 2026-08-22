@@ -37,24 +37,25 @@ export default async function ImplantacaoPage() {
           .from(schema.customers)
           .limit(1)
       ).length;
-      const instance = (
-        await tx
-          .select({
-            status: schema.whatsappInstances.status,
-            phoneE164: schema.whatsappInstances.phoneE164,
-            qrCode: schema.whatsappInstances.qrCode,
-          })
-          .from(schema.whatsappInstances)
-          .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
-          .limit(1)
-      )[0];
+      const instances = await tx
+        .select({
+          id: schema.whatsappInstances.id,
+          label: schema.whatsappInstances.label,
+          status: schema.whatsappInstances.status,
+          phoneE164: schema.whatsappInstances.phoneE164,
+          qrCode: schema.whatsappInstances.qrCode,
+          isPrimary: schema.whatsappInstances.isPrimary,
+        })
+        .from(schema.whatsappInstances)
+        .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
+        .orderBy(schema.whatsappInstances.createdAt);
       const automations = await tx
         .select({
           automationId: schema.automationSettings.automationId,
           enabled: schema.automationSettings.enabled,
         })
         .from(schema.automationSettings);
-      return { clinic, procedures, professionals, customersCount, instance, automations };
+      return { clinic, procedures, professionals, customersCount, instances, automations };
     },
     auth.userId,
   );
@@ -71,11 +72,14 @@ export default async function ImplantacaoPage() {
         specialty: (settings.specialty as string) ?? "estetica_facial",
         procedures: data.procedures.map((p) => p.name),
         professionals: data.professionals.map((p) => p.name),
-        whatsapp: {
-          status: data.instance?.status ?? "none",
-          qr: data.instance?.qrCode ?? null,
-          phone: data.instance?.phoneE164 ? formatPhoneBR(data.instance.phoneE164) : null,
-        },
+        whatsapp: data.instances.map((inst, i) => ({
+          id: inst.id,
+          label: inst.label ?? (inst.isPrimary ? "Principal" : `Número ${i + 1}`),
+          phone: inst.phoneE164 ? formatPhoneBR(inst.phoneE164) : null,
+          status: inst.status,
+          qr: inst.qrCode,
+          isPrimary: inst.isPrimary,
+        })),
         automationsOn: data.automations.some((a) => a.enabled),
       }}
     />

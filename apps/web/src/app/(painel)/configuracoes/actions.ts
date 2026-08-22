@@ -1,7 +1,7 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import {
@@ -21,38 +21,65 @@ export interface WhatsAppState {
   status?: string;
   qrCode?: string | null;
   phone?: string | null;
+  instanceId?: string;
 }
 
 const emptySchema = z.object({});
+const instanceIdSchema = z.object({ instanceId: z.string().uuid().optional() });
 
-/** Cria (ou retoma) a instância e pede o QR. */
+/** Cria (ou retoma) UMA instância e pede o QR. Sem instanceId = número NOVO. */
 export const setupWhatsApp = authAction({
   permission: "settings.manage",
-  schema: emptySchema,
-  handler: async (_input, { auth, tx }): Promise<WhatsAppState> => {
+  schema: instanceIdSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
     const evolution = evolutionFromEnv();
     const appUrl = process.env.APP_URL ?? "http://localhost:3000";
 
-    const existing = (
-      await tx
-        .select()
-        .from(schema.whatsappInstances)
-        .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
-        .limit(1)
-    )[0];
+    const existing = input.instanceId
+      ? (
+          await tx
+            .select()
+            .from(schema.whatsappInstances)
+            .where(
+              and(
+                eq(schema.whatsappInstances.id, input.instanceId),
+                eq(schema.whatsappInstances.clinicId, auth.clinicId),
+              ),
+            )
+            .limit(1)
+        )[0]
+      : undefined;
+    if (input.instanceId && !existing) {
+      return { ok: false, error: "Número não encontrado." };
+    }
 
     let name = existing?.evolutionInstanceName;
     let token = existing?.webhookToken;
+    let newInstanceId: string | undefined;
 
     if (!existing) {
-      name = `cl-${auth.clinicId.slice(0, 8)}-01`;
+      // Número NOVO: nome sequencial + primeiro da clínica vira o principal
+      const count = (
+        await tx
+          .select({ n: sql<number>`count(*)::int` })
+          .from(schema.whatsappInstances)
+          .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
+      )[0];
+      const seq = (count?.n ?? 0) + 1;
+      name = `cl-${auth.clinicId.slice(0, 8)}-${String(seq).padStart(2, "0")}`;
       token = randomBytes(24).toString("base64url");
-      await tx.insert(schema.whatsappInstances).values({
-        clinicId: auth.clinicId,
-        evolutionInstanceName: name,
-        webhookToken: token,
-        status: "created",
-      });
+      const [createdRow] = await tx
+        .insert(schema.whatsappInstances)
+        .values({
+          clinicId: auth.clinicId,
+          evolutionInstanceName: name,
+          webhookToken: token,
+          status: "created",
+          isPrimary: seq === 1,
+          label: seq === 1 ? "Principal" : `Número ${seq}`,
+        })
+        .returning({ id: schema.whatsappInstances.id });
+      newInstanceId = createdRow?.id;
       const webhookUrl = `${appUrl}/api/webhooks/evolution/${name}?token=${token}`;
       try {
         await evolution.createInstance({ instanceName: name, webhookUrl });
@@ -72,7 +99,12 @@ export const setupWhatsApp = authAction({
         .set({ qrCode: qr.base64 ?? null, status: "qr_pending" })
         .where(eq(schema.whatsappInstances.evolutionInstanceName, name!));
       revalidatePath("/configuracoes");
-      return { ok: true, status: "qr_pending", qrCode: qr.base64 ?? null } as WhatsAppState;
+      return {
+        ok: true,
+        status: "qr_pending",
+        qrCode: qr.base64 ?? null,
+        instanceId: existing?.id ?? newInstanceId,
+      } as WhatsAppState;
     };
     try {
       return await tryConnect();
@@ -94,13 +126,20 @@ export const setupWhatsApp = authAction({
 /** Polling da tela de conexão: devolve status atual; renova QR se preciso. */
 export const pollWhatsApp = authAction({
   permission: "settings.manage",
-  schema: emptySchema,
-  handler: async (_input, { auth, tx }): Promise<WhatsAppState> => {
+  schema: instanceIdSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
     const instance = (
       await tx
         .select()
         .from(schema.whatsappInstances)
-        .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
+        .where(
+          input.instanceId
+            ? and(
+                eq(schema.whatsappInstances.id, input.instanceId),
+                eq(schema.whatsappInstances.clinicId, auth.clinicId),
+              )
+            : eq(schema.whatsappInstances.clinicId, auth.clinicId),
+        )
         .limit(1)
     )[0];
     if (!instance) return { ok: true, status: "none" };
@@ -380,13 +419,20 @@ export const saveAiProvider = authAction({
 
 export const disconnectWhatsApp = authAction({
   permission: "settings.manage",
-  schema: emptySchema,
-  handler: async (_input, { auth, tx }): Promise<WhatsAppState> => {
+  schema: instanceIdSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
     const instance = (
       await tx
         .select()
         .from(schema.whatsappInstances)
-        .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
+        .where(
+          input.instanceId
+            ? and(
+                eq(schema.whatsappInstances.id, input.instanceId),
+                eq(schema.whatsappInstances.clinicId, auth.clinicId),
+              )
+            : eq(schema.whatsappInstances.clinicId, auth.clinicId),
+        )
         .limit(1)
     )[0];
     if (!instance) return { ok: true, status: "none" };
@@ -401,6 +447,57 @@ export const disconnectWhatsApp = authAction({
       .set({ status: "disconnected", qrCode: null, lastDisconnectAt: new Date() })
       .where(eq(schema.whatsappInstances.id, instance.id));
     revalidatePath("/configuracoes");
-    return { ok: true, status: "disconnected" };
+    return { ok: true, status: "disconnected", instanceId: instance.id };
+  },
+});
+
+/** Apelido do número ("Campanhas", "Recepção"...) — só para a equipe. */
+export const renameWhatsApp = authAction({
+  permission: "settings.manage",
+  schema: z.object({ instanceId: z.string().uuid(), label: z.string().trim().min(1).max(40) }),
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    await tx
+      .update(schema.whatsappInstances)
+      .set({ label: input.label, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.whatsappInstances.id, input.instanceId),
+          eq(schema.whatsappInstances.clinicId, auth.clinicId),
+        ),
+      );
+    revalidatePath("/configuracoes");
+    return { ok: true };
+  },
+});
+
+/** Número principal = padrão para clientes novas (as demais grudam no número
+ *  em que já conversam). */
+export const makePrimaryWhatsApp = authAction({
+  permission: "settings.manage",
+  schema: z.object({ instanceId: z.string().uuid() }),
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    const target = (
+      await tx
+        .select({ id: schema.whatsappInstances.id })
+        .from(schema.whatsappInstances)
+        .where(
+          and(
+            eq(schema.whatsappInstances.id, input.instanceId),
+            eq(schema.whatsappInstances.clinicId, auth.clinicId),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!target) return { ok: false, error: "Número não encontrado." };
+    await tx
+      .update(schema.whatsappInstances)
+      .set({ isPrimary: false })
+      .where(eq(schema.whatsappInstances.clinicId, auth.clinicId));
+    await tx
+      .update(schema.whatsappInstances)
+      .set({ isPrimary: true, updatedAt: new Date() })
+      .where(eq(schema.whatsappInstances.id, input.instanceId));
+    revalidatePath("/configuracoes");
+    return { ok: true };
   },
 });

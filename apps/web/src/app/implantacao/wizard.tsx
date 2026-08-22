@@ -58,7 +58,7 @@ export interface WizardInitial {
   specialty: string;
   procedures: string[];
   professionals: string[];
-  whatsapp: { status: string; qr: string | null; phone: string | null };
+  whatsapp: import("../(painel)/configuracoes/whatsapp-card").InstanceView[];
   automationsOn: boolean;
 }
 
@@ -275,11 +275,7 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
                   o celular da clínica.
                 </p>
               </div>
-              <WhatsAppCard
-                initialStatus={initial.whatsapp.status}
-                initialQr={initial.whatsapp.qr}
-                initialPhone={initial.whatsapp.phone}
-              />
+              <WhatsAppCard initialInstances={initial.whatsapp} />
               <div className="flex justify-between">
                 <Button variant="ghost" onClick={next}>
                   Deixar para depois
