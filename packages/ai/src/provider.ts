@@ -334,6 +334,11 @@ class OpenAiCompatClient implements LlmClient {
       ...(isOfficialOpenAi
         ? { max_completion_tokens: req.maxTokens }
         : { max_tokens: req.maxTokens }),
+      // gpt-5* "pensa" por padrão — tokens e segundos desperdiçados numa
+      // atendente de WhatsApp; raciocínio mínimo mantém custo e resposta rápidos
+      ...(isOfficialOpenAi && /^gpt-5/.test(req.model)
+        ? { reasoning_effort: "minimal" }
+        : {}),
       ...(req.tools?.length
         ? {
             tools: req.tools.map((t) => ({
