@@ -9,6 +9,7 @@ import {
   Megaphone,
   CalendarDays,
   CheckSquare,
+  ClipboardList,
   FileSignature,
   FileText,
   Filter,
@@ -38,6 +39,7 @@ const GROUPS: NavGroup[] = [
     items: [
       { href: "/inicio", label: "Início", icon: Home },
       { href: "/agenda", label: "Agenda", icon: CalendarDays },
+      { href: "/atendimentos", label: "Atendimentos", icon: ClipboardList },
       { href: "/whatsapp", label: "WhatsApp", icon: MessageCircle },
       { href: "/aprovacoes", label: "Aprovações", icon: CheckSquare },
     ],
