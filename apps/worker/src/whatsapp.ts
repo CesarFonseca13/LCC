@@ -239,6 +239,21 @@ async function handleFromMe(
     .where(eq(schema.conversations.id, conversationId));
 }
 
+/**
+ * Nome do perfil do WhatsApp vem como a pessoa quis: "Lari 💖✨", "★ Ju ★",
+ * "Mãe da Duda 🌸"... Antes de virar nome de ficha, tira emoji/símbolo e
+ * espaços duplicados. Sobrou nada utilizável → ficha nasce com o telefone
+ * (a IA pergunta o nome completo na hora de marcar e completa o campo).
+ */
+function cleanPushName(pushName: string | null): string | null {
+  if (!pushName) return null;
+  const cleaned = pushName
+    .replace(/[^\p{L}\p{M}\s.'-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length >= 2 ? cleaned.slice(0, 120) : null;
+}
+
 async function ensureCustomer(
   clinicId: string,
   phone: string,
@@ -292,7 +307,7 @@ async function ensureCustomer(
     .insert(schema.customers)
     .values({
       clinicId,
-      fullName: pushName ?? phone,
+      fullName: cleanPushName(pushName) ?? phone,
       phoneE164: phone,
       status: "lead",
       source: "whatsapp_inbound",
