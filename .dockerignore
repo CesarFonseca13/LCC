@@ -1,0 +1,20 @@
+# Nunca entram no contexto de build (o container instala as deps dele)
+node_modules
+**/node_modules
+.next
+**/.next
+dist
+**/dist
+.turbo
+**/.turbo
+.git
+.env
+.env.*
+!.env.example
+!infra/.env.production.example
+*.log
+.data
+docs
+*.md
+!README.md
+shot-*.png

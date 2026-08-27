@@ -31,8 +31,11 @@ loadEnv({ path: "../../.env" });
  * profissionais, salas e um catálogo que exercita as automações
  * (procedimento com retorno, com retoque e pacote de sessões).
  */
-const OWNER_EMAIL = "dona@clinicademo.com.br";
-const OWNER_PASSWORD = "demo1234";
+// Produção: sobrescreva via SEED_* no .env — os defaults são SÓ para dev/demo
+const OWNER_EMAIL = process.env.SEED_OWNER_EMAIL || "dona@clinicademo.com.br";
+const OWNER_PASSWORD = process.env.SEED_OWNER_PASSWORD || "demo1234";
+const OWNER_NAME = process.env.SEED_OWNER_NAME || "Fernanda Souza";
+const CLINIC_NAME = process.env.SEED_CLINIC_NAME || "Clínica Demo";
 
 async function main() {
   const db = unsafeGlobalDb();
@@ -44,7 +47,7 @@ async function main() {
     owner = (
       await db
         .insert(users)
-        .values({ name: "Fernanda Souza", email: OWNER_EMAIL, passwordHash })
+        .values({ name: OWNER_NAME, email: OWNER_EMAIL, passwordHash })
         .returning()
     )[0];
     console.log("Criada usuária dona.");
@@ -68,7 +71,7 @@ async function main() {
     await withTenant(newClinicId, async (tx) => {
       await tx.insert(clinics).values({
         id: newClinicId,
-        name: "Clínica Demo",
+        name: CLINIC_NAME,
         phone: "+5511999990000",
         email: "contato@clinicademo.com.br",
         addressCity: "São Paulo",

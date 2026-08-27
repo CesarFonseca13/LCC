@@ -1,15 +1,12 @@
-# Substituir app.exemplo.com.br pelo domínio real.
-# Caddy emite e renova TLS (Let's Encrypt) automaticamente.
+# O domínio vem do .env (APP_DOMAIN). Sem domínio próprio, use o truque
+# sslip.io: APP_DOMAIN=169-58-242-252.sslip.io resolve para o IP da VPS e
+# o Caddy emite TLS (Let's Encrypt) normalmente. Troque pelo domínio real
+# quando tiver — só mudar o .env e `docker compose restart caddy`.
 
-app.exemplo.com.br {
+{$APP_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy web:3000
 }
 
-# Evolution API nunca é exposta publicamente — o web/worker falam com ela
-# pela rede interna do compose. Se um dia precisar de acesso externo
-# (debug), proteger com basic_auth e IP allowlist.
-
-status.exemplo.com.br {
-	reverse_proxy uptime-kuma:3001
-}
+# Evolution API e Uptime Kuma NUNCA são expostos publicamente — acesso
+# interno pela rede do compose; Kuma via túnel SSH (porta 3001 local).

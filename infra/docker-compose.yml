@@ -1,5 +1,5 @@
-# Compose de PRODUÇÃO (VPS única). Requer .env ao lado com as variáveis referenciadas.
-# Serviços de fase futura (evolution, gotenberg, whisper) já mapeados; ativar por milestone.
+# Compose de PRODUÇÃO (VPS única). Requer .env ao lado (base: .env.production.example).
+# Subida: docker compose up -d --build  ·  Migrações: ver infra/deploy.sh
 name: clinicaos
 
 services:
@@ -9,6 +9,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -19,9 +21,13 @@ services:
   web:
     build:
       context: ..
-      dockerfile: infra/Dockerfile.web
+      dockerfile: infra/Dockerfile
+      target: web
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Montadas AQUI (env_file não interpola ${...})
+      DATABASE_URL: postgres://clinicaos_app:${DB_APP_PASSWORD:?}@postgres:5432/clinicaos
     expose:
       - "3000"
     depends_on:
@@ -33,15 +39,24 @@ services:
   worker:
     build:
       context: ..
-      dockerfile: infra/Dockerfile.worker
+      dockerfile: infra/Dockerfile
+      target: worker
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Worker usa o role BYPASSRLS (re-escopa clinic_id em cada query);
+      # migrator só é usado pelo `compose run worker ... migrate.ts`
+      DATABASE_URL: postgres://clinicaos_app:${DB_APP_PASSWORD:?}@postgres:5432/clinicaos
+      DATABASE_URL_WORKER: postgres://clinicaos_worker:${DB_WORKER_PASSWORD:?}@postgres:5432/clinicaos
+      DATABASE_URL_MIGRATOR: postgres://clinicaos_migrator:${DB_MIGRATOR_PASSWORD:?}@postgres:5432/clinicaos
     volumes:
       - app_storage:/data/storage
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+      evolution:
         condition: service_started
 
   postgres:
@@ -50,6 +65,9 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
+      DB_MIGRATOR_PASSWORD: ${DB_MIGRATOR_PASSWORD:?}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?}
+      DB_WORKER_PASSWORD: ${DB_WORKER_PASSWORD:?}
     volumes:
       - pg_data:/var/lib/postgresql/data
       - pg_wal_archive:/wal_archive
@@ -75,46 +93,57 @@ services:
     volumes:
       - redis_data:/data
 
-  # ── Milestone WhatsApp (Fase 1, item 5) ────────────────────────────
-  # evolution:
-  #   image: evoapicloud/evolution-api:v2.2.0    # PIN — upgrade via canário (org antiga atendai/ saiu do Hub)
-  #   restart: unless-stopped
-  #   environment:
-  #     AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?}
-  #     DATABASE_ENABLED: "true"
-  #     DATABASE_PROVIDER: postgresql
-  #     DATABASE_CONNECTION_URI: ${EVOLUTION_DATABASE_URL:?}
-  #     CACHE_REDIS_ENABLED: "true"
-  #     CACHE_REDIS_URI: redis://redis:6379/1
-  #   expose: ["8080"]
-  #   volumes:
-  #     - evolution_instances:/evolution/instances
+  evolution:
+    image: evoapicloud/evolution-api:v2.2.0 # PIN — upgrade sempre via canário
+    restart: unless-stopped
+    environment:
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://postgres:${POSTGRES_SUPERUSER_PASSWORD:?}@postgres:5432/evolution
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/1
+      CONFIG_SESSION_PHONE_VERSION: "2.3000.1023204200"
+    expose:
+      - "8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # ── Milestone Termos/PDF (Fase 2) ──────────────────────────────────
-  # gotenberg:
-  #   image: gotenberg/gotenberg:8
-  #   restart: unless-stopped
-  #   expose: ["3000"]
-
-  # ── Milestone áudio (Fase 2) ───────────────────────────────────────
-  # whisper: (faster-whisper server)
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    expose:
+      - "3000"
 
   backup:
-    image: alpine:3.20
+    image: postgres:16-alpine
     restart: unless-stopped
+    environment:
+      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET:-}
     volumes:
+      - backups:/backups
       - app_storage:/data/storage:ro
       - pg_wal_archive:/wal_archive:ro
       - evolution_instances:/evolution_instances:ro
       - ./backup:/backup:ro
-    env_file: .env
     entrypoint: ["/bin/sh", "/backup/entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   uptime-kuma:
     image: louislam/uptime-kuma:1
     restart: unless-stopped
-    expose:
-      - "3001"
+    # Acesso via túnel SSH: ssh -L 3001:localhost:3001 (porta não exposta na internet)
+    ports:
+      - "127.0.0.1:3001:3001"
     volumes:
       - kuma_data:/app/data
 
@@ -126,4 +155,5 @@ volumes:
   redis_data:
   app_storage:
   evolution_instances:
+  backups:
   kuma_data:
