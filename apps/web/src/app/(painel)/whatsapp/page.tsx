@@ -86,7 +86,9 @@ export default async function WhatsAppPage({
         })
         .from(schema.conversations)
         .leftJoin(schema.customers, eq(schema.customers.id, schema.conversations.customerId))
-        .orderBy(desc(schema.conversations.lastMessageAt));
+        // conversa sem mensagem entregue ainda (só aprovação pendente) não
+        // pode furar a fila: NULL iria pro topo no DESC padrão do Postgres
+        .orderBy(sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`);
 
       // Aba de número primeiro; badge "precisa de você" conta POR ABA
       const byInstance = activeInstanceId
