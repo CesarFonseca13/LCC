@@ -9,6 +9,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # HTTP/3 (QUIC): menos idas-e-voltas — diferença real em rede de
+      # latência alta (retomada de conexão 0-RTT)
+      - "443:443/udp"
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?}
     volumes:
