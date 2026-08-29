@@ -509,10 +509,17 @@ export async function processOutbound(
     try {
       // "Digitando..." proporcional ao texto, em ritmo de gente (~14 chars/s)
       // com variação natural de ±15% — mensagem longa DEMORA mesmo
-      // (piso 2,5s, teto 15s: ninguém digita um parágrafo em 3 segundos)
+      // (piso 2,5s, teto 15s: ninguém digita um parágrafo em 3 segundos).
+      // O ritmo é NOSSO (presença + espera local + envio imediato): o delay
+      // nativo da Evolution é assíncrono e balões curtos furavam a fila dos
+      // longos — chegavam fora de ordem no celular.
       const baseMs = Math.min(Math.max(msg.body.length * 70, 2_500), 15_000);
       const delayMs = Math.round(baseMs * (0.85 + Math.random() * 0.3));
-      const result = await evolution.sendText(inst.name, conv.remoteJid, msg.body, delayMs);
+      await evolution
+        .sendPresence(inst.name, conv.remoteJid, "composing", delayMs)
+        .catch(() => {}); // presença é cosmética — nunca segura o envio
+      await new Promise((r) => setTimeout(r, delayMs));
+      const result = await evolution.sendText(inst.name, conv.remoteJid, msg.body);
       await db
         .update(schema.messages)
         .set({

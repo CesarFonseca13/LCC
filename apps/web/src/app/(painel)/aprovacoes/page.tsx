@@ -1,6 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { can } from "@clinicaos/core/permissions";
 import { schema, withTenant } from "@clinicaos/db";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { ApprovalCard, ApproveAllButton } from "./approval-card";
@@ -59,6 +60,7 @@ export default async function AprovacoesPage() {
 
   return (
     <div className="p-8">
+      <AutoRefresh seconds={15} />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-stone-800">Aprovações</h1>

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { can } from "@clinicaos/core/permissions";
 import { todayISO, zonedToUtc } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
@@ -225,6 +226,7 @@ export default async function AtendimentosPage({
 
   return (
     <div className="p-8">
+      <AutoRefresh seconds={15} />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-stone-800">Atendimentos</h1>

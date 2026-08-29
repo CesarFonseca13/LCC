@@ -2,6 +2,7 @@ import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { can } from "@clinicaos/core/permissions";
 import { addDaysISO, todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { AgendaView, type AgendaData } from "./agenda-view";
@@ -211,7 +212,13 @@ export default async function AgendaPage({
     auth.userId,
   );
 
-  return <AgendaView data={data} />;
+  return (
+    <>
+      {/* Agendamento feito pela Ana no WhatsApp aparece aqui sem recarregar */}
+      <AutoRefresh seconds={10} />
+      <AgendaView data={data} />
+    </>
+  );
 }
 
 async function weekdayOf(dateISO: string, tz: string): Promise<number> {

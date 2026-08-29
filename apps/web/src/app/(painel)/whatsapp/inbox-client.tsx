@@ -5,15 +5,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { Button, FieldError } from "@/components/ui";
 import { markConversationRead, sendManualMessage, setConversationMode } from "./actions";
 
-/** Recarrega os dados da página em intervalo — inbox "vivo" sem websocket. */
-export function AutoRefresh({ seconds }: { seconds: number }) {
-  const router = useRouter();
-  useEffect(() => {
-    const timer = setInterval(() => router.refresh(), seconds * 1000);
-    return () => clearInterval(timer);
-  }, [router, seconds]);
-  return null;
-}
+export { AutoRefresh } from "@/components/auto-refresh";
 
 /** Zera o contador de não lidas ao abrir a conversa. */
 export function ReadOnOpen({

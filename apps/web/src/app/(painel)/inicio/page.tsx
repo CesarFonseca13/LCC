@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { todayISO, utcToZoned, zonedToUtc, addDaysISO } from "@clinicaos/core/timezone";
 import { can } from "@clinicaos/core/permissions";
 import { schema, withTenant } from "@clinicaos/db";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { QuickStatusButtons } from "./quick-status";
@@ -298,6 +299,7 @@ export default async function InicioPage() {
 
   return (
     <div className="p-8">
+      <AutoRefresh seconds={15} />
       <h1 className="text-2xl font-semibold text-stone-800">
         {saudacao(Math.floor(data.horaLocal))}, {primeiroNome}!
       </h1>
