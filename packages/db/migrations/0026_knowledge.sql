@@ -29,3 +29,6 @@ ALTER TABLE kb_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kb_entries FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation ON kb_entries;
 CREATE POLICY tenant_isolation ON kb_entries USING (clinic_id = app_clinic_id());
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON kb_entries TO clinicaos_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON kb_entries TO clinicaos_worker;
