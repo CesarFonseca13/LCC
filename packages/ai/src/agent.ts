@@ -25,6 +25,10 @@ export interface AgentClinicInfo {
   city: string | null;
   businessHoursLabel: string;
   catalog: { name: string; price: string; durationMinutes: number }[];
+  /** Ficha de informações oficiais (endereço, estacionamento, pagamento,
+   *  convênios, políticas) — entra INTEIRA no prompt: fatos essenciais
+   *  nunca dependem de busca. Null = dono ainda não preencheu. */
+  facts: string | null;
 }
 
 export interface AgentCustomerContext {
@@ -69,6 +73,8 @@ export interface AgentToolExecutors {
   cancelar(agendamentoId: string, motivo: string | null): Promise<string>;
   confirmarPresenca(agendamentoId: string): Promise<string>;
   consultarPacote(): Promise<string>;
+  /** Busca cards da base de conhecimento; devolve trechos ou "nada encontrado". */
+  consultarInformacoes(pergunta: string): Promise<string>;
   escalarParaHumano(motivo: string, urgencia: "alta" | "normal"): Promise<string>;
   registrarOptOut(): Promise<string>;
   /** Completa a ficha APENAS nos campos vazios — nunca sobrescreve. */
@@ -100,7 +106,7 @@ SOBRE A CLÍNICA
 Horário de atendimento: ${clinic.businessHoursLabel}.
 Serviços e valores:
 ${catalog}
-
+${clinic.facts ? `\nINFORMAÇÕES OFICIAIS DA CLÍNICA (única fonte confiável para estes assuntos):\n${clinic.facts}\n` : ""}
 REGRAS INEGOCIÁVEIS
 1. Você escreve como uma pessoa real da equipe. Nunca diga que é assistente virtual, IA, robô ou sistema. Se perguntarem diretamente se você é um robô, use escalar_para_humano e responda apenas que vai pedir para alguém da equipe continuar a conversa.
 2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar.
@@ -113,7 +119,8 @@ REGRAS INEGOCIÁVEIS
 9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.
 10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.
 11. Dados pessoais que a cliente informar na conversa (nome completo, e-mail, CPF, RG, nascimento, endereço, convênio/plano) → guarde na hora com atualizar_cadastro e siga a conversa com naturalidade, sem dizer "atualizei no sistema". NUNCA transforme a conversa em formulário pedindo dados em sequência — no máximo, pergunte o nome completo na hora de marcar pela primeira vez. Para remarcar ou cancelar, use o id do agendamento que está no seu contexto.
-12. Tenha noção de tempo como uma pessoa tem: você sabe que dia é hoje. Fale "hoje", "amanhã", "sábado" — nunca fórmulas burocráticas como "no dia anterior" ou "na data em questão". Um horário marcado para amanhã tem véspera HOJE — perceba isso antes de falar. E não ofereça nem prometa lembretes por conta própria: os lembretes automáticos da clínica cuidam disso; se a cliente pedir para ser lembrada, diga só que ela recebe uma mensagem antes do horário.`;
+12. Tenha noção de tempo como uma pessoa tem: você sabe que dia é hoje. Fale "hoje", "amanhã", "sábado" — nunca fórmulas burocráticas como "no dia anterior" ou "na data em questão". Um horário marcado para amanhã tem véspera HOJE — perceba isso antes de falar. E não ofereça nem prometa lembretes por conta própria: os lembretes automáticos da clínica cuidam disso; se a cliente pedir para ser lembrada, diga só que ela recebe uma mensagem antes do horário.
+13. Fato sobre a clínica (endereço, como chegar, estacionamento, convênio, forma de pagamento, cuidados pré/pós, política de cancelamento etc.) só sai de TRÊS fontes: o catálogo acima, as INFORMAÇÕES OFICIAIS acima, ou o resultado de consultar_informacoes. Não está em nenhuma? NUNCA responda de memória ou "conhecimento geral" — diga com naturalidade que vai confirmar com a equipe e use escalar_para_humano. Antes de responder pergunta factual que não esteja no prompt, SEMPRE chame consultar_informacoes primeiro.`;
 }
 
 const TOOL_NAMES = [
@@ -123,6 +130,7 @@ const TOOL_NAMES = [
   "cancelar",
   "confirmar_presenca",
   "consultar_pacote",
+  "consultar_informacoes",
   "escalar_para_humano",
   "registrar_opt_out",
   "atualizar_cadastro",
@@ -246,6 +254,21 @@ const TOOLS: ToolDef[] = [
     name: "consultar_pacote",
     description: "Consulta o saldo de sessões e validade dos pacotes da cliente.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "consultar_informacoes",
+    description:
+      "Busca na base de conhecimento oficial da clínica (estacionamento, convênios, formas de pagamento, cuidados pré/pós-procedimento, políticas...). Use SEMPRE antes de responder pergunta factual sobre a clínica que não esteja no seu prompt — nunca responda de memória.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pergunta: {
+          type: "string",
+          description: "O que a cliente quer saber, com as palavras-chave (ex.: 'estacionamento', 'cuidados antes do botox')",
+        },
+      },
+      required: ["pergunta"],
+    },
   },
   {
     name: "escalar_para_humano",
@@ -389,6 +412,8 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       executors.cancelar(String(raw.agendamento_id ?? ""), typeof raw.motivo === "string" ? raw.motivo : null),
     confirmar_presenca: (raw) => executors.confirmarPresenca(String(raw.agendamento_id ?? "")),
     consultar_pacote: () => executors.consultarPacote(),
+    consultar_informacoes: (raw) =>
+      executors.consultarInformacoes(String(raw.pergunta ?? "")),
     escalar_para_humano: async (raw) => {
       escalated = true;
       return executors.escalarParaHumano(

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Banknote,
   BarChart3,
+  BookOpen,
   Brain,
   Megaphone,
   CalendarDays,
@@ -58,6 +59,7 @@ const GROUPS: NavGroup[] = [
       { href: "/orcamentos", label: "Orçamentos", icon: FileText },
       { href: "/termos", label: "Termos", icon: FileSignature },
       { href: "/servicos", label: "Serviços", icon: Sparkles },
+      { href: "/conhecimento", label: "Conhecimento", icon: BookOpen },
       { href: "/estoque", label: "Estoque", icon: Package },
     ],
   },

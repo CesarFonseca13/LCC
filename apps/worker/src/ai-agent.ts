@@ -118,6 +118,30 @@ export async function processAiTurns(logger: Logger): Promise<void> {
 
 type ConversationRow = typeof schema.conversations.$inferSelect;
 
+/** Ficha de informações oficiais (Conhecimento → Ficha da clínica) vira texto
+ *  de prompt. Só campos preenchidos; vazio total = null (seção não aparece). */
+export function knowledgeFactsText(settings: unknown): string | null {
+  const k = ((settings ?? {}) as Record<string, unknown>).knowledge as
+    | Record<string, unknown>
+    | undefined;
+  if (!k) return null;
+  const campos: [string, string][] = [
+    ["comoChegar", "Endereço e como chegar"],
+    ["estacionamento", "Estacionamento"],
+    ["pagamento", "Pagamento e parcelamento"],
+    ["convenios", "Convênios aceitos"],
+    ["cancelamento", "Política de cancelamento e atraso"],
+    ["observacoes", "Outras informações"],
+  ];
+  const linhas = campos
+    .map(([key, label]) => {
+      const v = k[key];
+      return typeof v === "string" && v.trim() ? `- ${label}: ${v.trim()}` : null;
+    })
+    .filter((l): l is string => l !== null);
+  return linhas.length > 0 ? linhas.join("\n") : null;
+}
+
 /** Cliente sumiu no meio da conversa? Depois de ~5 min de silêncio numa
  *  pergunta em aberto, a Ana dá UM toque gentil — como uma recepção de
  *  verdade faria. No máximo um toque por rodada de silêncio (o marcador
@@ -726,6 +750,28 @@ async function runTurn(
       return packageSummary ?? "A cliente não tem pacotes ativos.";
     },
 
+    async consultarInformacoes(pergunta) {
+      const q = pergunta.trim();
+      if (!q) return "Nada encontrado (pergunta vazia).";
+      // Busca em português no Postgres + fallback por semelhança de título
+      const res = await db.execute(sql`
+        SELECT title, content FROM kb_entries
+        WHERE clinic_id = ${clinic.id} AND active
+          AND (search @@ plainto_tsquery('portuguese', ${q})
+               OR title ILIKE '%' || ${q} || '%')
+        ORDER BY ts_rank(search, plainto_tsquery('portuguese', ${q})) DESC
+        LIMIT 4
+      `);
+      const found = res.rows as { title: string; content: string }[];
+      if (found.length === 0) {
+        return "Nada encontrado na base de conhecimento da clínica sobre isso. NÃO invente a resposta: diga que vai confirmar com a equipe e escale.";
+      }
+      return (
+        "INFORMAÇÕES OFICIAIS ENCONTRADAS (responda usando SOMENTE isto):\n" +
+        found.map((r) => `— ${r.title}: ${r.content}`).join("\n")
+      );
+    },
+
     async escalarParaHumano(motivo, urgencia) {
       escalationReason = motivo;
       await db
@@ -778,6 +824,7 @@ async function runTurn(
           price: Number(p.price).toLocaleString("pt-BR", { minimumFractionDigits: 2 }),
           durationMinutes: p.durationMinutes,
         })),
+        facts: knowledgeFactsText(clinic.settings),
       },
       customer: {
         firstName: nameReliability(customer.fullName).firstName,
