@@ -97,7 +97,10 @@ services:
       - redis_data:/data
 
   evolution:
-    image: evoapicloud/evolution-api:v2.2.0 # PIN — upgrade sempre via canário
+    image: evoapicloud/evolution-api:v2.3.7 # PIN — upgrade sempre via canário
+    # v2.3.7: obrigatório desde ago/2026 — a v2.2.0 não fala com contatos @lid
+    # (endereço anônimo do WhatsApp): não entrega o telefone real (key.senderPn)
+    # e rejeita envios para @lid com HTTP 400.
     restart: unless-stopped
     environment:
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?}

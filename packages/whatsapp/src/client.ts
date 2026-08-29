@@ -25,6 +25,12 @@ export class EvolutionError extends Error {
   }
 }
 
+/** Contato @lid (endereço anônimo do WhatsApp) precisa do JID inteiro no envio —
+ *  cortar o sufixo viraria um "telefone" inexistente e a mensagem se perderia. */
+function toSendNumber(remoteJid: string): string {
+  return remoteJid.endsWith("@lid") ? remoteJid : remoteJid.replace(/@.*$/, "");
+}
+
 export const WEBHOOK_EVENTS = [
   "QRCODE_UPDATED",
   "CONNECTION_UPDATE",
@@ -121,7 +127,7 @@ export class EvolutionClient {
       "POST",
       `/message/sendText/${instanceName}`,
       {
-        number: remoteJid.replace(/@.*$/, ""),
+        number: toSendNumber(remoteJid),
         text,
         delay: delayMs,
       },
@@ -136,7 +142,7 @@ export class EvolutionClient {
     delayMs?: number,
   ): Promise<void> {
     await this.request("POST", `/chat/sendPresence/${instanceName}`, {
-      number: remoteJid.replace(/@.*$/, ""),
+      number: toSendNumber(remoteJid),
       presence,
       delay: delayMs,
     });

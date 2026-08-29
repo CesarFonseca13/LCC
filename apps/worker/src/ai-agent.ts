@@ -133,8 +133,10 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
   const aiSettings = parseAiSettings(clinic.settings);
   if (!aiSettings.enabled) return;
 
-  // Kill-switch mensal de custo
-  const capTokens = Number(process.env.AI_MONTHLY_TOKEN_CAP ?? 5_000_000);
+  // Kill-switch mensal de custo. Variável ausente, VAZIA ou inválida = padrão
+  // de 5M — Number("") é 0 e transformaria o cap num "IA desligada" silencioso.
+  const capEnv = Number(process.env.AI_MONTHLY_TOKEN_CAP);
+  const capTokens = Number.isFinite(capEnv) && capEnv > 0 ? capEnv : 5_000_000;
   const monthStart = `${todayISO(clinic.timezone).slice(0, 7)}-01`;
   const used = (
     await db

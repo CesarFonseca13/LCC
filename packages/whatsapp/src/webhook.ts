@@ -85,10 +85,19 @@ export function normalizeEvent(eventType: string, data: unknown): NormalizedEven
     case "MESSAGES_UPSERT":
     case "SEND_MESSAGE": {
       const waMessageId = str(get(data, ["key", "id"]));
-      const remoteJid = str(get(data, ["key", "remoteJid"]));
+      let remoteJid = str(get(data, ["key", "remoteJid"]));
       if (!waMessageId || !remoteJid) return { kind: "ignored" };
       // Grupos são ignorados por configuração da instância; segunda linha de defesa:
       if (remoteJid.endsWith("@g.us")) return { kind: "ignored" };
+      // Contato @lid (endereço anônimo do WhatsApp): a Evolution ≥2.3 entrega o
+      // telefone REAL ao lado — sem isso a ficha ganha um "+94..." que não existe.
+      if (remoteJid.endsWith("@lid")) {
+        const real =
+          str(get(data, ["key", "senderPn"])) ??
+          str(get(data, ["key", "remoteJidAlt"])) ??
+          str(get(data, ["key", "participantPn"]));
+        if (real?.endsWith("@s.whatsapp.net")) remoteJid = real;
+      }
 
       const message = get(data, ["message"]);
       const text =

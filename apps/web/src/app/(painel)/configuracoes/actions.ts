@@ -1,7 +1,7 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import {
@@ -58,14 +58,19 @@ export const setupWhatsApp = authAction({
     let newInstanceId: string | undefined;
 
     if (!existing) {
-      // Número NOVO: nome sequencial + primeiro da clínica vira o principal
-      const count = (
+      // Número NOVO: nome sequencial + primeiro da clínica vira o principal.
+      // O próximo número vem do MAIOR sufixo já usado (não do count): depois
+      // de excluir um número, count(*) repetiria um nome que já existiu.
+      const agg = (
         await tx
-          .select({ n: sql<number>`count(*)::int` })
+          .select({
+            n: sql<number>`count(*)::int`,
+            m: sql<number>`coalesce(max(CASE WHEN evolution_instance_name ~ '[0-9]{2}$' THEN right(evolution_instance_name, 2)::int END), 0)`,
+          })
           .from(schema.whatsappInstances)
           .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
       )[0];
-      const seq = (count?.n ?? 0) + 1;
+      const seq = Math.max(agg?.n ?? 0, agg?.m ?? 0) + 1;
       name = `cl-${auth.clinicId.slice(0, 8)}-${String(seq).padStart(2, "0")}`;
       token = randomBytes(24).toString("base64url");
       const [createdRow] = await tx
@@ -75,8 +80,8 @@ export const setupWhatsApp = authAction({
           evolutionInstanceName: name,
           webhookToken: token,
           status: "created",
-          isPrimary: seq === 1,
-          label: seq === 1 ? "Principal" : `Número ${seq}`,
+          isPrimary: (agg?.n ?? 0) === 0,
+          label: (agg?.n ?? 0) === 0 ? "Principal" : `Número ${seq}`,
         })
         .returning({ id: schema.whatsappInstances.id });
       newInstanceId = createdRow?.id;
@@ -448,6 +453,123 @@ export const disconnectWhatsApp = authAction({
       .where(eq(schema.whatsappInstances.id, instance.id));
     revalidatePath("/configuracoes");
     return { ok: true, status: "disconnected", instanceId: instance.id };
+  },
+});
+
+/** Exclui um número de vez (painel + Evolution). Conversas dele passam para
+ *  outro número da clínica — o histórico NUNCA some. Números presos em
+ *  "aguardando leitura" também são excluíveis (é o jeito de destravar). */
+export const deleteWhatsAppNumber = authAction({
+  permission: "settings.manage",
+  schema: z.object({ instanceId: z.string().uuid() }),
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    const instance = (
+      await tx
+        .select()
+        .from(schema.whatsappInstances)
+        .where(
+          and(
+            eq(schema.whatsappInstances.id, input.instanceId),
+            eq(schema.whatsappInstances.clinicId, auth.clinicId),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!instance) return { ok: false, error: "Número não encontrado." };
+    if (instance.status === "connected") {
+      return { ok: false, error: "Desconecte o número antes de excluir." };
+    }
+
+    const convCount = (
+      await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.conversations)
+        .where(eq(schema.conversations.instanceId, instance.id))
+    )[0];
+    if ((convCount?.n ?? 0) > 0) {
+      const target = (
+        await tx
+          .select({ id: schema.whatsappInstances.id })
+          .from(schema.whatsappInstances)
+          .where(
+            and(
+              eq(schema.whatsappInstances.clinicId, auth.clinicId),
+              ne(schema.whatsappInstances.id, instance.id),
+            ),
+          )
+          .orderBy(sql`is_primary DESC, created_at`)
+          .limit(1)
+      )[0];
+      if (!target) {
+        return {
+          ok: false,
+          error:
+            "Este número guarda o histórico de conversas e é o único da clínica. Conecte outro número antes de excluir — o histórico passa para ele.",
+        };
+      }
+      // Cliente que já conversa nos dois números: junta tudo na conversa do destino
+      await tx.execute(sql`
+        UPDATE messages m SET conversation_id = t.id
+        FROM conversations d, conversations t
+        WHERE d.instance_id = ${instance.id}
+          AND t.instance_id = ${target.id}
+          AND t.remote_jid = d.remote_jid
+          AND m.conversation_id = d.id
+      `);
+      await tx.execute(sql`
+        UPDATE conversations t SET
+          last_message_at = GREATEST(t.last_message_at, d.last_message_at),
+          last_inbound_at = GREATEST(t.last_inbound_at, d.last_inbound_at)
+        FROM conversations d
+        WHERE d.instance_id = ${instance.id}
+          AND t.instance_id = ${target.id}
+          AND t.remote_jid = d.remote_jid
+      `);
+      await tx.execute(sql`
+        DELETE FROM conversations d
+        USING conversations t
+        WHERE d.instance_id = ${instance.id}
+          AND t.instance_id = ${target.id}
+          AND t.remote_jid = d.remote_jid
+      `);
+      await tx.execute(sql`
+        UPDATE conversations SET instance_id = ${target.id}
+        WHERE instance_id = ${instance.id}
+      `);
+    }
+
+    // Evolution: melhor esforço — a instância pode nem existir lá
+    try {
+      await evolutionFromEnv().logout(instance.evolutionInstanceName);
+    } catch {
+      // já deslogada ou inexistente
+    }
+    try {
+      await evolutionFromEnv().deleteInstance(instance.evolutionInstanceName);
+    } catch {
+      // inexistente na Evolution — o painel é a fonte da verdade
+    }
+
+    await tx
+      .delete(schema.whatsappInstances)
+      .where(eq(schema.whatsappInstances.id, instance.id));
+
+    // Excluiu o principal? Promove outro — cliente nova sempre tem um padrão.
+    if (instance.isPrimary) {
+      await tx.execute(sql`
+        UPDATE whatsapp_instances SET is_primary = true
+        WHERE id = (
+          SELECT id FROM whatsapp_instances
+          WHERE clinic_id = ${auth.clinicId}
+          ORDER BY status = 'connected' DESC, created_at
+          LIMIT 1
+        )
+      `);
+    }
+
+    revalidatePath("/configuracoes");
+    revalidatePath("/whatsapp");
+    return { ok: true };
   },
 });
 

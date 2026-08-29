@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { Button, FieldError } from "@/components/ui";
 import {
+  deleteWhatsAppNumber,
   disconnectWhatsApp,
   makePrimaryWhatsApp,
   pollWhatsApp,
@@ -41,10 +42,12 @@ function StatusPill({ status }: { status: string }) {
 function InstanceRow({
   instance,
   onChange,
+  onRemove,
   canRemoveConnect,
 }: {
   instance: InstanceView;
   onChange: (next: InstanceView) => void;
+  onRemove: (id: string) => void;
   canRemoveConnect: boolean;
 }) {
   const [error, setError] = useState<string>();
@@ -169,19 +172,41 @@ function InstanceRow({
                 Desconectar
               </Button>
             </>
-          ) : !CONNECTING.includes(instance.status) && canRemoveConnect ? (
-            <Button
-              disabled={pending}
-              onClick={() =>
-                run(
-                  () => setupWhatsApp({ instanceId: instance.id }),
-                  () => onChange({ ...instance, status: "qr_pending" }),
-                )
-              }
-            >
-              {pending ? "Preparando..." : "Conectar"}
-            </Button>
-          ) : null}
+          ) : (
+            <>
+              {!CONNECTING.includes(instance.status) && canRemoveConnect ? (
+                <Button
+                  disabled={pending}
+                  onClick={() =>
+                    run(
+                      () => setupWhatsApp({ instanceId: instance.id }),
+                      () => onChange({ ...instance, status: "qr_pending" }),
+                    )
+                  }
+                >
+                  {pending ? "Preparando..." : "Conectar"}
+                </Button>
+              ) : null}
+              <Button
+                variant="ghost"
+                disabled={pending}
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      `Excluir "${instance.label}"? Se houver conversas nele, elas passam para outro número da clínica — o histórico não some.`,
+                    )
+                  )
+                    return;
+                  run(
+                    () => deleteWhatsAppNumber({ instanceId: instance.id }),
+                    () => onRemove(instance.id),
+                  );
+                }}
+              >
+                Excluir
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -279,6 +304,7 @@ export function WhatsAppCard({ initialInstances }: { initialInstances: InstanceV
               key={inst.id}
               instance={inst}
               canRemoveConnect
+              onRemove={(id) => setInstances((prev) => prev.filter((p) => p.id !== id))}
               onChange={(next) =>
                 setInstances((prev) => {
                   const updated = prev.map((p) => (p.id === next.id ? next : p));
