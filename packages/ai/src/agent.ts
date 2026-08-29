@@ -46,6 +46,9 @@ export interface AgentTurnInput {
   nowLabel: string; // "quinta-feira, 20/08/2026, 15:32 (horário de Brasília)"
   /** Histórico: papel + texto (já limitado a ~30 mensagens). */
   history: { role: "customer" | "assistant"; text: string }[];
+  /** Turno de "toque": a cliente sumiu há N minutos com pergunta em aberto.
+   *  O modelo decide entre UM balão gentil ou [SEM_MENSAGEM] (nada é enviado). */
+  nudge?: { minutes: number };
 }
 
 export interface AgentReply {
@@ -340,6 +343,13 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     text: m.text,
   }));
 
+  if (input.nudge) {
+    messages.push({
+      role: "user",
+      text: `[sistema — a cliente NÃO escreveu nada] Ela está em silêncio há uns ${input.nudge.minutes} minutos desde a sua última mensagem. Se a sua última mensagem fazia uma pergunta que precisa de resposta para a conversa andar, retome com UM balão curto e gentil, como uma atendente que percebeu que a cliente sumiu (varie o jeito — "Está por aí?", "Ficou alguma dúvida?", "Quer que eu deixe esse horário separado pra você?" — nunca a mesma frase, sem repetir a pergunta inteira, sem pressionar). Se a sua última mensagem NÃO pedia resposta (despedida, confirmação, "tá?" retórico) ou se cutucar agora soaria estranho, chame responder_cliente com um único balão contendo exatamente [SEM_MENSAGEM] — nada será enviado à cliente.`,
+    });
+  }
+
   let escalated = false;
   const usage = { inputTokens: 0, outputTokens: 0, calls: 0 };
 
@@ -364,6 +374,11 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       ]!;
     const first = balloons[0]!;
     return [pick + first.charAt(0).toLowerCase() + first.slice(1), ...balloons.slice(1)];
+  };
+  // Turno de toque: [SEM_MENSAGEM] = o modelo decidiu que cutucar seria estranho
+  const finalize = (balloons: string[]): string[] => {
+    if (input.nudge && balloons.some((b) => /\[?SEM[_ ]MENSAGEM\]?/i.test(b))) return [];
+    return ensureGreeting(balloons);
   };
   const wrappedExecutors: Record<string, (raw: Record<string, unknown>) => Promise<string>> = {
     consultar_horarios: (raw) =>
@@ -419,7 +434,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
         : [];
       if (balloons.length > 0) {
         return {
-          balloons: ensureGreeting(balloons),
+          balloons: finalize(balloons),
           internalNote: typeof raw.nota_interna === "string" ? raw.nota_interna : null,
           confidence:
             raw.confianca === "baixa" ? "baixa" : raw.confianca === "media" ? "media" : "alta",
@@ -437,7 +452,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
         const salvaged = salvageBalloons(response.text);
         if (salvaged) {
           return {
-            balloons: ensureGreeting(salvaged),
+            balloons: finalize(salvaged),
             internalNote: "Resgatado: modelo escreveu responder_cliente como texto.",
             confidence: "media",
             escalated,
@@ -457,7 +472,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
         }
         // Texto limpo sem ferramenta: vira balão único (fallback)
         return {
-          balloons: ensureGreeting([response.text]),
+          balloons: finalize([response.text]),
           internalNote: null,
           confidence: "media",
           escalated,

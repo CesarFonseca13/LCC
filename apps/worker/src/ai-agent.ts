@@ -118,7 +118,96 @@ export async function processAiTurns(logger: Logger): Promise<void> {
 
 type ConversationRow = typeof schema.conversations.$inferSelect;
 
-async function runTurn(conversation: ConversationRow, logger: Logger): Promise<void> {
+/** Cliente sumiu no meio da conversa? Depois de ~5 min de silêncio numa
+ *  pergunta em aberto, a Ana dá UM toque gentil — como uma recepção de
+ *  verdade faria. No máximo um toque por rodada de silêncio (o marcador
+ *  fica para trás quando a cliente responde), e nunca em conversa fria
+ *  (janela de 45 min). O modelo ainda pode vetar com [SEM_MENSAGEM]. */
+export async function processConversationNudges(logger: Logger): Promise<void> {
+  const db = unsafeGlobalDb();
+  const candidates = await db
+    .select()
+    .from(schema.conversations)
+    .where(
+      and(
+        eq(schema.conversations.mode, "ai"),
+        isNotNull(schema.conversations.customerId),
+        isNotNull(schema.conversations.lastInboundAt),
+        sql`${schema.conversations.lastMessageAt} > ${schema.conversations.lastInboundAt}`,
+        sql`${schema.conversations.lastMessageAt} BETWEEN now() - interval '45 minutes' AND now() - interval '5 minutes'`,
+        sql`(${schema.conversations.nudgeSentAt} IS NULL OR ${schema.conversations.nudgeSentAt} < ${schema.conversations.lastInboundAt})`,
+      ),
+    )
+    .limit(5);
+
+  for (const conversation of candidates) {
+    // Nada no meio do caminho: balão ainda saindo = não é silêncio da cliente
+    const pending = (
+      await db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.conversationId, conversation.id),
+            inArray(schema.messages.status, ["queued", "sending"]),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (pending) continue;
+
+    // A última fala precisa ser da Ana, entregue, com pergunta em aberto
+    const last = (
+      await db
+        .select({
+          direction: schema.messages.direction,
+          author: schema.messages.author,
+          status: schema.messages.status,
+          body: schema.messages.body,
+        })
+        .from(schema.messages)
+        .where(eq(schema.messages.conversationId, conversation.id))
+        .orderBy(desc(schema.messages.createdAt))
+        .limit(1)
+    )[0];
+    if (!last || last.direction !== "outbound" || last.author !== "ai") continue;
+    if (!["sent", "delivered", "read"].includes(last.status)) continue;
+    if (!last.body?.includes("?")) continue;
+    if (!(await clinicHasAiEnabled(conversation.clinicId))) continue;
+
+    // Claim: um toque por rodada, mesmo com dois workers ou crash no meio
+    const claimed = await db
+      .update(schema.conversations)
+      .set({ nudgeSentAt: new Date() })
+      .where(
+        and(
+          eq(schema.conversations.id, conversation.id),
+          sql`(${schema.conversations.nudgeSentAt} IS NULL OR ${schema.conversations.nudgeSentAt} < ${schema.conversations.lastInboundAt})`,
+        ),
+      )
+      .returning({ id: schema.conversations.id });
+    if (!claimed[0]) continue;
+
+    const minutes = Math.max(
+      5,
+      Math.round((Date.now() - new Date(conversation.lastMessageAt!).getTime()) / 60_000),
+    );
+    try {
+      await runTurn(conversation, logger, minutes);
+    } catch (err) {
+      logger.error(
+        { conversationId: conversation.id, err: err instanceof Error ? err.message : String(err) },
+        "falha no toque de silêncio",
+      );
+    }
+  }
+}
+
+async function runTurn(
+  conversation: ConversationRow,
+  logger: Logger,
+  nudgeMinutes?: number,
+): Promise<void> {
   const db = unsafeGlobalDb();
   if (conversation.mode !== "ai" || !conversation.customerId) return;
 
@@ -701,6 +790,7 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       },
       nowLabel: `${weekdays[nowZ.weekday]}, ${nd}/${nm}/${ny}, ${nowZ.timeHHMM} (horário de Brasília)`,
       history,
+      nudge: nudgeMinutes ? { minutes: nudgeMinutes } : undefined,
     },
     executors,
     { config: aiConfig },
@@ -756,6 +846,12 @@ async function runTurn(conversation: ConversationRow, logger: Logger): Promise<v
       { conversationId: conversation.id, mode: live?.mode },
       "turno da IA descartado (takeover ou nova mensagem durante o turno)",
     );
+    return;
+  }
+
+  // Turno de toque em que o modelo decidiu ficar em silêncio: nada a enviar
+  if (reply.balloons.length === 0) {
+    logger.info({ conversationId: conversation.id }, "toque dispensado pelo modelo (conversa já encerrada)");
     return;
   }
 

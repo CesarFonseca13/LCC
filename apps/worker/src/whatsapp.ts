@@ -92,6 +92,8 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
           lastInboundAt: new Date(),
           unreadCount: sql`${schema.conversations.unreadCount} + 1`,
           status: "open",
+          // cliente falou: a próxima rodada de silêncio pode ganhar novo toque
+          nudgeSentAt: null,
         })
         .where(eq(schema.conversations.id, conversationId));
 

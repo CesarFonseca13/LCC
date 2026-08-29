@@ -87,6 +87,8 @@ export const conversations = pgTable(
     aiContextSummary: text("ai_context_summary"),
     /** Debounce da IA: turno processa quando now() >= ai_turn_after (Postgres é a verdade). */
     aiTurnAfter: timestamp("ai_turn_after", { withTimezone: true }),
+    /** "Está por aí?" — no máximo um toque por rodada de silêncio (zera quando a cliente fala). */
+    nudgeSentAt: timestamp("nudge_sent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }),
   },

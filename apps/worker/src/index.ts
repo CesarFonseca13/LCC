@@ -10,7 +10,7 @@ import { evolutionFromEnv } from "@clinicaos/whatsapp";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
-import { processAiTurns } from "./ai-agent";
+import { processAiTurns, processConversationNudges } from "./ai-agent";
 import { expireApprovals, processAutomationTick, processBirthdays } from "./automations";
 import { processPdfGeneration } from "./documents";
 import { processCampaignsSweep } from "./campaigns";
@@ -45,6 +45,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("pdf-sweep", { every: 10_000 });
   await schedulerQueue.upsertJobScheduler("ai-turns", { every: 3_000 });
+  await schedulerQueue.upsertJobScheduler("nudge-sweep", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("birthdays", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("scores-sweep", { every: 600_000 });
   await schedulerQueue.upsertJobScheduler("reactivation-sweep", { every: 60_000 });
@@ -75,6 +76,9 @@ async function main() {
           break;
         case "ai-turns":
           await processAiTurns(logger);
+          break;
+        case "nudge-sweep":
+          await processConversationNudges(logger);
           break;
         case "birthdays":
           await processBirthdays(logger);
