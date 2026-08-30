@@ -1,7 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import { schema, withTenant } from "@clinicaos/db";
-import { Sidebar } from "@/components/sidebar";
-import { Topbar } from "@/components/topbar";
+import { TopNav } from "@/components/topnav";
 import { requireAuth } from "@/lib/auth-action";
 
 export default async function PainelLayout({
@@ -39,7 +38,6 @@ export default async function PainelLayout({
     );
   }
 
-  let whatsappStatus: string | null = null;
   let whatsappCounts = { connected: 0, total: 0 };
   let approvalsCount = 0;
   if (auth.clinicId) {
@@ -64,22 +62,37 @@ export default async function PainelLayout({
       auth.userId,
     );
     whatsappCounts = info.counts;
-    whatsappStatus =
-      info.counts.total > 0 && info.counts.connected === info.counts.total
-        ? "connected"
-        : info.counts.total > 0
-          ? "disconnected"
-          : null;
     approvalsCount = info.pending;
   }
 
+  const desconectados = whatsappCounts.total - whatsappCounts.connected;
+  const whatsapp =
+    whatsappCounts.total > 0 && desconectados === 0
+      ? {
+          tone: "ok" as const,
+          text:
+            whatsappCounts.total > 1
+              ? `WhatsApp conectado · ${whatsappCounts.total} números`
+              : "WhatsApp conectado",
+        }
+      : whatsappCounts.connected > 0
+        ? {
+            tone: "warn" as const,
+            text: `${desconectados} número${desconectados === 1 ? "" : "s"} desconectado${desconectados === 1 ? "" : "s"}`,
+          }
+        : whatsappCounts.total > 0
+          ? { tone: "off" as const, text: "WhatsApp não conectado" }
+          : { tone: "none" as const, text: "Nenhum número conectado ainda" };
+
   return (
-    <div className="flex h-screen bg-stone-50">
-      <Sidebar approvalsCount={approvalsCount} />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar auth={auth} whatsappStatus={whatsappStatus} whatsappCounts={whatsappCounts} />
-        <main className="flex-1 overflow-y-auto">{children}</main>
-      </div>
+    <div className="flex h-screen flex-col bg-stone-50">
+      <TopNav
+        clinicName={auth.clinicName ?? null}
+        userName={auth.userName ?? null}
+        approvalsCount={approvalsCount}
+        whatsapp={whatsapp}
+      />
+      <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
     </div>
   );
 }
