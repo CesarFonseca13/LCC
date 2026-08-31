@@ -67,8 +67,9 @@ export interface AgentReply {
 
 /** Executores das ferramentas — implementados pelo worker com acesso ao banco. */
 export interface AgentToolExecutors {
-  consultarHorarios(procedimentoNome: string | null): Promise<string>;
-  agendar(slotId: string, procedimentoNome: string): Promise<string>;
+  /** Um OU MAIS procedimentos para a mesma visita (tempo total, em sequência). */
+  consultarHorarios(procedimentosNomes: string[]): Promise<string>;
+  agendar(slotId: string, procedimentosNomes: string[]): Promise<string>;
   reagendar(agendamentoId: string, slotId: string): Promise<string>;
   cancelar(agendamentoId: string, motivo: string | null): Promise<string>;
   confirmarPresenca(agendamentoId: string): Promise<string>;
@@ -109,7 +110,7 @@ ${catalog}
 ${clinic.facts ? `\nINFORMAÇÕES OFICIAIS DA CLÍNICA (única fonte confiável para estes assuntos):\n${clinic.facts}\n` : ""}
 REGRAS INEGOCIÁVEIS
 1. Você escreve como uma pessoa real da equipe. Nunca diga que é assistente virtual, IA, robô ou sistema. Se perguntarem diretamente se você é um robô, use escalar_para_humano e responda apenas que vai pedir para alguém da equipe continuar a conversa.
-2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar.
+2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar. Cliente querendo MAIS DE UM procedimento no mesmo dia? Consulte e agende com a LISTA completa de uma vez — sai tudo em sequência, numa visita só; nunca crie duas visitas separadas sem a cliente pedir.
 3. NUNCA invente preço, desconto ou condição de pagamento. Os únicos valores que você pode citar são os do catálogo acima ("a partir de"). Pedido de desconto ou negociação → escalar_para_humano.
 4. Qualquer assunto de saúde — dor, inchaço, reação, alergia, medicamento, gravidez, "deu errado", resultado do procedimento — é assunto da equipe clínica: acolha com UMA frase gentil (sem opinião técnica) e use escalar_para_humano com urgência alta.
 5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano. Atenção: pedir para remarcar ou cancelar NÃO é frustração — isso é o seu trabalho de todo dia, resolva você mesma com reagendar/cancelar sem escalar.
@@ -192,28 +193,35 @@ const TOOLS: ToolDef[] = [
   {
     name: "consultar_horarios",
     description:
-      "Consulta os horários realmente livres da agenda para um procedimento nos próximos dias. Use SEMPRE antes de oferecer qualquer horário.",
+      "Consulta os horários realmente livres da agenda nos próximos dias. Aceita UM ou VÁRIOS procedimentos para a MESMA visita (a busca considera o tempo total, em sequência). Use SEMPRE antes de oferecer qualquer horário.",
     inputSchema: {
       type: "object",
       properties: {
-        procedimento_nome: {
-          type: "string",
-          description: "Nome do procedimento desejado (como está no catálogo)",
+        procedimentos: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'Procedimentos da visita, como estão no catálogo. Ex.: ["Limpeza de Pele"] ou ["Limpeza de Pele", "Peeling Químico"]',
         },
       },
+      required: ["procedimentos"],
     },
   },
   {
     name: "agendar",
     description:
-      "Agenda a cliente em um horário retornado por consultar_horarios. Use apenas slot_id vindos da consulta.",
+      "Agenda a cliente em um horário retornado por consultar_horarios. Use apenas slot_id vindos da consulta. Vários procedimentos = UMA visita, em sequência.",
     inputSchema: {
       type: "object",
       properties: {
         slot_id: { type: "string" },
-        procedimento_nome: { type: "string" },
+        procedimentos: {
+          type: "array",
+          items: { type: "string" },
+          description: "Os MESMOS procedimentos usados em consultar_horarios",
+        },
       },
-      required: ["slot_id", "procedimento_nome"],
+      required: ["slot_id", "procedimentos"],
     },
   },
   {
@@ -403,10 +411,19 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     if (input.nudge && balloons.some((b) => /\[?SEM[_ ]MENSAGEM\]?/i.test(b))) return [];
     return ensureGreeting(balloons);
   };
+  // Aceita a lista nova (procedimentos) e o formato antigo (procedimento_nome)
+  const listaProcedimentos = (raw: Record<string, unknown>): string[] => {
+    const lista = Array.isArray(raw.procedimentos)
+      ? raw.procedimentos.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+      : [];
+    if (lista.length > 0) return lista;
+    return typeof raw.procedimento_nome === "string" && raw.procedimento_nome.trim()
+      ? [raw.procedimento_nome]
+      : [];
+  };
   const wrappedExecutors: Record<string, (raw: Record<string, unknown>) => Promise<string>> = {
-    consultar_horarios: (raw) =>
-      executors.consultarHorarios(typeof raw.procedimento_nome === "string" ? raw.procedimento_nome : null),
-    agendar: (raw) => executors.agendar(String(raw.slot_id ?? ""), String(raw.procedimento_nome ?? "")),
+    consultar_horarios: (raw) => executors.consultarHorarios(listaProcedimentos(raw)),
+    agendar: (raw) => executors.agendar(String(raw.slot_id ?? ""), listaProcedimentos(raw)),
     reagendar: (raw) => executors.reagendar(String(raw.agendamento_id ?? ""), String(raw.slot_id ?? "")),
     cancelar: (raw) =>
       executors.cancelar(String(raw.agendamento_id ?? ""), typeof raw.motivo === "string" ? raw.motivo : null),

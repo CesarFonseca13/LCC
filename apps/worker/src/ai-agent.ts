@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import {
@@ -404,17 +405,18 @@ async function runTurn(
   const resolveSlotId = (raw: string): string =>
     slotAliases.get(raw.trim().toUpperCase()) ?? raw;
   const executors: AgentToolExecutors = {
-    async consultarHorarios(procedimentoNome) {
-      const proc = matchProcedure(procedures, procedimentoNome);
-      if (!proc) {
-        return `Procedimento não encontrado no catálogo. Opções: ${procedures.map((p) => p.name).join(", ")}.`;
-      }
-      const slots = await findSlots(db, clinic.id, tz, proc.durationMinutes);
+    async consultarHorarios(procedimentosNomes) {
+      const procs = matchProcedures(procedures, procedimentosNomes);
+      if (typeof procs === "string") return procs; // mensagem de "não encontrado"
+      const totalMin = procs.reduce((acc, p) => acc + p.durationMinutes, 0);
+      const slots = await findSlots(db, clinic.id, tz, totalMin);
       if (slots.length === 0) {
         return "Nenhum horário livre nos próximos 7 dias — ofereça passar para a equipe verificar outras opções.";
       }
       slotAliases.clear();
-      return `Horários livres para ${proc.name}:\n${slots
+      const nomes = procs.map((p) => p.name).join(" + ");
+      const combo = procs.length > 1 ? ` (${totalMin} min no total, em sequência)` : "";
+      return `Horários livres para ${nomes}${combo}:\n${slots
         .map((s, i) => {
           const alias = `H${i + 1}`;
           slotAliases.set(alias, s.slotId);
@@ -423,7 +425,7 @@ async function runTurn(
         .join("\n")}`;
     },
 
-    async agendar(slotId, procedimentoNome) {
+    async agendar(slotId, procedimentosNomes) {
       // Garantia mecânica: agendamento só nasce com nome completo de verdade
       // na ficha (relê AGORA — atualizar_cadastro pode ter rodado neste turno)
       const freshName =
@@ -437,36 +439,57 @@ async function runTurn(
       if (!nameReliability(freshName).confirmed) {
         return "NÃO AGENDADO: a ficha ainda não tem o nome completo da cliente. Pergunte o nome completo dela com naturalidade, registre com atualizar_cadastro e só então chame agendar de novo.";
       }
-      const proc = matchProcedure(procedures, procedimentoNome);
-      if (!proc) throw new Error("Procedimento não encontrado.");
+      const procs = matchProcedures(procedures, procedimentosNomes);
+      if (typeof procs === "string") throw new Error(procs);
       const parsed = parseSlotId(resolveSlotId(slotId));
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
       if (startsAt.getTime() < Date.now()) throw new Error("Esse horário já passou.");
-      const endsAt = new Date(startsAt.getTime() + proc.durationMinutes * 60_000);
 
-      const [created] = await db
-        .insert(schema.appointments)
-        .values({
-          clinicId: clinic.id,
-          customerId: customer.id,
-          professionalId: parsed.professionalId,
-          procedureId: proc.id,
-          startsAt,
-          endsAt,
-          price: proc.price,
-          origin: "ai_agent",
-        })
-        .returning({ id: schema.appointments.id });
-      if (!created) throw new Error("Não consegui agendar — o horário pode ter sido ocupado.");
-      await db.insert(schema.appointmentStatusHistory).values({
-        clinicId: clinic.id,
-        appointmentId: created.id,
-        fromStatus: null,
-        toStatus: "scheduled",
-        source: "ai_agent",
-      });
-      await materializeRuns(clinic.id, created.id, customer.id, startsAt);
+      // Vários serviços = UMA visita: blocos emendados, mesmo grupo.
+      // Transação: ou a visita inteira nasce, ou nada nasce (agenda nunca
+      // fica com metade de um combo se um bloco conflitar).
+      const groupId = procs.length > 1 ? randomUUID() : null;
+      let cursor = startsAt;
+      const createdIds: string[] = [];
+      try {
+        await db.transaction(async (t) => {
+          for (const proc of procs) {
+            const segEnd = new Date(cursor.getTime() + proc.durationMinutes * 60_000);
+            const [created] = await t
+              .insert(schema.appointments)
+              .values({
+                clinicId: clinic.id,
+                customerId: customer.id,
+                professionalId: parsed.professionalId,
+                procedureId: proc.id,
+                startsAt: cursor,
+                endsAt: segEnd,
+                price: proc.price,
+                origin: "ai_agent",
+                visitGroupId: groupId,
+              })
+              .returning({ id: schema.appointments.id });
+            if (!created) throw new Error("conflito");
+            await t.insert(schema.appointmentStatusHistory).values({
+              clinicId: clinic.id,
+              appointmentId: created.id,
+              fromStatus: null,
+              toStatus: "scheduled",
+              source: "ai_agent",
+            });
+            createdIds.push(created.id);
+            cursor = segEnd;
+          }
+        });
+      } catch {
+        throw new Error(
+          "Não consegui agendar — o horário pode ter acabado de ser ocupado. Consulte os horários de novo.",
+        );
+      }
+
+      // Lembretes: só o PRIMEIRO bloco da visita (um lembrete por visita, nunca rajada)
+      await materializeRuns(clinic.id, createdIds[0]!, customer.id, startsAt);
       // Funil corre sozinho: agendou → card vai para "Agendou avaliação"
       await db.execute(sql`
         INSERT INTO pipeline_stages (clinic_id, name, sort)
@@ -474,13 +497,13 @@ async function runTurn(
         WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
                           WHERE clinic_id = ${clinic.id} AND name = 'Agendou avaliação')
       `);
-      // Valor da negociação nasce do agendamento (só se ninguém preencheu antes)
+      // Valor da negociação = soma da visita (só se ninguém preencheu antes)
+      const totalPrice = procs.reduce((acc, p) => acc + Number(p.price), 0).toFixed(2);
+      const nomes = procs.map((p) => p.name).join(" + ");
       await db.execute(sql`
         UPDATE deals d SET stage_id = s.id, updated_at = now(),
-          value = COALESCE(d.value, (SELECT a.price FROM appointments a WHERE a.id = ${created.id})),
-          notes = COALESCE(NULLIF(d.notes, ''),
-            (SELECT 'Agendou: ' || p.name FROM appointments a
-             JOIN procedures p ON p.id = a.procedure_id WHERE a.id = ${created.id}))
+          value = COALESCE(d.value, ${totalPrice}::numeric),
+          notes = COALESCE(NULLIF(d.notes, ''), ${"Agendou: " + nomes})
         FROM pipeline_stages s
         WHERE d.clinic_id = ${clinic.id} AND d.customer_id = ${customer.id}
           AND d.status = 'open'
@@ -488,7 +511,7 @@ async function runTurn(
       `);
       const z = utcToZoned(startsAt, tz);
       const [, m2, d2] = z.dateISO.split("-");
-      return `Agendado com sucesso: ${proc.name} em ${d2}/${m2} às ${z.timeHHMM} (id: ${created.id}).`;
+      return `Agendado com sucesso: ${nomes} em ${d2}/${m2} às ${z.timeHHMM}${procs.length > 1 ? " (em sequência, na mesma visita)" : ""} (id: ${createdIds[0]}).`;
     },
 
     async reagendar(agendamentoId, slotId) {
@@ -507,97 +530,153 @@ async function runTurn(
       if (!original || !["scheduled", "confirmed"].includes(original.status)) {
         throw new Error("Agendamento não encontrado ou não pode ser remarcado.");
       }
+      // Visita com vários serviços? Remarca o GRUPO inteiro (blocos em ordem)
+      const grupo = original.visitGroupId
+        ? await db
+            .select()
+            .from(schema.appointments)
+            .where(
+              and(
+                eq(schema.appointments.visitGroupId, original.visitGroupId),
+                eq(schema.appointments.customerId, customer.id),
+                inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+              ),
+            )
+            .orderBy(asc(schema.appointments.startsAt))
+        : [original];
       const parsed = parseSlotId(resolveSlotId(slotId));
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
-      const duration =
-        new Date(original.endsAt).getTime() - new Date(original.startsAt).getTime();
 
-      await db
-        .update(schema.appointments)
-        .set({ status: "rescheduled", statusChangedAt: new Date() })
-        .where(eq(schema.appointments.id, original.id));
-      // Transição do agendamento antigo também vai para o diário de bordo
-      await db.insert(schema.appointmentStatusHistory).values({
-        clinicId: clinic.id,
-        appointmentId: original.id,
-        fromStatus: original.status,
-        toStatus: "rescheduled",
-        source: "ai_agent",
-        reason: "remarcado pela cliente via assistente",
-      });
-      await db
-        .update(schema.automationRuns)
-        .set({ status: "cancelled", stopReason: "remarcado pela IA", nextRunAt: null, finishedAt: new Date() })
-        .where(
-          and(
-            eq(schema.automationRuns.appointmentId, original.id),
-            eq(schema.automationRuns.status, "active"),
-          ),
+      const novoGrupo = grupo.length > 1 ? randomUUID() : null;
+      let cursor = startsAt;
+      let firstCreatedId: string | null = null;
+      try {
+        await db.transaction(async (t) => {
+          for (const antigo of grupo) {
+            const duration =
+              new Date(antigo.endsAt).getTime() - new Date(antigo.startsAt).getTime();
+            await t
+              .update(schema.appointments)
+              .set({ status: "rescheduled", statusChangedAt: new Date() })
+              .where(eq(schema.appointments.id, antigo.id));
+            await t.insert(schema.appointmentStatusHistory).values({
+              clinicId: clinic.id,
+              appointmentId: antigo.id,
+              fromStatus: antigo.status,
+              toStatus: "rescheduled",
+              source: "ai_agent",
+              reason: "remarcado pela cliente via assistente",
+            });
+            await t
+              .update(schema.automationRuns)
+              .set({ status: "cancelled", stopReason: "remarcado pela IA", nextRunAt: null, finishedAt: new Date() })
+              .where(
+                and(
+                  eq(schema.automationRuns.appointmentId, antigo.id),
+                  eq(schema.automationRuns.status, "active"),
+                ),
+              );
+            const segEnd = new Date(cursor.getTime() + duration);
+            const [created] = await t
+              .insert(schema.appointments)
+              .values({
+                clinicId: clinic.id,
+                customerId: customer.id,
+                professionalId: parsed.professionalId,
+                procedureId: antigo.procedureId,
+                startsAt: cursor,
+                endsAt: segEnd,
+                price: antigo.price,
+                customerPackageId: antigo.customerPackageId,
+                origin: "ai_agent",
+                visitGroupId: novoGrupo,
+              })
+              .returning({ id: schema.appointments.id });
+            if (!created) throw new Error("conflito");
+            await t
+              .update(schema.appointments)
+              .set({ rescheduledToId: created.id })
+              .where(eq(schema.appointments.id, antigo.id));
+            await t.insert(schema.appointmentStatusHistory).values({
+              clinicId: clinic.id,
+              appointmentId: created.id,
+              fromStatus: null,
+              toStatus: "scheduled",
+              source: "ai_agent",
+              reason: "reagendamento via assistente",
+            });
+            firstCreatedId ??= created.id;
+            cursor = segEnd;
+          }
+        });
+      } catch {
+        throw new Error(
+          "Não consegui remarcar — o horário pode ter acabado de ser ocupado. Consulte os horários de novo.",
         );
-      const [created] = await db
-        .insert(schema.appointments)
-        .values({
-          clinicId: clinic.id,
-          customerId: customer.id,
-          professionalId: parsed.professionalId,
-          procedureId: original.procedureId,
-          startsAt,
-          endsAt: new Date(startsAt.getTime() + duration),
-          price: original.price,
-          customerPackageId: original.customerPackageId,
-          origin: "ai_agent",
-        })
-        .returning({ id: schema.appointments.id });
-      if (!created) throw new Error("Não consegui remarcar — o horário pode ter sido ocupado.");
-      await db
-        .update(schema.appointments)
-        .set({ rescheduledToId: created.id })
-        .where(eq(schema.appointments.id, original.id));
-      await db.insert(schema.appointmentStatusHistory).values({
-        clinicId: clinic.id,
-        appointmentId: created.id,
-        fromStatus: null,
-        toStatus: "scheduled",
-        source: "ai_agent",
-        reason: "reagendamento via assistente",
-      });
-      await materializeRuns(clinic.id, created.id, customer.id, startsAt);
+      }
+      await materializeRuns(clinic.id, firstCreatedId!, customer.id, startsAt);
       const z = utcToZoned(startsAt, tz);
       const [, m2, d2] = z.dateISO.split("-");
-      return `Remarcado para ${d2}/${m2} às ${z.timeHHMM}.`;
+      return `Remarcado para ${d2}/${m2} às ${z.timeHHMM}${grupo.length > 1 ? " (a visita inteira, com todos os serviços)" : ""}.`;
     },
 
     async cancelar(agendamentoId, motivo) {
-      const updated = await db
-        .update(schema.appointments)
-        .set({ status: "cancelled", statusChangedAt: new Date(), cancelReason: motivo })
-        .where(
-          and(
-            eq(schema.appointments.id, agendamentoId),
-            eq(schema.appointments.customerId, customer.id),
-            inArray(schema.appointments.status, ["scheduled", "confirmed"]),
-          ),
-        )
-        .returning({ id: schema.appointments.id });
-      if (!updated[0]) throw new Error("Agendamento não encontrado.");
-      await db.insert(schema.appointmentStatusHistory).values({
-        clinicId: clinic.id,
-        appointmentId: agendamentoId,
-        fromStatus: "scheduled",
-        toStatus: "cancelled",
-        source: "ai_agent",
-        reason: motivo,
-      });
-      await db
-        .update(schema.automationRuns)
-        .set({ status: "cancelled", stopReason: "cancelado pela cliente", nextRunAt: null, finishedAt: new Date() })
-        .where(
-          and(
-            eq(schema.automationRuns.appointmentId, agendamentoId),
-            eq(schema.automationRuns.status, "active"),
-          ),
-        );
+      const alvo = (
+        await db
+          .select({
+            id: schema.appointments.id,
+            visitGroupId: schema.appointments.visitGroupId,
+          })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.id, agendamentoId),
+              eq(schema.appointments.customerId, customer.id),
+              inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (!alvo) throw new Error("Agendamento não encontrado.");
+      // Visita com vários serviços: cancelar a visita cancela TODOS os blocos
+      const ids = alvo.visitGroupId
+        ? (
+            await db
+              .select({ id: schema.appointments.id })
+              .from(schema.appointments)
+              .where(
+                and(
+                  eq(schema.appointments.visitGroupId, alvo.visitGroupId),
+                  eq(schema.appointments.customerId, customer.id),
+                  inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+                ),
+              )
+          ).map((r) => r.id)
+        : [alvo.id];
+      for (const id of ids) {
+        await db
+          .update(schema.appointments)
+          .set({ status: "cancelled", statusChangedAt: new Date(), cancelReason: motivo })
+          .where(eq(schema.appointments.id, id));
+        await db.insert(schema.appointmentStatusHistory).values({
+          clinicId: clinic.id,
+          appointmentId: id,
+          fromStatus: "scheduled",
+          toStatus: "cancelled",
+          source: "ai_agent",
+          reason: motivo,
+        });
+        await db
+          .update(schema.automationRuns)
+          .set({ status: "cancelled", stopReason: "cancelado pela cliente", nextRunAt: null, finishedAt: new Date() })
+          .where(
+            and(
+              eq(schema.automationRuns.appointmentId, id),
+              eq(schema.automationRuns.status, "active"),
+            ),
+          );
+      }
       return "Cancelado com sucesso.";
     },
 
@@ -965,6 +1044,28 @@ function matchProcedure(
       return pn === normalized || pn.includes(normalized) || normalized.includes(pn);
     }) ?? null
   );
+}
+
+/** Uma OU várias na mesma visita. Lista vazia = primeiro do catálogo (compat).
+ *  Nome desconhecido → devolve STRING com a mensagem de erro para o modelo. */
+function matchProcedures(
+  procedures: { id: string; name: string; price: string; durationMinutes: number }[],
+  nomes: string[],
+): { id: string; name: string; price: string; durationMinutes: number }[] | string {
+  if (nomes.length === 0) {
+    const first = procedures[0];
+    return first ? [first] : "Catálogo vazio — escale para a equipe.";
+  }
+  const achados: { id: string; name: string; price: string; durationMinutes: number }[] = [];
+  for (const nome of nomes) {
+    const proc = matchProcedure(procedures, nome);
+    if (!proc) {
+      return `Procedimento "${nome}" não encontrado no catálogo. Opções: ${procedures.map((p) => p.name).join(", ")}.`;
+    }
+    // Mesmo procedimento repetido na lista não duplica a visita
+    if (!achados.some((a) => a.id === proc.id)) achados.push(proc);
+  }
+  return achados;
 }
 
 function businessHoursToLabel(hours: Record<string, [string, string][]>): string {

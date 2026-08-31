@@ -49,6 +49,8 @@ export const appointments = pgTable(
       .default("manual"),
     /** Sessão coberta por pacote (sem conta a receber; debita sessão no Compareceu). */
     customerPackageId: uuid("customer_package_id"),
+    /** Visita com vários serviços: agendamentos emendados compartilham o grupo. */
+    visitGroupId: uuid("visit_group_id"),
     allowOverlap: boolean("allow_overlap").notNull().default(false),
     cancelReason: text("cancel_reason"),
     notes: text("notes"),
