@@ -225,12 +225,16 @@ export async function bookOnline(rawInput: unknown): Promise<BookResult> {
         WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
                           WHERE clinic_id = ${clinic.id} AND name = 'Agendou avaliação')
       `);
+      // Valor da negociação nasce do agendamento (só se ninguém preencheu antes)
       await tx.execute(sql`
-        UPDATE deals d SET stage_id = s.id, updated_at = now()
+        UPDATE deals d SET stage_id = s.id, updated_at = now(),
+          value = COALESCE(d.value, (SELECT a.price FROM appointments a WHERE a.id = ${created.id})),
+          notes = COALESCE(NULLIF(d.notes, ''),
+            (SELECT 'Agendou: ' || p.name FROM appointments a
+             JOIN procedures p ON p.id = a.procedure_id WHERE a.id = ${created.id}))
         FROM pipeline_stages s
         WHERE d.customer_id = ${customer.id} AND d.status = 'open'
           AND s.clinic_id = d.clinic_id AND s.name = 'Agendou avaliação'
-          AND (d.stage_id IS DISTINCT FROM s.id)
       `);
 
       const z2 = new Intl.DateTimeFormat("pt-BR", {
