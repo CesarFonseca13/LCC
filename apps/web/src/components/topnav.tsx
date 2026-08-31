@@ -100,7 +100,9 @@ export function TopNav({
   whatsapp: { tone: "ok" | "warn" | "off" | "none"; text: string };
 }) {
   const pathname = usePathname();
-  const [open, setOpen] = useState<string | null>(null);
+  // O painel do dropdown é position:fixed (ancorado na coordenada do botão):
+  // o <nav> rola horizontalmente e overflow cortaria um painel absoluto.
+  const [open, setOpen] = useState<{ label: string; x: number; y: number } | null>(null);
 
   // Navegou? Fecha qualquer dropdown aberto.
   useEffect(() => setOpen(null), [pathname]);
@@ -167,45 +169,33 @@ export function TopNav({
             }
 
             const childActive = entry.children!.some((c) => isActive(pathname, c.href));
-            const isOpen = open === entry.label;
+            const isOpen = open?.label === entry.label;
             return (
-              <div key={entry.label} className="relative">
-                <button
-                  type="button"
-                  onClick={() => setOpen(isOpen ? null : entry.label)}
-                  className={`${baseItem} ${childActive ? activeCls : idle}`}
-                >
-                  <Icon className="h-[19px] w-[19px]" />
-                  <span className="flex items-center gap-0.5">
-                    {entry.label}
-                    <ChevronDown
-                      className={`h-3 w-3 transition-transform ${isOpen ? "rotate-180" : ""}`}
-                    />
-                  </span>
-                </button>
-                {isOpen ? (
-                  <div className="absolute left-1/2 top-full z-50 mt-2 w-52 -translate-x-1/2 overflow-hidden rounded-xl border border-stone-200 bg-white py-1.5 shadow-xl">
-                    {entry.children!.map((child) => {
-                      const ChildIcon = child.icon;
-                      const active = isActive(pathname, child.href);
-                      return (
-                        <Link
-                          key={child.href}
-                          href={child.href}
-                          className={
-                            active
-                              ? "flex items-center gap-2.5 bg-teal-50 px-4 py-2.5 text-sm font-medium text-teal-800"
-                              : "flex items-center gap-2.5 px-4 py-2.5 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900"
-                          }
-                        >
-                          <ChildIcon className="h-4 w-4 shrink-0" />
-                          {child.label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
+              <button
+                key={entry.label}
+                type="button"
+                onClick={(e) => {
+                  if (isOpen) {
+                    setOpen(null);
+                    return;
+                  }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setOpen({
+                    label: entry.label,
+                    x: rect.left + rect.width / 2,
+                    y: rect.bottom,
+                  });
+                }}
+                className={`${baseItem} ${childActive ? activeCls : idle}`}
+              >
+                <Icon className="h-[19px] w-[19px]" />
+                <span className="flex items-center gap-0.5">
+                  {entry.label}
+                  <ChevronDown
+                    className={`h-3 w-3 transition-transform ${isOpen ? "rotate-180" : ""}`}
+                  />
+                </span>
+              </button>
             );
           })}
         </nav>
@@ -230,15 +220,41 @@ export function TopNav({
         </div>
       </div>
 
-      {/* Clique fora fecha o dropdown */}
+      {/* Dropdown aberto: overlay fecha no clique fora; painel fixo ancorado no botão */}
       {open ? (
-        <button
-          type="button"
-          aria-label="Fechar menu"
-          onClick={() => setOpen(null)}
-          className="fixed inset-0 z-30 h-full w-full cursor-default"
-          tabIndex={-1}
-        />
+        <>
+          <button
+            type="button"
+            aria-label="Fechar menu"
+            onClick={() => setOpen(null)}
+            className="fixed inset-0 z-30 h-full w-full cursor-default"
+            tabIndex={-1}
+          />
+          <div
+            className="fixed z-50 w-52 -translate-x-1/2 overflow-hidden rounded-xl border border-stone-200 bg-white py-1.5 shadow-xl"
+            style={{ left: open.x, top: open.y + 8 }}
+          >
+            {NAV.find((n) => n.label === open.label)?.children?.map((child) => {
+              const ChildIcon = child.icon;
+              const active = isActive(pathname, child.href);
+              return (
+                <Link
+                  key={child.href}
+                  href={child.href}
+                  onClick={() => setOpen(null)}
+                  className={
+                    active
+                      ? "flex items-center gap-2.5 bg-teal-50 px-4 py-2.5 text-sm font-medium text-teal-800"
+                      : "flex items-center gap-2.5 px-4 py-2.5 text-sm text-stone-600 hover:bg-stone-50 hover:text-stone-900"
+                  }
+                >
+                  <ChildIcon className="h-4 w-4 shrink-0" />
+                  {child.label}
+                </Link>
+              );
+            })}
+          </div>
+        </>
       ) : null}
     </header>
   );
