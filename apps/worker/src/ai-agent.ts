@@ -8,7 +8,7 @@ import {
 } from "@clinicaos/ai/agent";
 import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
-import { findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
+import { eligibleProfessionalIds, findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 
 /**
  * Turnos da IA conversacional.
@@ -409,7 +409,14 @@ async function runTurn(
       const procs = matchProcedures(procedures, procedimentosNomes);
       if (typeof procs === "string") return procs; // mensagem de "não encontrado"
       const totalMin = procs.reduce((acc, p) => acc + p.durationMinutes, 0);
-      const slots = await findSlots(db, clinic.id, tz, totalMin);
+      // Só profissionais que realizam TODOS os procedimentos da visita
+      const aptas = await eligibleProfessionalIds(db, clinic.id, procs.map((p) => p.id));
+      if (aptas.length === 0) {
+        return procs.length > 1
+          ? "Nenhuma profissional realiza TODOS esses procedimentos na mesma visita. Ofereça marcar em visitas separadas (consulte cada procedimento sozinho) ou escale para a equipe combinar."
+          : "Nenhuma profissional ativa realiza esse procedimento — escale para a equipe.";
+      }
+      const slots = await findSlots(db, clinic.id, tz, totalMin, 6, aptas);
       if (slots.length === 0) {
         return "Nenhum horário livre nos próximos 7 dias — ofereça passar para a equipe verificar outras opções.";
       }
@@ -445,6 +452,13 @@ async function runTurn(
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
       if (startsAt.getTime() < Date.now()) throw new Error("Esse horário já passou.");
+      // Trava: a profissional do slot precisa realizar todos os procedimentos
+      const aptas = await eligibleProfessionalIds(db, clinic.id, procs.map((p) => p.id));
+      if (!aptas.includes(parsed.professionalId)) {
+        throw new Error(
+          "Essa profissional não realiza esse(s) procedimento(s) — consulte os horários de novo com a lista certa.",
+        );
+      }
 
       // Vários serviços = UMA visita: blocos emendados, mesmo grupo.
       // Transação: ou a visita inteira nasce, ou nada nasce (agenda nunca

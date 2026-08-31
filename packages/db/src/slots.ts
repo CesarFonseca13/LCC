@@ -34,7 +34,11 @@ export async function findSlots(
   tz: string,
   durationMinutes: number,
   limit = 6,
+  /** Restringe a busca a estas profissionais (ex.: só quem faz o procedimento).
+   *  undefined/null = todas as ativas; lista vazia = ninguém apto → sem slots. */
+  professionalIds?: string[] | null,
 ): Promise<FreeSlot[]> {
+  if (professionalIds && professionalIds.length === 0) return [];
   const clinic = (
     await db
       .select({ businessHours: schema.clinics.businessHours })
@@ -47,7 +51,13 @@ export async function findSlots(
   const professionals = await db
     .select({ id: schema.professionals.id, name: schema.professionals.name })
     .from(schema.professionals)
-    .where(and(eq(schema.professionals.clinicId, clinicId), eq(schema.professionals.active, true)));
+    .where(
+      and(
+        eq(schema.professionals.clinicId, clinicId),
+        eq(schema.professionals.active, true),
+        professionalIds ? inArray(schema.professionals.id, professionalIds) : undefined,
+      ),
+    );
   if (professionals.length === 0) return [];
 
   const windowStart = new Date();
@@ -138,4 +148,37 @@ export async function findSlots(
     }
   }
   return slots;
+}
+
+/** Profissionais ativas aptas a TODOS os procedimentos pedidos.
+ *  Convenção: profissional SEM vínculos em professional_procedures faz todos. */
+export async function eligibleProfessionalIds(
+  db: Db | Tx,
+  clinicId: string,
+  procedureIds: string[],
+): Promise<string[]> {
+  const pros = await db
+    .select({ id: schema.professionals.id })
+    .from(schema.professionals)
+    .where(and(eq(schema.professionals.clinicId, clinicId), eq(schema.professionals.active, true)));
+  if (procedureIds.length === 0) return pros.map((p) => p.id);
+  const links = await db
+    .select({
+      professionalId: schema.professionalProcedures.professionalId,
+      procedureId: schema.professionalProcedures.procedureId,
+    })
+    .from(schema.professionalProcedures)
+    .where(eq(schema.professionalProcedures.clinicId, clinicId));
+  const porPro = new Map<string, Set<string>>();
+  for (const l of links) {
+    if (!porPro.has(l.professionalId)) porPro.set(l.professionalId, new Set());
+    porPro.get(l.professionalId)!.add(l.procedureId);
+  }
+  return pros
+    .filter((p) => {
+      const faz = porPro.get(p.id);
+      if (!faz || faz.size === 0) return true; // sem vínculos = faz todos
+      return procedureIds.every((id) => faz.has(id));
+    })
+    .map((p) => p.id);
 }

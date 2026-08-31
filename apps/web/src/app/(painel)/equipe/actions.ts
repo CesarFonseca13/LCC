@@ -24,12 +24,17 @@ const professionalSchema = z.object({
   specialty: z.string().trim().transform((v) => v || null),
   registrationNumber: z.string().trim().transform((v) => v || null),
   calendarColor: z.string().regex(/^#[0-9a-fA-F]{6}$/, "Cor inválida"),
+  /** null/ausente = faz TODOS os serviços; lista = somente os marcados. */
+  procedureIds: z.array(z.string().uuid()).nullable().optional(),
 });
 
 export const saveProfessional = authAction({
   permission: "team.manage",
   schema: professionalSchema,
   handler: async (input, { auth, tx }): Promise<FormResult> => {
+    if (Array.isArray(input.procedureIds) && input.procedureIds.length === 0) {
+      return { ok: false, error: "Marque pelo menos um serviço — ou volte para 'faz todos'." };
+    }
     const values = {
       clinicId: auth.clinicId,
       name: input.name,
@@ -37,13 +42,33 @@ export const saveProfessional = authAction({
       registrationNumber: input.registrationNumber,
       calendarColor: input.calendarColor,
     };
+    let profId = input.id;
     if (input.id) {
       await tx
         .update(schema.professionals)
         .set(values)
         .where(eq(schema.professionals.id, input.id));
     } else {
-      await tx.insert(schema.professionals).values(values);
+      const [created] = await tx
+        .insert(schema.professionals)
+        .values(values)
+        .returning({ id: schema.professionals.id });
+      profId = created?.id;
+    }
+    if (profId) {
+      // Vínculos de serviço: sem linhas = faz todos (padrão)
+      await tx
+        .delete(schema.professionalProcedures)
+        .where(eq(schema.professionalProcedures.professionalId, profId));
+      if (input.procedureIds && input.procedureIds.length > 0) {
+        await tx.insert(schema.professionalProcedures).values(
+          input.procedureIds.map((procedureId) => ({
+            clinicId: auth.clinicId,
+            professionalId: profId!,
+            procedureId,
+          })),
+        );
+      }
     }
     revalidatePath("/equipe");
     return { ok: true };

@@ -10,7 +10,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { clinics } from "./tenancy";
+import { clinics, professionals } from "./tenancy";
 
 const id = () => uuid("id").primaryKey().default(sql`gen_random_uuid()`);
 const clinicId = () =>
@@ -76,4 +76,23 @@ export const packageItems = pgTable(
     sessions: integer("sessions").notNull(),
   },
   (t) => [unique("package_items_package_procedure_uq").on(t.packageId, t.procedureId)],
+);
+
+/** Serviços que cada profissional realiza. SEM linhas = faz todos (padrão);
+ *  COM linhas = somente os listados. Busca de horários respeita o vínculo. */
+export const professionalProcedures = pgTable(
+  "professional_procedures",
+  {
+    clinicId: clinicId(),
+    professionalId: uuid("professional_id")
+      .notNull()
+      .references(() => professionals.id, { onDelete: "cascade" }),
+    procedureId: uuid("procedure_id")
+      .notNull()
+      .references(() => procedures.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    unique("professional_procedures_pk").on(t.professionalId, t.procedureId),
+    index("professional_procedures_clinic_idx2").on(t.clinicId),
+  ],
 );

@@ -13,6 +13,8 @@ export interface ProfessionalInitial {
   specialty: string;
   registrationNumber: string;
   calendarColor: string;
+  /** Vazio = faz todos os serviços. */
+  procedureIds?: string[];
 }
 
 const PROF_EMPTY: ProfessionalInitial = {
@@ -20,15 +22,25 @@ const PROF_EMPTY: ProfessionalInitial = {
   specialty: "",
   registrationNumber: "",
   calendarColor: "#0f766e",
+  procedureIds: [],
 };
 
-export function ProfessionalFormButton({ initial }: { initial?: ProfessionalInitial }) {
+export function ProfessionalFormButton({
+  initial,
+  procedures = [],
+}: {
+  initial?: ProfessionalInitial;
+  /** Catálogo ativo, para marcar quais serviços a profissional realiza. */
+  procedures?: { id: string; name: string }[];
+}) {
   const isEdit = Boolean(initial?.id);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string>();
   const [pending, startTransition] = useTransition();
   const router = useRouter();
   const v = initial ?? PROF_EMPTY;
+  const [fazTodos, setFazTodos] = useState((initial?.procedureIds ?? []).length === 0);
+  const [marcados, setMarcados] = useState<string[]>(initial?.procedureIds ?? []);
 
   function submit(formData: FormData) {
     setError(undefined);
@@ -40,6 +52,7 @@ export function ProfessionalFormButton({ initial }: { initial?: ProfessionalInit
           specialty: String(formData.get("specialty") ?? ""),
           registrationNumber: String(formData.get("registrationNumber") ?? ""),
           calendarColor: String(formData.get("calendarColor") ?? ""),
+          procedureIds: fazTodos ? null : marcados,
         });
         if (result.ok) {
           setOpen(false);
@@ -101,6 +114,44 @@ export function ProfessionalFormButton({ initial }: { initial?: ProfessionalInit
               className="h-10 w-16 cursor-pointer rounded-lg border border-stone-300 bg-white p-1"
             />
           </div>
+
+          {procedures.length > 0 ? (
+            <div className="rounded-lg border border-stone-200 bg-stone-50 p-3">
+              <p className="text-xs font-medium text-stone-600">Serviços que realiza</p>
+              <label className="mt-2 flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="checkbox"
+                  checked={fazTodos}
+                  onChange={(e) => setFazTodos(e.target.checked)}
+                  className="h-4 w-4 accent-teal-700"
+                />
+                Faz todos os serviços da clínica
+              </label>
+              {!fazTodos ? (
+                <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  {procedures.map((p) => (
+                    <label key={p.id} className="flex items-center gap-2 text-sm text-stone-600">
+                      <input
+                        type="checkbox"
+                        checked={marcados.includes(p.id)}
+                        onChange={(e) =>
+                          setMarcados((prev) =>
+                            e.target.checked ? [...prev, p.id] : prev.filter((x) => x !== p.id),
+                          )
+                        }
+                        className="h-4 w-4 accent-teal-700"
+                      />
+                      {p.name}
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              <p className="mt-2 text-xs text-stone-400">
+                A assistente e o agendamento online só oferecem horários de quem realiza o
+                serviço pedido.
+              </p>
+            </div>
+          ) : null}
 
           <FieldError message={error} />
 

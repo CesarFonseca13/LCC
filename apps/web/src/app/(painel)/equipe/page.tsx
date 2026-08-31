@@ -41,13 +41,24 @@ export default async function EquipePage({
   const tab: Tab =
     sp.tab === "acessos" ? "acessos" : sp.tab === "salas" ? "salas" : "profissionais";
 
-  const { professionals, members, rooms } = await withTenant(
+  const { professionals, members, rooms, procedures, procLinks } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const professionals = await tx
         .select()
         .from(schema.professionals)
         .orderBy(schema.professionals.name);
+      const procedures = await tx
+        .select({ id: schema.procedures.id, name: schema.procedures.name })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.active, true))
+        .orderBy(schema.procedures.name);
+      const procLinks = await tx
+        .select({
+          professionalId: schema.professionalProcedures.professionalId,
+          procedureId: schema.professionalProcedures.procedureId,
+        })
+        .from(schema.professionalProcedures);
       const members = await tx
         .select({
           id: schema.clinicMembers.id,
@@ -64,10 +75,18 @@ export default async function EquipePage({
         // usuário atual", o que traria vínculos da mesma pessoa em OUTRAS clínicas
         .where(eq(schema.clinicMembers.clinicId, auth.clinicId!));
       const rooms = await tx.select().from(schema.rooms).orderBy(schema.rooms.name);
-      return { professionals, members, rooms };
+      return { professionals, members, rooms, procedures, procLinks };
     },
     auth.userId,
   );
+
+  // Serviços marcados por profissional (vazio = faz todos)
+  const procIdsPorProfissional = new Map<string, string[]>();
+  for (const l of procLinks) {
+    const lista = procIdsPorProfissional.get(l.professionalId) ?? [];
+    lista.push(l.procedureId);
+    procIdsPorProfissional.set(l.professionalId, lista);
+  }
 
   return (
     <div className="p-8">
@@ -79,7 +98,7 @@ export default async function EquipePage({
           </p>
         </div>
         {tab === "profissionais" ? (
-          <ProfessionalFormButton />
+          <ProfessionalFormButton procedures={procedures} />
         ) : tab === "acessos" ? (
           <MemberFormButton
             professionals={professionals
@@ -116,7 +135,7 @@ export default async function EquipePage({
           professionals.length === 0 ? (
             <EmptyState
               title="Cadastre quem atende na clínica — cada profissional vira uma coluna na agenda."
-              action={<ProfessionalFormButton />}
+              action={<ProfessionalFormButton procedures={procedures} />}
             />
           ) : (
             <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
@@ -158,12 +177,14 @@ export default async function EquipePage({
                       <td className="px-4 py-3 text-right">
                         <div className="flex justify-end gap-1">
                           <ProfessionalFormButton
+                            procedures={procedures}
                             initial={{
                               id: p.id,
                               name: p.name,
                               specialty: p.specialty ?? "",
                               registrationNumber: p.registrationNumber ?? "",
                               calendarColor: p.calendarColor,
+                              procedureIds: procIdsPorProfissional.get(p.id) ?? [],
                             }}
                           />
                           <ToggleButton kind="professional" id={p.id} active={p.active} />

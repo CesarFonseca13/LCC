@@ -6,6 +6,7 @@ import { normalizePhoneBR } from "@clinicaos/core/phone";
 import { todayISO } from "@clinicaos/core/timezone";
 import {
   adoptClinic,
+  eligibleProfessionalIds,
   findSlots,
   parseSlotId,
   schema,
@@ -49,7 +50,9 @@ export async function getBookingSlots(
     )[0];
     if (!procedure) return { ok: false, error: "Procedimento indisponível." };
 
-    const slots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 9);
+    // Só profissionais que realizam o procedimento escolhido
+    const aptas = await eligibleProfessionalIds(tx, clinic.id, [procedureId]);
+    const slots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 9, aptas);
     return { ok: true, slots };
   });
 }
@@ -128,7 +131,8 @@ export async function bookOnline(rawInput: unknown): Promise<BookResult> {
     if (!professional) {
       return { ok: false, error: "Esse horário não está mais disponível.", conflict: true };
     }
-    const validSlots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 60);
+    const aptas = await eligibleProfessionalIds(tx, clinic.id, [input.procedureId]);
+    const validSlots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 60, aptas);
     if (!validSlots.some((s) => s.slotId === input.slotId)) {
       return { ok: false, error: "Esse horário acabou de ser preenchido 😅", conflict: true };
     }
