@@ -7,7 +7,7 @@ import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
-import { Composer, ModeBanner, ReadOnOpen, AutoRefresh } from "./inbox-client";
+import { Composer, ModeBanner, ReadOnOpen, AutoRefresh, StickToBottom } from "./inbox-client";
 
 export const metadata = { title: "WhatsApp" };
 
@@ -402,6 +402,10 @@ export default async function WhatsAppPage({
                   </div>
                 );
               })}
+              <StickToBottom
+                conversationId={data.selected.id}
+                lastMessageId={data.thread[data.thread.length - 1]?.id ?? null}
+              />
             </div>
             <Composer conversationId={data.selected.id} />
           </>
