@@ -590,7 +590,13 @@ export async function reconcileInstanceHealth(
     .select()
     .from(schema.whatsappInstances)
     .where(
-      inArray(schema.whatsappInstances.status, ["connected", "connecting", "qr_pending", "created"]),
+      inArray(schema.whatsappInstances.status, [
+        "connected",
+        "connecting",
+        "qr_pending",
+        "created",
+        "disconnected",
+      ]),
     );
 
   for (const inst of instances) {
@@ -604,6 +610,22 @@ export async function reconcileInstanceHealth(
       const status = (err as { status?: number }).status;
       if (status === 404) state = "missing";
       else continue; // Evolution fora do ar ≠ WhatsApp desconectado: não mexe
+    }
+
+    // A verdade vale nos DOIS sentidos: sessão viva com banco dizendo
+    // desconectado (queda transitória que se recuperou) volta a conectado
+    if (inst.status === "disconnected") {
+      if (state === "open") {
+        await db
+          .update(schema.whatsappInstances)
+          .set({ status: "connected", qrCode: null, lastSeenAt: new Date() })
+          .where(eq(schema.whatsappInstances.id, inst.id));
+        logger.info(
+          { instance: inst.evolutionInstanceName },
+          "sessão voltou sozinha — painel atualizado para conectado",
+        );
+      }
+      continue;
     }
 
     if (inst.status === "connected") {
