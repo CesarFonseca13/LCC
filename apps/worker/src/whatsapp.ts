@@ -693,6 +693,10 @@ export async function reconcileInstanceHealth(
         }
         continue;
       }
+      // 'connecting' é passagem (Baileys sincronizando/religando) — derrubar
+      // aqui pintaria o painel de vermelho durante uma reconexão SAUDÁVEL.
+      // A próxima varredura decide: virou open, segue; virou close, derruba.
+      if (state === "connecting") continue;
       // O painel estava mentindo: marca a verdade e avisa a equipe UMA vez
       await db
         .update(schema.whatsappInstances)
