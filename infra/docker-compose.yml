@@ -113,7 +113,7 @@ services:
       # com statusReason 405, atualize para a versão corrente em
       # https://raw.githubusercontent.com/wppconnect-team/wa-version/main/versions.json
       # (sem o sufixo -alpha) — dá para sobrescrever só pelo .env, sem editar aqui.
-      CONFIG_SESSION_PHONE_VERSION: "${CONFIG_SESSION_PHONE_VERSION:-2.3000.1046291534}"
+      CONFIG_SESSION_PHONE_VERSION: "${CONFIG_SESSION_PHONE_VERSION:-2.3000.1047455456}"
     expose:
       - "8080"
     volumes:
