@@ -3,7 +3,7 @@
 # o Caddy emite TLS (Let's Encrypt) normalmente. Troque pelo domínio real
 # quando tiver — só mudar o .env e `docker compose restart caddy`.
 
-{$APP_DOMAIN} {
+{$APP_DOMAIN}, www.{$APP_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy web:3000
 }
