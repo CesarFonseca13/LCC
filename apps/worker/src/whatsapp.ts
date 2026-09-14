@@ -653,6 +653,27 @@ export async function reconcileInstanceHealth(
         const lastEventMs = last?.max ? new Date(last.max).getTime() : 0;
         const idleH = (Date.now() - lastEventMs) / 3_600_000;
         const tried = restartTriedAt.get(inst.id) ?? 0;
+        // 72h sem NENHUM evento = nem os restarts trouxeram vida: o "open" é
+        // fantasma (WhatsApp abandonou a sessão por baixo). Só QR novo resolve.
+        if (lastEventMs > 0 && idleH > 72) {
+          await db
+            .update(schema.whatsappInstances)
+            .set({ status: "disconnected", qrCode: null, lastDisconnectAt: new Date() })
+            .where(eq(schema.whatsappInstances.id, inst.id));
+          await db.insert(schema.notifications).values({
+            clinicId: inst.clinicId,
+            type: "whatsapp_disconnected",
+            title: `WhatsApp precisa ser reconectado — ${inst.label ?? "número"} (QR novo)`,
+            body: "A sessão morreu em silêncio (dias sem nenhum sinal). Vá em Configurações → Números do WhatsApp → Conectar e escaneie o código de novo.",
+            refTable: "whatsapp_instances",
+            refId: inst.id,
+          });
+          logger.warn(
+            { instance: inst.evolutionInstanceName, idleHoras: Math.round(idleH) },
+            "sessão fantasma (open sem vida há 72h+) — marcada como desconectada",
+          );
+          continue;
+        }
         if (lastEventMs > 0 && idleH > 24 && Date.now() - tried > 3_600_000) {
           restartTriedAt.set(inst.id, Date.now());
           logger.warn(
