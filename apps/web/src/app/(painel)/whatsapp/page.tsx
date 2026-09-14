@@ -7,7 +7,7 @@ import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
-import { Composer, ModeBanner, ReadOnOpen, AutoRefresh, StickToBottom } from "./inbox-client";
+import { Composer, ModeBanner, ReadOnOpen, AutoRefresh } from "./inbox-client";
 
 export const metadata = { title: "WhatsApp" };
 
@@ -362,8 +362,10 @@ export default async function WhatsAppPage({
               conversationId={data.selected.id}
               mode={data.selected.mode}
             />
-            <div className="flex-1 space-y-2 overflow-y-auto p-6">
-              {data.thread.map((m) => {
+            {/* col-reverse: o navegador ancora o scroll no FIM nativamente —
+                conversa abre na última mensagem, como todo app de mensagem */}
+            <div className="flex flex-1 flex-col-reverse gap-2 overflow-y-auto p-6">
+              {[...data.thread].reverse().map((m) => {
                 const mine = m.direction === "outbound";
                 return (
                   <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
@@ -402,10 +404,6 @@ export default async function WhatsAppPage({
                   </div>
                 );
               })}
-              <StickToBottom
-                conversationId={data.selected.id}
-                lastMessageId={data.thread[data.thread.length - 1]?.id ?? null}
-              />
             </div>
             <Composer conversationId={data.selected.id} />
           </>

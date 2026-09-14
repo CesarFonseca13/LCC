@@ -1,35 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Button, FieldError } from "@/components/ui";
 import { markConversationRead, sendManualMessage, setConversationMode } from "./actions";
 
 export { AutoRefresh } from "@/components/auto-refresh";
-
-/** Conversa abre com o scroll no FIM (última mensagem), como todo app de
- *  mensagem. Mensagem nova só puxa a tela se você já estiver perto do fim —
- *  quem subiu para ler o histórico não é arrancado de lá. */
-export function StickToBottom({
-  conversationId,
-  lastMessageId,
-}: {
-  conversationId: string;
-  lastMessageId: string | null;
-}) {
-  const marker = useRef<HTMLDivElement>(null);
-  const prevConversation = useRef<string | null>(null);
-  // useLayoutEffect: rola ANTES de pintar — sem "piscada" no topo ao abrir
-  useLayoutEffect(() => {
-    const el = marker.current?.parentElement;
-    if (!el) return;
-    const trocouDeConversa = prevConversation.current !== conversationId;
-    prevConversation.current = conversationId;
-    const pertoDoFim = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
-    if (trocouDeConversa || pertoDoFim) el.scrollTop = el.scrollHeight;
-  }, [conversationId, lastMessageId]);
-  return <div ref={marker} aria-hidden />;
-}
 
 /** Zera o contador de não lidas ao abrir a conversa. */
 export function ReadOnOpen({

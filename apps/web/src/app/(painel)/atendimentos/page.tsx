@@ -7,6 +7,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
+import { QuickStatusButtons } from "@/app/(painel)/inicio/quick-status";
 import { NovoAtendimentoButton } from "./novo-atendimento";
 
 export const metadata = { title: "Atendimentos" };
@@ -379,11 +380,17 @@ export default async function AtendimentosPage({
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-xs font-medium ${chip.className}`}
-                        >
-                          {chip.label}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${chip.className}`}
+                          >
+                            {chip.label}
+                          </span>
+                          {/* Agendado/Confirmado: muda o status aqui mesmo */}
+                          {r.status === "scheduled" || r.status === "confirmed" ? (
+                            <QuickStatusButtons appointmentId={r.id} status={r.status} />
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   );
