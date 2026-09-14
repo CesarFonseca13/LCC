@@ -1,4 +1,5 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
+import Link from "next/link";
 import { schema, withTenant } from "@clinicaos/db";
 import { TopNav } from "@/components/topnav";
 import { requireAuth } from "@/lib/auth-action";
@@ -51,7 +52,13 @@ export default async function PainelLayout({
               connected: sql<number>`count(*) FILTER (WHERE status = 'connected')::int`,
             })
             .from(schema.whatsappInstances)
-            .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
+            .where(
+              and(
+                eq(schema.whatsappInstances.clinicId, auth.clinicId!),
+                // números 'lcc-demo-%' são cenográficos (modo demonstração)
+                sql`evolution_instance_name NOT LIKE 'lcc-demo-%'`,
+              ),
+            )
         )[0] ?? { total: 0, connected: 0 };
         const pending = await tx
           .select({ count: sql<number>`count(*)::int` })
@@ -92,6 +99,25 @@ export default async function PainelLayout({
         approvalsCount={approvalsCount}
         whatsapp={whatsapp}
       />
+      {whatsapp.tone === "off" ? (
+        <div className="flex items-center justify-center gap-3 bg-red-600 px-4 py-2 text-sm font-medium text-white">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-white" />
+          O WhatsApp está desconectado — as mensagens das clientes NÃO estão chegando.
+          <Link
+            href="/configuracoes"
+            className="rounded-md bg-white/15 px-3 py-1 font-semibold underline-offset-2 hover:bg-white/25"
+          >
+            Reconectar agora
+          </Link>
+        </div>
+      ) : whatsapp.tone === "warn" ? (
+        <div className="flex items-center justify-center gap-3 bg-amber-500 px-4 py-1.5 text-sm font-medium text-white">
+          {whatsapp.text} — as mensagens desse número não estão chegando.
+          <Link href="/configuracoes" className="rounded-md bg-white/15 px-2.5 py-0.5 font-semibold hover:bg-white/25">
+            Reconectar
+          </Link>
+        </div>
+      ) : null}
       <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
     </div>
   );

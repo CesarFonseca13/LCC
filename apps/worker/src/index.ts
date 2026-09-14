@@ -17,7 +17,12 @@ import { processCampaignsSweep } from "./campaigns";
 import { processGrowthSweep } from "./growth";
 import { processReactivationSweep } from "./reactivation";
 import { processScoresSweep } from "./scores";
-import { processEvents, processOutbound, reconcileStuckSending } from "./whatsapp";
+import {
+  processEvents,
+  processOutbound,
+  reconcileInstanceHealth,
+  reconcileStuckSending,
+} from "./whatsapp";
 
 /**
  * Worker — processo persistente: schedulers + consumidores.
@@ -41,6 +46,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("events-sweep", { every: 3_000 });
   await schedulerQueue.upsertJobScheduler("outbound-sweep", { every: 3_000 });
   await schedulerQueue.upsertJobScheduler("sending-reconcile", { every: 60_000 });
+  await schedulerQueue.upsertJobScheduler("instance-health", { every: 120_000 });
   await schedulerQueue.upsertJobScheduler("automations-tick", { every: 15_000 });
   await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("pdf-sweep", { every: 10_000 });
@@ -64,6 +70,9 @@ async function main() {
           break;
         case "sending-reconcile":
           await reconcileStuckSending(logger);
+          break;
+        case "instance-health":
+          await reconcileInstanceHealth(evolution, logger);
           break;
         case "automations-tick":
           await processAutomationTick(logger);

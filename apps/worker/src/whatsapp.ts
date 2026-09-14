@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { jidToPhone, normalizeEvent, type EvolutionClient } from "@clinicaos/whatsapp";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
@@ -563,6 +563,118 @@ export async function processOutbound(
     }
   }
   return sent;
+}
+
+/**
+ * Vigia de conexão: o status do banco vem de webhook, e webhook mente por
+ * omissão — Evolution reinicia sem avisar, ou o WhatsApp derruba o socket e a
+ * sessão vira "zumbi" (Evolution jura open, mensagem nenhuma passa). A cada
+ * varredura, confere a VERDADE na Evolution:
+ *  - banco diz conectado + Evolution diz close/inexistente → marca
+ *    desconectado (painel fica vermelho) e avisa a equipe;
+ *  - Evolution diz open mas NENHUM evento chega há 24h → restart preventivo
+ *    da sessão (com credenciais salvas, volta sozinho; se morreu de vez, o
+ *    restart expõe o close e o painel avisa) — no máximo 1 restart/hora;
+ *  - QR "aguardando leitura" há mais de 1h → ninguém vai escanear: encerra o
+ *    loop de QR e marca desconectado.
+ * Instâncias 'lcc-demo-%' são cenográficas (modo demonstração) e ficam de fora.
+ */
+const restartTriedAt = new Map<string, number>();
+
+export async function reconcileInstanceHealth(
+  evolution: EvolutionClient,
+  logger: Logger,
+): Promise<void> {
+  const db = unsafeGlobalDb();
+  const instances = await db
+    .select()
+    .from(schema.whatsappInstances)
+    .where(
+      inArray(schema.whatsappInstances.status, ["connected", "connecting", "qr_pending", "created"]),
+    );
+
+  for (const inst of instances) {
+    if (inst.evolutionInstanceName.startsWith("lcc-demo-")) continue;
+
+    let state: string;
+    try {
+      const res = await evolution.connectionState(inst.evolutionInstanceName);
+      state = res.instance?.state ?? "unknown";
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status === 404) state = "missing";
+      else continue; // Evolution fora do ar ≠ WhatsApp desconectado: não mexe
+    }
+
+    if (inst.status === "connected") {
+      if (state === "open") {
+        // Pode ser zumbi: open sem NENHUM evento há 24h merece um restart
+        const last = (
+          await db
+            .select({ max: sql<string | null>`max(created_at)` })
+            .from(schema.whatsappEvents)
+            .where(eq(schema.whatsappEvents.instanceId, inst.id))
+        )[0];
+        const lastEventMs = last?.max ? new Date(last.max).getTime() : 0;
+        const idleH = (Date.now() - lastEventMs) / 3_600_000;
+        const tried = restartTriedAt.get(inst.id) ?? 0;
+        if (lastEventMs > 0 && idleH > 24 && Date.now() - tried > 3_600_000) {
+          restartTriedAt.set(inst.id, Date.now());
+          logger.warn(
+            { instance: inst.evolutionInstanceName, idleHoras: Math.round(idleH) },
+            "sessão possivelmente zumbi — restart preventivo",
+          );
+          try {
+            await evolution.restartInstance(inst.evolutionInstanceName);
+          } catch {
+            // restart falhou: a próxima varredura vê o estado real
+          }
+        } else {
+          await db
+            .update(schema.whatsappInstances)
+            .set({ lastSeenAt: new Date() })
+            .where(eq(schema.whatsappInstances.id, inst.id));
+        }
+        continue;
+      }
+      // O painel estava mentindo: marca a verdade e avisa a equipe UMA vez
+      await db
+        .update(schema.whatsappInstances)
+        .set({ status: "disconnected", qrCode: null, lastDisconnectAt: new Date() })
+        .where(eq(schema.whatsappInstances.id, inst.id));
+      await db.insert(schema.notifications).values({
+        clinicId: inst.clinicId,
+        type: "whatsapp_disconnected",
+        title: `WhatsApp desconectou — ${inst.label ?? "número"} precisa ser reconectado`,
+        body: "As mensagens das clientes NÃO estão chegando. Vá em Configurações → Números do WhatsApp e reconecte.",
+        refTable: "whatsapp_instances",
+        refId: inst.id,
+      });
+      logger.warn(
+        { instance: inst.evolutionInstanceName, estadoReal: state },
+        "conexão caiu sem aviso — painel atualizado para desconectado",
+      );
+      continue;
+    }
+
+    // Aguardando QR há mais de 1h: ninguém vai escanear — encerra o loop
+    const sinceMs = new Date(inst.updatedAt ?? inst.createdAt).getTime();
+    if (Date.now() - sinceMs > 3_600_000 && state !== "open") {
+      try {
+        await evolution.logout(inst.evolutionInstanceName);
+      } catch {
+        // pode nem existir lá — segue
+      }
+      await db
+        .update(schema.whatsappInstances)
+        .set({ status: "disconnected", qrCode: null })
+        .where(eq(schema.whatsappInstances.id, inst.id));
+      logger.info(
+        { instance: inst.evolutionInstanceName },
+        "QR aguardando há 1h+ — loop encerrado, número marcado como não conectado",
+      );
+    }
+  }
 }
 
 /** 'sending' antigo sem confirmação → failed (nunca reenvia proativa em dúvida). */

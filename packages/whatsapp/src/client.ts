@@ -108,6 +108,12 @@ export class EvolutionClient {
     await this.request("DELETE", `/instance/logout/${instanceName}`);
   }
 
+  /** Religa a sessão com as credenciais salvas (sem QR). Cura sessão "zumbi":
+   *  o WhatsApp derruba o socket e a Evolution segue achando que está open. */
+  async restartInstance(instanceName: string): Promise<void> {
+    await this.request("POST", `/instance/restart/${instanceName}`);
+  }
+
   async deleteInstance(instanceName: string): Promise<void> {
     await this.request("DELETE", `/instance/delete/${instanceName}`);
   }
