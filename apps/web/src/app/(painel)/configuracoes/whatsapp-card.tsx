@@ -252,6 +252,20 @@ export function WhatsAppCard({ initialInstances }: { initialInstances: InstanceV
   const [error, setError] = useState<string>();
   const [pending, startTransition] = useTransition();
 
+  // O vigia muda o status no servidor e a página se recarrega sozinha — o
+  // card precisa ACEITAR o estado novo (useState ignora props novas). Sem
+  // isso, um número que caiu continuava "Conectado" na tela até dar F5.
+  const serverKey = initialInstances
+    .map((i) => `${i.id}:${i.status}:${i.phone}:${i.isPrimary}`)
+    .join("|");
+  const lastServerKey = useRef(serverKey);
+  useEffect(() => {
+    if (lastServerKey.current !== serverKey) {
+      lastServerKey.current = serverKey;
+      setInstances(initialInstances);
+    }
+  }, [serverKey, initialInstances]);
+
   function addNumber() {
     setError(undefined);
     startTransition(async () => {

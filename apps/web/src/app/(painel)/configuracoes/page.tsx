@@ -3,6 +3,7 @@ import { parseClinicAiProvider, resolveAiConfig } from "@clinicaos/ai/provider";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
 import { schema, withTenant } from "@clinicaos/db";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { AiCard } from "./ai-card";
@@ -88,6 +89,8 @@ export default async function ConfiguracoesPage() {
 
   return (
     <div className="p-8">
+      {/* Status do WhatsApp muda sozinho (vigia) — a página acompanha sem F5 */}
+      <AutoRefresh seconds={10} />
       <h1 className="text-xl font-semibold text-stone-800">Configurações</h1>
       <p className="mt-0.5 text-sm text-stone-500">
         Dados da clínica, WhatsApp e preferências.

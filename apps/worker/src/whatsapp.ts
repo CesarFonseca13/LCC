@@ -580,6 +580,10 @@ export async function processOutbound(
  * Instâncias 'lcc-demo-%' são cenográficas (modo demonstração) e ficam de fora.
  */
 const restartTriedAt = new Map<string, number>();
+// Cura com histerese: só volta a "conectado" com open ESTÁVEL (2 varreduras
+// seguidas ≈ 4 min) — reconexão em andamento oscila close/open e sem isso o
+// banner vermelho pisca para a equipe.
+const stableOpenCount = new Map<string, number>();
 
 export async function reconcileInstanceHealth(
   evolution: EvolutionClient,
@@ -613,20 +617,29 @@ export async function reconcileInstanceHealth(
     }
 
     // A verdade vale nos DOIS sentidos: sessão viva com banco dizendo
-    // desconectado (queda transitória que se recuperou) volta a conectado
+    // desconectado (queda transitória que se recuperou) volta a conectado —
+    // mas só com open ESTÁVEL, para o painel não piscar durante reconexões
     if (inst.status === "disconnected") {
       if (state === "open") {
-        await db
-          .update(schema.whatsappInstances)
-          .set({ status: "connected", qrCode: null, lastSeenAt: new Date() })
-          .where(eq(schema.whatsappInstances.id, inst.id));
-        logger.info(
-          { instance: inst.evolutionInstanceName },
-          "sessão voltou sozinha — painel atualizado para conectado",
-        );
+        const seguidas = (stableOpenCount.get(inst.id) ?? 0) + 1;
+        stableOpenCount.set(inst.id, seguidas);
+        if (seguidas >= 2) {
+          stableOpenCount.delete(inst.id);
+          await db
+            .update(schema.whatsappInstances)
+            .set({ status: "connected", qrCode: null, lastSeenAt: new Date() })
+            .where(eq(schema.whatsappInstances.id, inst.id));
+          logger.info(
+            { instance: inst.evolutionInstanceName },
+            "sessão voltou sozinha e ficou estável — painel atualizado para conectado",
+          );
+        }
+      } else {
+        stableOpenCount.delete(inst.id);
       }
       continue;
     }
+    stableOpenCount.delete(inst.id);
 
     if (inst.status === "connected") {
       if (state === "open") {
