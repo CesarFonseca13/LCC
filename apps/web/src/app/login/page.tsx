@@ -5,7 +5,7 @@ import { getAuth } from "@/lib/session";
 import { LoginForm } from "./login-form";
 
 export const metadata: Metadata = {
-  title: "Entrar — VesaliusX",
+  title: "Entrar", // o layout raiz anexa " — VesaliusX"
 };
 
 const PROVAS = [
