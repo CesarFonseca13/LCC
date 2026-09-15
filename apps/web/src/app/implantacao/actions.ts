@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { schema } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
+import { SPECIALTY_VALUES } from "@/lib/clinic-profile";
 
 export interface WizardResult {
   ok: boolean;
@@ -15,7 +16,7 @@ const basicsSchema = z.object({
   name: z.string().trim().min(2, "Informe o nome da clínica"),
   city: z.string().trim().transform((v) => v || null),
   state: z.string().trim().toUpperCase().transform((v) => v || null),
-  specialty: z.enum(["estetica_facial", "estetica_corporal", "harmonizacao", "depilacao"]),
+  specialty: z.enum(SPECIALTY_VALUES),
   weekOpen: z.string().regex(/^\d{2}:\d{2}$/),
   weekClose: z.string().regex(/^\d{2}:\d{2}$/),
   saturday: z.boolean(),

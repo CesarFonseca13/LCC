@@ -96,7 +96,10 @@ export default async function LoginPage() {
             Problemas para entrar? Fale com a administradora da sua clínica.
           </p>
           <p className="mt-3 text-center text-[11px] text-stone-300">
-            powered by Billions Technology
+            powered by Billions Technology ·{" "}
+            <Link href="/termos-de-uso" className="hover:text-stone-500 hover:underline">
+              Termos de uso
+            </Link>
           </p>
         </div>
       </section>

@@ -396,6 +396,26 @@ async function runTurn(
   const businessHoursLabel = businessHoursToLabel(
     (clinic.businessHours ?? {}) as Record<string, [string, string][]>,
   );
+  // Endereço e telefone oficiais (Configurações → Dados da clínica) — a IA só
+  // fala de localização/contato com o que está aqui ou na base de conhecimento
+  const clinicAddress =
+    [
+      clinic.addressStreet
+        ? `${clinic.addressStreet}${clinic.addressNumber ? `, ${clinic.addressNumber}` : ""}`
+        : null,
+      clinic.addressComplement,
+      clinic.addressDistrict,
+      clinic.addressCity
+        ? clinic.addressState
+          ? `${clinic.addressCity}/${clinic.addressState}`
+          : clinic.addressCity
+        : null,
+      clinic.addressZip ? `CEP ${clinic.addressZip}` : null,
+    ]
+      .filter(Boolean)
+      .join(", ") || null;
+  const clinicPhone =
+    clinic.phone?.replace(/^\+55(\d{2})(\d{4,5})(\d{4})$/, "($1) $2-$3") ?? null;
 
   // ── Executores das ferramentas ───────────────────────────────────
   let escalationReason: string | null = null;
@@ -915,6 +935,8 @@ async function runTurn(
       clinic: {
         name: clinic.name,
         city: clinic.addressCity,
+        address: clinicAddress,
+        phone: clinicPhone,
         businessHoursLabel,
         catalog: procedures.map((p) => ({
           name: p.name,
@@ -1082,13 +1104,44 @@ function matchProcedures(
   return achados;
 }
 
+const DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+const DAY_NAMES: Record<string, string> = {
+  mon: "segunda",
+  tue: "terça",
+  wed: "quarta",
+  thu: "quinta",
+  fri: "sexta",
+  sat: "sábado",
+  sun: "domingo",
+};
+
+/** "segunda a sexta das 08:00 às 19:00, sábado das 09:00 às 14:00 (não atende: domingo)" —
+ *  agrupa dias consecutivos com o mesmo horário; dia ausente = fechado. */
 function businessHoursToLabel(hours: Record<string, [string, string][]>): string {
-  const week = hours.mon?.[0];
-  const sat = hours.sat?.[0];
-  const parts: string[] = [];
-  if (week) parts.push(`segunda a sexta das ${week[0]} às ${week[1]}`);
-  if (sat) parts.push(`sábado das ${sat[0]} às ${sat[1]}`);
-  return parts.length > 0 ? parts.join(", ") : "segunda a sexta em horário comercial";
+  const groups: { days: string[]; label: string }[] = [];
+  for (const day of DAY_ORDER) {
+    const ranges = hours[day] ?? [];
+    if (ranges.length === 0) continue;
+    const label = ranges.map(([open, close]) => `das ${open} às ${close}`).join(" e ");
+    const last = groups[groups.length - 1];
+    const prevDay = DAY_ORDER[DAY_ORDER.indexOf(day) - 1];
+    if (last && last.label === label && last.days[last.days.length - 1] === prevDay) {
+      last.days.push(day);
+    } else {
+      groups.push({ days: [day], label });
+    }
+  }
+  if (groups.length === 0) return "segunda a sexta em horário comercial";
+  const parts = groups.map((g) => {
+    const first = DAY_NAMES[g.days[0]!];
+    const last = DAY_NAMES[g.days[g.days.length - 1]!];
+    const dias =
+      g.days.length === 1 ? first : g.days.length === 2 ? `${first} e ${last}` : `${first} a ${last}`;
+    return `${dias} ${g.label}`;
+  });
+  const fechados = DAY_ORDER.filter((d) => (hours[d] ?? []).length === 0).map((d) => DAY_NAMES[d]);
+  const nota = fechados.length > 0 ? ` (não atende: ${fechados.join(", ")})` : "";
+  return parts.join(", ") + nota;
 }
 
 /** Materializa a cadência de confirmação (mesma regra da criação pelo painel). */

@@ -112,6 +112,26 @@ export const rooms = pgTable("rooms", {
   createdAt: createdAt(),
 });
 
+/** GLOBAL: aceite dos Termos de Uso por usuário e versão, com evidência (quando, de onde). */
+export const termsAcceptances = pgTable(
+  "terms_acceptances",
+  {
+    id: id(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    clinicId: uuid("clinic_id").references(() => clinics.id),
+    version: text("version").notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }).notNull().defaultNow(),
+    ip: inet("ip"),
+    userAgent: text("user_agent"),
+  },
+  (t) => [
+    unique("terms_acceptances_user_version_uq").on(t.userId, t.version),
+    index("terms_acceptances_user_idx").on(t.userId),
+  ],
+);
+
 /** Sessões opacas: PK é o sha256 do token (o token em claro nunca é persistido). */
 export const authSessions = pgTable(
   "auth_sessions",

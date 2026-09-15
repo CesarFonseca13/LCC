@@ -124,6 +124,8 @@ describe("provedor OpenAI-compatível", () => {
         clinic: {
           name: "Clínica Teste",
           city: "São Paulo",
+          address: null,
+          phone: null,
           businessHoursLabel: "seg-sex 9h-18h",
           catalog: [{ name: "Botox", price: "800,00", durationMinutes: 30 }],
           facts: null,

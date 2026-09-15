@@ -8,16 +8,10 @@ import { saveProcedure } from "@/app/(painel)/servicos/actions";
 import { saveProfessional } from "@/app/(painel)/equipe/actions";
 import { saveAutomationSetting } from "@/app/(painel)/automacoes/actions";
 import { Button, FieldError, Input, Label, Select } from "@/components/ui";
+import { SPECIALTIES } from "@/lib/clinic-profile";
 import { markOnboardingDone, saveClinicBasics } from "./actions";
 
 const STEPS = ["Sua clínica", "WhatsApp", "Procedimentos", "Equipe", "Clientes", "Automações"];
-
-const SPECIALTIES = [
-  { value: "estetica_facial", label: "Estética facial" },
-  { value: "estetica_corporal", label: "Estética corporal" },
-  { value: "harmonizacao", label: "Harmonização" },
-  { value: "depilacao", label: "Depilação a laser" },
-] as const;
 
 interface Suggestion {
   name: string;
@@ -236,7 +230,8 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
                   ))}
                 </Select>
                 <p className="mt-1 text-xs text-stone-400">
-                  Usamos para sugerir procedimentos e modelos prontos.
+                  Usamos para sugerir procedimentos e modelos prontos. Endereço, telefone e
+                  horário por dia ficam em Configurações → Dados da clínica.
                 </p>
               </div>
               <fieldset className="rounded-lg border border-stone-200 p-4">

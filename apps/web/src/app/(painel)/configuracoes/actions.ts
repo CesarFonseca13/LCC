@@ -11,9 +11,12 @@ import {
   type AiConfig,
 } from "@clinicaos/ai/provider";
 import { decryptSensitive, encryptSensitive } from "@clinicaos/core/crypto";
+import { normalizePhoneBR } from "@clinicaos/core/phone";
 import { evolutionFromEnv } from "@clinicaos/whatsapp";
 import { schema } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
+import { SPECIALTY_VALUES, WEEKDAYS } from "@/lib/clinic-profile";
+import { formatCEP, formatCNPJ, isValidEmail, normalizeCEP, normalizeCNPJ } from "@/lib/format";
 
 export interface WhatsAppState {
   ok: boolean;
@@ -184,6 +187,106 @@ export const pollWhatsApp = authAction({
       qrCode: instance.qrCode,
       phone: instance.phoneE164,
     };
+  },
+});
+
+// ── Dados da clínica ─────────────────────────────────────────────────
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+const clinicProfileSchema = z.object({
+  name: z.string().trim().min(2, "Informe o nome da clínica").max(80, "Nome muito longo"),
+  legalName: z.string().trim().max(120, "Razão social muito longa"),
+  cnpj: z.string().trim().max(20),
+  phone: z.string().trim().max(30),
+  email: z.string().trim().max(120),
+  addressZip: z.string().trim().max(12),
+  addressStreet: z.string().trim().max(120),
+  addressNumber: z.string().trim().max(20),
+  addressComplement: z.string().trim().max(60),
+  addressDistrict: z.string().trim().max(60),
+  addressCity: z.string().trim().max(60),
+  addressState: z.string().trim().toUpperCase().max(2, "UF tem 2 letras, ex.: SP"),
+  timezone: z.string().trim().max(60),
+  googleReviewUrl: z.string().trim().max(300),
+  specialty: z.enum(SPECIALTY_VALUES, { message: "Escolha a especialidade" }),
+  /** { mon: [["08:00","19:00"]], ... } — dia ausente = fechado. */
+  businessHours: z.record(
+    z.string(),
+    z.array(z.tuple([z.string().regex(HHMM, "Hora inválida"), z.string().regex(HHMM, "Hora inválida")])),
+  ),
+});
+
+export interface ClinicProfileResult {
+  ok: boolean;
+  error?: string;
+}
+
+export const saveClinicProfile = authAction({
+  permission: "settings.manage",
+  schema: clinicProfileSchema,
+  handler: async (input, { auth, tx }): Promise<ClinicProfileResult> => {
+    const cnpj = input.cnpj ? normalizeCNPJ(input.cnpj) : null;
+    if (input.cnpj && !cnpj) return { ok: false, error: "CNPJ inválido — confira os 14 dígitos." };
+    const phone = input.phone ? normalizePhoneBR(input.phone) : null;
+    if (input.phone && !phone) {
+      return { ok: false, error: "Telefone inválido — use DDD + número, ex.: (11) 3456-7890." };
+    }
+    if (input.email && !isValidEmail(input.email)) return { ok: false, error: "E-mail inválido." };
+    if (input.addressState && !/^[A-Z]{2}$/.test(input.addressState)) {
+      return { ok: false, error: "UF precisa ter 2 letras, ex.: SP." };
+    }
+    const zip = input.addressZip ? normalizeCEP(input.addressZip) : null;
+    if (input.addressZip && !zip) return { ok: false, error: "CEP inválido — são 8 dígitos." };
+    if (input.googleReviewUrl && !/^https?:\/\/\S+$/.test(input.googleReviewUrl)) {
+      return { ok: false, error: "O link de avaliação precisa começar com https://" };
+    }
+    try {
+      new Intl.DateTimeFormat("pt-BR", { timeZone: input.timezone });
+    } catch {
+      return { ok: false, error: "Fuso horário inválido." };
+    }
+    const businessHours: Record<string, [string, string][]> = {};
+    for (const day of WEEKDAYS) {
+      const intervals = input.businessHours[day.key] ?? [];
+      for (const [from, to] of intervals) {
+        if (from >= to) {
+          return { ok: false, error: `${day.label}: a abertura precisa ser antes do fechamento.` };
+        }
+      }
+      if (intervals.length > 0) businessHours[day.key] = intervals;
+    }
+    if (Object.keys(businessHours).length === 0) {
+      return { ok: false, error: "Marque ao menos um dia de funcionamento." };
+    }
+
+    await tx
+      .update(schema.clinics)
+      .set({
+        name: input.name,
+        legalName: input.legalName || null,
+        cnpj: cnpj ? formatCNPJ(cnpj) : null,
+        phone,
+        email: input.email || null,
+        addressZip: zip ? formatCEP(zip) : null,
+        addressStreet: input.addressStreet || null,
+        addressNumber: input.addressNumber || null,
+        addressComplement: input.addressComplement || null,
+        addressDistrict: input.addressDistrict || null,
+        addressCity: input.addressCity || null,
+        addressState: input.addressState || null,
+        timezone: input.timezone,
+        businessHours,
+        googleReviewUrl: input.googleReviewUrl || null,
+        // settings é merge SEMPRE — set inteiro apagaria ai/aiProvider/knowledge
+        settings: sql`settings || jsonb_build_object('specialty', ${input.specialty}::text)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.clinics.id, auth.clinicId));
+
+    revalidatePath("/configuracoes");
+    revalidatePath("/inicio");
+    revalidatePath("/agenda");
+    return { ok: true };
   },
 });
 

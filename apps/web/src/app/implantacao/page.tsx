@@ -4,12 +4,14 @@ import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
 import { schema, withTenant } from "@clinicaos/db";
 import { requireAuth } from "@/lib/auth-action";
+import { requireTermsAccepted } from "@/lib/terms";
 import { Wizard } from "./wizard";
 
 export const metadata = { title: "Implantação" };
 
 export default async function ImplantacaoPage() {
   const auth = await requireAuth();
+  await requireTermsAccepted(auth.userId);
   if (!auth.clinicId || !auth.role) redirect("/inicio");
   if (!can(auth.role, "settings.manage")) redirect("/inicio");
 

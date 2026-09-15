@@ -39,6 +39,33 @@ export function formatCPF(digits: string): string {
   return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
 }
 
+/** 14 dígitos com os dois dígitos verificadores conferidos, ou null. */
+export function normalizeCNPJ(raw: string): string | null {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length !== 14 || /^(\d)\1{13}$/.test(digits)) return null;
+  const dv = (base: string, weights: number[]) => {
+    const sum = base.split("").reduce((acc, ch, i) => acc + Number(ch) * (weights[i] ?? 0), 0);
+    const rest = sum % 11;
+    return rest < 2 ? 0 : 11 - rest;
+  };
+  const dv1 = dv(digits.slice(0, 12), [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  const dv2 = dv(digits.slice(0, 13), [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return dv1 === Number(digits[12]) && dv2 === Number(digits[13]) ? digits : null;
+}
+
+export function formatCNPJ(digits: string): string {
+  return `${digits.slice(0, 2)}.${digits.slice(2, 5)}.${digits.slice(5, 8)}/${digits.slice(8, 12)}-${digits.slice(12)}`;
+}
+
+export function normalizeCEP(raw: string): string | null {
+  const digits = raw.replace(/\D/g, "");
+  return digits.length === 8 ? digits : null;
+}
+
+export function formatCEP(digits: string): string {
+  return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+}
+
 export function isValidEmail(raw: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(raw.trim());
 }

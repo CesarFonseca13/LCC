@@ -6,9 +6,11 @@ import { schema, withTenant } from "@clinicaos/db";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
+import { DEFAULT_BUSINESS_HOURS, type BusinessHours } from "@/lib/clinic-profile";
 import { AiCard } from "./ai-card";
 import { AiProviderCard } from "./ai-provider-card";
 import { BookingCard } from "./booking-card";
+import { ClinicCard, type ClinicProfileView } from "./clinic-card";
 import { WhatsAppCard } from "./whatsapp-card";
 
 export const metadata = { title: "Configurações" };
@@ -28,7 +30,7 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const { instances, aiProvider, aiSettings, booking } = await withTenant(
+  const { instances, aiProvider, aiSettings, booking, clinicProfile } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const instances = await tx
@@ -46,23 +48,38 @@ export default async function ConfiguracoesPage() {
         .orderBy(schema.whatsappInstances.createdAt);
       const clinic = (
         await tx
-          .select({
-            settings: schema.clinics.settings,
-            bookingSlug: schema.clinics.bookingSlug,
-            onlineBookingEnabled: schema.clinics.onlineBookingEnabled,
-            name: schema.clinics.name,
-          })
+          .select()
           .from(schema.clinics)
           .where(eq(schema.clinics.id, auth.clinicId!))
           .limit(1)
       )[0];
-      const ai = ((clinic?.settings ?? {}) as Record<string, unknown>).ai as
-        | Record<string, unknown>
-        | undefined;
+      const clinicSettings = (clinic?.settings ?? {}) as Record<string, unknown>;
+      const ai = clinicSettings.ai as Record<string, unknown> | undefined;
       const aiProvider = parseClinicAiProvider(clinic?.settings);
+      const savedHours = (clinic?.businessHours ?? {}) as BusinessHours;
+      const clinicProfile: ClinicProfileView = {
+        name: clinic?.name ?? "",
+        legalName: clinic?.legalName ?? "",
+        cnpj: clinic?.cnpj ?? "",
+        phone: clinic?.phone ? formatPhoneBR(clinic.phone) : "",
+        email: clinic?.email ?? "",
+        addressZip: clinic?.addressZip ?? "",
+        addressStreet: clinic?.addressStreet ?? "",
+        addressNumber: clinic?.addressNumber ?? "",
+        addressComplement: clinic?.addressComplement ?? "",
+        addressDistrict: clinic?.addressDistrict ?? "",
+        addressCity: clinic?.addressCity ?? "",
+        addressState: clinic?.addressState ?? "",
+        timezone: clinic?.timezone ?? "America/Sao_Paulo",
+        googleReviewUrl: clinic?.googleReviewUrl ?? "",
+        specialty:
+          typeof clinicSettings.specialty === "string" ? clinicSettings.specialty : "estetica_facial",
+        businessHours: Object.keys(savedHours).length > 0 ? savedHours : DEFAULT_BUSINESS_HOURS,
+      };
       return {
         instances,
         aiProvider,
+        clinicProfile,
         aiSettings: {
           enabled: ai?.enabled === true,
           assistantName:
@@ -108,6 +125,8 @@ export default async function ConfiguracoesPage() {
           }))}
         />
 
+        <ClinicCard initial={clinicProfile} />
+
         <AiCard
           hasApiKey={
             resolveAiConfig(process.env) !== null || aiProvider.mode === "custom"
@@ -137,14 +156,6 @@ export default async function ConfiguracoesPage() {
           appUrl={process.env.APP_URL ?? "http://localhost:3000"}
           initial={booking}
         />
-
-        <section className="rounded-xl border border-stone-200 bg-white p-6">
-          <h2 className="text-sm font-semibold text-stone-700">Dados da clínica</h2>
-          <p className="mt-2 text-sm text-stone-500">
-            Nome, logo, endereço e horários de funcionamento — em construção (chega junto
-            com o wizard de implantação).
-          </p>
-        </section>
       </div>
     </div>
   );

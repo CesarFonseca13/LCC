@@ -3,6 +3,7 @@ import Link from "next/link";
 import { schema, withTenant } from "@clinicaos/db";
 import { TopNav } from "@/components/topnav";
 import { requireAuth } from "@/lib/auth-action";
+import { requireTermsAccepted } from "@/lib/terms";
 
 export default async function PainelLayout({
   children,
@@ -10,6 +11,8 @@ export default async function PainelLayout({
   children: React.ReactNode;
 }) {
   const auth = await requireAuth();
+  // Primeiro acesso (ou Termos novos): nada do painel abre antes do aceite
+  await requireTermsAccepted(auth.userId);
 
   // Sem clínica vinculada: tela orientando o próximo passo (nunca painel em branco)
   if (!auth.clinicId) {
@@ -126,7 +129,10 @@ export default async function PainelLayout({
         </span>
         <span>
           powered by <span className="font-medium text-stone-500">Billions Technology</span> · ©{" "}
-          {new Date().getFullYear()}
+          {new Date().getFullYear()} ·{" "}
+          <Link href="/termos-de-uso" className="hover:text-stone-600 hover:underline">
+            Termos de uso
+          </Link>
         </span>
       </footer>
     </div>
