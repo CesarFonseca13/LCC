@@ -17,6 +17,7 @@ const basicsSchema = z.object({
   city: z.string().trim().transform((v) => v || null),
   state: z.string().trim().toUpperCase().transform((v) => v || null),
   specialty: z.enum(SPECIALTY_VALUES),
+  specialtyOther: z.string().trim().max(60).optional(),
   weekOpen: z.string().regex(/^\d{2}:\d{2}$/),
   weekClose: z.string().regex(/^\d{2}:\d{2}$/),
   saturday: z.boolean(),
@@ -28,6 +29,9 @@ export const saveClinicBasics = authAction({
   permission: "settings.manage",
   schema: basicsSchema,
   handler: async (input, { auth, tx }): Promise<WizardResult> => {
+    if (input.specialty === "outra" && (input.specialtyOther ?? "").length < 2) {
+      return { ok: false, error: "Escreva qual é a especialidade da clínica." };
+    }
     const week: [string, string][] = [[input.weekOpen, input.weekClose]];
     const businessHours: Record<string, [string, string][]> = {
       mon: week,
@@ -47,7 +51,10 @@ export const saveClinicBasics = authAction({
         addressCity: input.city,
         addressState: input.state,
         businessHours,
-        settings: sql`settings || jsonb_build_object('specialty', ${input.specialty}::text)`,
+        settings: sql`settings || jsonb_build_object(
+          'specialty', ${input.specialty}::text,
+          'specialtyOther', ${input.specialty === "outra" ? (input.specialtyOther ?? "") : null}::text
+        )`,
       })
       .where(eq(schema.clinics.id, auth.clinicId));
 

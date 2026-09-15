@@ -87,6 +87,8 @@ export default async function ConfiguracoesPage() {
         googleReviewUrl: clinic?.googleReviewUrl ?? "",
         specialty:
           typeof clinicSettings.specialty === "string" ? clinicSettings.specialty : "estetica_facial",
+        specialtyOther:
+          typeof clinicSettings.specialtyOther === "string" ? clinicSettings.specialtyOther : "",
         businessHours: Object.keys(savedHours).length > 0 ? savedHours : DEFAULT_BUSINESS_HOURS,
       };
       return {

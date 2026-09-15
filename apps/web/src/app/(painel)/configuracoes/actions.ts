@@ -224,6 +224,8 @@ const clinicProfileSchema = z.object({
   timezone: z.string().trim().max(60),
   googleReviewUrl: z.string().trim().max(300),
   specialty: z.enum(SPECIALTY_VALUES, { message: "Escolha a especialidade" }),
+  /** Texto livre quando specialty = "outra". */
+  specialtyOther: z.string().trim().max(60, "Especialidade muito longa"),
   /** { mon: [["08:00","19:00"]], ... } — dia ausente = fechado. */
   businessHours: z.record(
     z.string(),
@@ -240,6 +242,9 @@ export const saveClinicProfile = authAction({
   permission: "settings.manage",
   schema: clinicProfileSchema,
   handler: async (input, { auth, tx }): Promise<ClinicProfileResult> => {
+    if (input.specialty === "outra" && input.specialtyOther.length < 2) {
+      return { ok: false, error: "Escreva qual é a especialidade da clínica." };
+    }
     const cnpj = input.cnpj ? normalizeCNPJ(input.cnpj) : null;
     if (input.cnpj && !cnpj) return { ok: false, error: "CNPJ inválido — confira os 14 dígitos." };
     const phone = input.phone ? normalizePhoneBR(input.phone) : null;
@@ -293,7 +298,10 @@ export const saveClinicProfile = authAction({
         businessHours,
         googleReviewUrl: input.googleReviewUrl || null,
         // settings é merge SEMPRE — set inteiro apagaria ai/aiProvider/knowledge
-        settings: sql`settings || jsonb_build_object('specialty', ${input.specialty}::text)`,
+        settings: sql`settings || jsonb_build_object(
+          'specialty', ${input.specialty}::text,
+          'specialtyOther', ${input.specialty === "outra" ? input.specialtyOther : null}::text
+        )`,
         updatedAt: new Date(),
       })
       .where(eq(schema.clinics.id, auth.clinicId));

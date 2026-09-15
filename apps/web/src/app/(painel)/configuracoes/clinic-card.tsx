@@ -29,6 +29,8 @@ export interface ClinicProfileView {
   timezone: string;
   googleReviewUrl: string;
   specialty: string;
+  /** Texto livre quando a especialidade é "Outra". */
+  specialtyOther: string;
   businessHours: BusinessHours;
 }
 
@@ -133,6 +135,18 @@ export function ClinicCard({ initial }: { initial: ClinicProfileView }) {
                 ))}
               </Select>
             </div>
+            {form.specialty === "outra" ? (
+              <div className="sm:col-span-2">
+                <Label htmlFor="cl-specialty-other">Qual é a especialidade?</Label>
+                <Input
+                  id="cl-specialty-other"
+                  {...bind("specialtyOther")}
+                  placeholder="Ex.: Podologia, Terapias integrativas..."
+                  maxLength={60}
+                  invalid={form.specialtyOther.trim().length < 2}
+                />
+              </div>
+            ) : null}
             <div>
               <Label htmlFor="cl-legal" hint="opcional">
                 Razão social
@@ -271,7 +285,14 @@ export function ClinicCard({ initial }: { initial: ClinicProfileView }) {
         <FieldError message={error} />
         {saved ? <p className="text-sm text-emerald-600">Dados da clínica salvos!</p> : null}
         <div className="flex justify-end">
-          <Button type="submit" disabled={pending || form.name.trim().length < 2}>
+          <Button
+            type="submit"
+            disabled={
+              pending ||
+              form.name.trim().length < 2 ||
+              (form.specialty === "outra" && form.specialtyOther.trim().length < 2)
+            }
+          >
             {pending ? "Salvando..." : "Salvar dados da clínica"}
           </Button>
         </div>

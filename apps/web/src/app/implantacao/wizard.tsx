@@ -86,6 +86,7 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
         city: String(fd.get("city") ?? ""),
         state: String(fd.get("state") ?? ""),
         specialty: String(fd.get("specialty") ?? "estetica_facial"),
+        specialtyOther: String(fd.get("specialtyOther") ?? ""),
         weekOpen: String(fd.get("weekOpen") ?? "08:00"),
         weekClose: String(fd.get("weekClose") ?? "19:00"),
         saturday: fd.get("saturday") === "on",
@@ -234,6 +235,18 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
                   horário por dia ficam em Configurações → Dados da clínica.
                 </p>
               </div>
+              {specialty === "outra" ? (
+                <div>
+                  <Label htmlFor="w-specialty-other">Qual é a especialidade?</Label>
+                  <Input
+                    id="w-specialty-other"
+                    name="specialtyOther"
+                    placeholder="Ex.: Podologia, Terapias integrativas..."
+                    maxLength={60}
+                    required
+                  />
+                </div>
+              ) : null}
               <fieldset className="rounded-lg border border-stone-200 p-4">
                 <legend className="px-1 text-xs font-medium uppercase tracking-wide text-stone-400">
                   Horário de funcionamento
