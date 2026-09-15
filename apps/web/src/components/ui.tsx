@@ -27,11 +27,23 @@ export function Button({
   );
 }
 
-export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
+export function Input({
+  invalid = false,
+  className = "",
+  ...props
+}: React.InputHTMLAttributes<HTMLInputElement> & {
+  /** Destaque âmbar (campo em falta/inválido). Troca a borda base em vez de
+   *  empilhar duas classes de cor — a ordem do CSS gerado decidiria qual vence. */
+  invalid?: boolean;
+}) {
   return (
     <input
       {...props}
-      className={`w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-100 disabled:bg-stone-50 ${props.className ?? ""}`}
+      className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 disabled:bg-stone-50 read-only:bg-stone-100 read-only:text-stone-600 ${
+        invalid
+          ? "border-amber-300 bg-amber-50 focus:border-amber-500 focus:ring-amber-100"
+          : "border-stone-300 focus:border-teal-600 focus:ring-teal-100"
+      } ${className}`}
     />
   );
 }
@@ -91,7 +103,13 @@ export function Modal({
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
+    if (open && !dialog.open) {
+      dialog.showModal();
+      // React não escreve o atributo `autofocus` e o foco feito no mount cai
+      // num <dialog> ainda fechado; showModal() foca o "✕" por ser o primeiro
+      // focável. Campo marcado com data-autofocus recebe o foco aqui.
+      dialog.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    }
     if (!open && dialog.open) dialog.close();
   }, [open]);
 

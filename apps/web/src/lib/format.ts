@@ -20,6 +20,29 @@ export function parseBRLDecimal(raw: string): string | null {
   return n.toFixed(2);
 }
 
+/** Formata um decimal ("1500.00") como "1.500,00" — sem o "R$" (o modelo já escreve). */
+export function formatDecimalBR(decimal: string): string {
+  const n = Number(decimal);
+  if (!Number.isFinite(n)) return "";
+  return n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** Devolve os 11 dígitos do CPF (aceita com ou sem máscara) ou null. Não valida DV:
+ *  clínicas recebem CPFs de cadastros antigos e o bloqueio por dígito verificador
+ *  só travaria o envio de um termo por erro de digitação de terceiros. */
+export function normalizeCPF(raw: string): string | null {
+  const digits = raw.replace(/\D/g, "");
+  return digits.length === 11 ? digits : null;
+}
+
+export function formatCPF(digits: string): string {
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
+}
+
+export function isValidEmail(raw: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(raw.trim());
+}
+
 export function formatDurationMin(minutes: number): string {
   if (minutes < 60) return `${minutes} min`;
   const h = Math.floor(minutes / 60);

@@ -10,7 +10,13 @@ import { unknownVariables, extractVariables } from "@clinicaos/core/template-ren
 import { todayISO } from "@clinicaos/core/timezone";
 import { schema, type Tx } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
-import { parseBRLDecimal } from "@/lib/format";
+import {
+  formatCPF,
+  formatDecimalBR,
+  isValidEmail,
+  normalizeCPF,
+  parseBRLDecimal,
+} from "@/lib/format";
 
 export interface TermsResult {
   ok: boolean;
@@ -37,6 +43,15 @@ export const saveDocumentTemplate = authAction({
       return {
         ok: false,
         error: `Variável desconhecida: ${unknown.map((v) => `{{${v}}}`).join(", ")}`,
+      };
+    }
+    // {{hora}}, {{link}} etc. existem para mensagens de WhatsApp; num termo não
+    // teriam de onde vir e o envio nunca conseguiria completar.
+    const foraDoTermo = extractVariables(input.bodyText).filter((v) => !(v in VARIABLE_LABELS));
+    if (foraDoTermo.length > 0) {
+      return {
+        ok: false,
+        error: `Variável não disponível em termos: ${foraDoTermo.map((v) => `{{${v}}}`).join(", ")}. Use ${Object.keys(VARIABLE_LABELS).map((v) => `{{${v}}}`).join(", ")}.`,
       };
     }
     const values = {
@@ -88,23 +103,43 @@ const generateSchema = z.object({
   templateId: z.string().uuid("Escolha o modelo"),
   procedureId: z.string().uuid("Escolha o procedimento"),
   valor: valorSchema,
-  /** Valores conferidos/editados na tela — prevalecem sobre os automáticos. */
+  /** Valores conferidos/editados na tela — prevalecem sobre os da ficha.
+   *  Só entram os que o modelo usa; valor/procedimento/clínica/data vêm sempre
+   *  do formulário e do cadastro (nunca de texto livre). */
   overrides: z.record(z.string(), z.string()).optional(),
 });
 
-/** Rótulos humanos das variáveis (vão para a tela dentro da resposta do preview —
- *  módulo "use server" só pode exportar funções assíncronas). */
+/** Variáveis que um termo pode usar, com rótulo humano (vai para a tela dentro
+ *  da resposta do preview — módulo "use server" só exporta funções assíncronas). */
 const VARIABLE_LABELS: Record<string, string> = {
   nome: "Nome completo",
   cpf: "CPF",
   telefone: "Telefone",
   email: "E-mail",
   endereco: "Endereço",
+  profissional: "Profissional",
   valor: "Valor (R$)",
   procedimento: "Procedimento",
   clinica: "Clínica",
   data: "Data",
 };
+
+/** De onde vem cada variável — a tela mostra a origem e só deixa editar o que
+ *  não é derivado do próprio formulário ou do cadastro da clínica. */
+type VariableSource = "ficha" | "clinica" | "hoje" | "formulario" | "manual";
+const VARIABLE_SOURCE: Record<string, VariableSource> = {
+  nome: "ficha",
+  cpf: "ficha",
+  telefone: "ficha",
+  email: "ficha",
+  endereco: "ficha",
+  profissional: "manual",
+  valor: "formulario",
+  procedimento: "formulario",
+  clinica: "clinica",
+  data: "hoje",
+};
+const DERIVED_VARIABLES = new Set(["valor", "procedimento", "clinica", "data"]);
 
 /** Valores automáticos das variáveis, vindos da ficha/catálogo/clínica.
  *  Campo vazio na ficha vira "" (a tela pede para preencher) — nunca inventa. */
@@ -150,24 +185,21 @@ async function autoTermValues(
     telefone: customer.phoneE164 ? formatPhoneBR(customer.phoneE164) : "",
     email: customer.email ?? "",
     endereco,
-    valor:
-      valor !== null && Number.isFinite(Number(valor))
-        ? Number(valor).toLocaleString("pt-BR", { minimumFractionDigits: 2 })
-        : "",
+    valor: valor !== null ? formatDecimalBR(valor) : "",
     procedimento: procedure?.name ?? "",
     clinica: clinic?.name ?? "",
     data: `${d}/${m}/${y}`,
   };
 }
 
-/** Passo de conferência: quais variáveis o modelo usa e o que já vem preenchido. */
+/** Passo de conferência: quais variáveis o modelo usa e o que já vem preenchido.
+ *  Valor e procedimento a tela calcula sozinha a partir do formulário (por isso
+ *  não entram aqui — evita uma ida ao servidor a cada tecla no valor). */
 export const previewTermVariables = authAction({
   permission: "terms.manage",
   schema: z.object({
     customerId: z.string().uuid(),
     templateId: z.string().uuid(),
-    procedureId: z.string().uuid().optional(),
-    valor: z.string().optional(),
   }),
   handler: async (input, { auth, tx }) => {
     const customer = (
@@ -187,14 +219,7 @@ export const previewTermVariables = authAction({
     if (!customer || !template) {
       return { ok: false as const, error: "Cliente ou modelo não encontrado." };
     }
-    const valorNum = input.valor ? parseBRLDecimal(input.valor) : null;
-    const auto = await autoTermValues(
-      tx,
-      auth.clinicId,
-      customer,
-      input.procedureId ?? null,
-      valorNum,
-    );
+    const auto = await autoTermValues(tx, auth.clinicId, customer, null, null);
     const usadas = extractVariables(template.bodyText);
     return {
       ok: true as const,
@@ -202,7 +227,8 @@ export const previewTermVariables = authAction({
         name,
         label: VARIABLE_LABELS[name] ?? name,
         value: auto[name] ?? "",
-        auto: Boolean(auto[name]),
+        source: VARIABLE_SOURCE[name] ?? ("manual" as VariableSource),
+        editable: !DERIVED_VARIABLES.has(name),
       })),
     };
   },
@@ -291,14 +317,17 @@ export const generateAndSendTerm = authAction({
     }
 
     // Automático (ficha/catálogo) + o que a equipe conferiu/editou na tela.
-    // Termo legal não sai com lacuna: variável usada pelo modelo e ainda vazia
-    // bloqueia, dizendo exatamente qual — nunca placeholder inventado.
+    // Só entra override de variável que o modelo usa e que não é derivada do
+    // formulário/cadastro (valor, procedimento, clínica, data). Termo legal não
+    // sai com lacuna: variável usada e ainda vazia bloqueia, dizendo qual.
     const auto = await autoTermValues(tx, auth.clinicId, customer, input.procedureId, input.valor);
     const valores: Record<string, string> = { ...auto };
-    for (const [k, v] of Object.entries(input.overrides ?? {})) {
-      if (k in VARIABLE_LABELS && v.trim()) valores[k] = v.trim();
-    }
     const usadas = extractVariables(template.bodyText);
+    const digitados: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input.overrides ?? {})) {
+      if (usadas.includes(k) && !DERIVED_VARIABLES.has(k) && v.trim()) digitados[k] = v.trim();
+    }
+    Object.assign(valores, digitados);
     const faltando = usadas.filter((v) => !valores[v]);
     if (faltando.length > 0) {
       return {
@@ -306,11 +335,22 @@ export const generateAndSendTerm = authAction({
         error: `Preencha antes de enviar: ${faltando.map((v) => VARIABLE_LABELS[v] ?? v).join(", ")}.`,
       };
     }
+    // Documento legal: CPF e e-mail precisam ter formato, venham da ficha ou da tela
+    if (usadas.includes("cpf")) {
+      const cpf = normalizeCPF(valores.cpf ?? "");
+      if (!cpf) {
+        return { ok: false, error: "CPF precisa ter 11 dígitos — corrija aqui ou na ficha da cliente." };
+      }
+      valores.cpf = formatCPF(cpf);
+    }
+    if (usadas.includes("email") && !isValidEmail(valores.email ?? "")) {
+      return { ok: false, error: "E-mail inválido — corrija aqui ou na ficha da cliente." };
+    }
 
-    // O que foi digitado aqui completa a ficha — SÓ campos vazios (a ficha manda)
+    // CPF/e-mail digitados aqui completam a ficha — SÓ campos vazios (a ficha manda)
     const fichaPatch: Partial<{ cpf: string; email: string }> = {};
-    if (!customer.cpf && valores.cpf && usadas.includes("cpf")) fichaPatch.cpf = valores.cpf;
-    if (!customer.email && valores.email && usadas.includes("email")) fichaPatch.email = valores.email;
+    if (!customer.cpf && digitados.cpf !== undefined) fichaPatch.cpf = valores.cpf;
+    if (!customer.email && digitados.email !== undefined) fichaPatch.email = valores.email;
     if (Object.keys(fichaPatch).length > 0) {
       await tx
         .update(schema.customers)
@@ -336,7 +376,8 @@ export const generateAndSendTerm = authAction({
         procedureId: input.procedureId,
         title,
         bodyHtmlRendered: bodyHtml,
-        variablesSnapshot: valores,
+        // Evidência do termo: só o que de fato entrou no texto assinado
+        variablesSnapshot: Object.fromEntries(usadas.map((v) => [v, valores[v] ?? ""])),
         contentSha256: sha256Hex(bodyHtml),
         signToken,
         tokenExpiresAt: new Date(Date.now() + 7 * 86_400_000),
