@@ -180,6 +180,18 @@ function MetaConnectForm({
         <summary className="cursor-pointer font-medium text-teal-700">
           Onde encontro essas informações? (passo a passo)
         </summary>
+        <p className="mt-2 text-xs text-stone-500">
+          Guia completo, com custos e as telas da Meta:{" "}
+          <a
+            href="/ajuda/whatsapp-api-oficial"
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium text-teal-700 underline"
+          >
+            abrir o guia da API oficial
+          </a>
+          .
+        </p>
         <ol className="mt-2 list-decimal space-y-1.5 pl-5">
           <li>
             Acesse <strong>developers.facebook.com</strong>, crie (ou abra) um app do tipo
@@ -604,6 +616,18 @@ function ConnectChooser({
           </p>
         </button>
       </div>
+      <p className="mt-3 text-xs text-stone-500">
+        Quanto custa e como a clínica cadastra o próprio app na Meta:{" "}
+        <a
+          href="/ajuda/whatsapp-api-oficial"
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-teal-700 underline"
+        >
+          guia da API oficial
+        </a>
+        .
+      </p>
       {onCancel ? (
         <div className="mt-3 flex justify-end">
           <Button type="button" variant="ghost" onClick={onCancel}>

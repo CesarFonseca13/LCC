@@ -23,6 +23,6 @@ export const config = {
      * Protege tudo, exceto: login, rotas públicas (assinar/orcamento/agendar/verificar,
      * termos-de-uso), webhooks/api, assets e arquivos estáticos.
      */
-    "/((?!login|assinar|orcamento|agendar|verificar|termos-de-uso|api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!login|assinar|orcamento|agendar|verificar|termos-de-uso|ajuda|api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
