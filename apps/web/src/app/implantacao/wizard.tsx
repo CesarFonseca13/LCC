@@ -9,7 +9,7 @@ import { saveProfessional } from "@/app/(painel)/equipe/actions";
 import { saveAutomationSetting } from "@/app/(painel)/automacoes/actions";
 import { Button, FieldError, Input, Label, Select } from "@/components/ui";
 import { SPECIALTIES } from "@/lib/clinic-profile";
-import { markOnboardingDone, saveClinicBasics } from "./actions";
+import { markOnboardingDone, saveClinicBasics, whatsappConnected } from "./actions";
 
 const STEPS = ["Sua clínica", "WhatsApp", "Procedimentos", "Equipe", "Clientes", "Automações"];
 
@@ -72,9 +72,32 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
   }
 
   function finish() {
+    setError(undefined);
     startTransition(async () => {
-      await markOnboardingDone({});
-      router.push("/inicio");
+      try {
+        await markOnboardingDone({});
+        router.push("/inicio");
+      } catch {
+        setError("Não consegui concluir agora — confira a conexão e tente de novo.");
+      }
+    });
+  }
+
+  // Automações só saem por um número conectado: se o WhatsApp foi deixado para
+  // depois, o passo delas é pulado e o wizard termina (liga-se em Automações depois)
+  function afterCustomers() {
+    setError(undefined);
+    startTransition(async () => {
+      try {
+        const r = await whatsappConnected({});
+        if (r.connected) next();
+        else {
+          await markOnboardingDone({});
+          router.push("/inicio");
+        }
+      } catch {
+        setError("Não consegui avançar agora — confira a conexão e tente de novo.");
+      }
     });
   }
 
@@ -140,14 +163,24 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
   function enableAutomations() {
     setError(undefined);
     startTransition(async () => {
-      for (const automationId of ["reminder_24h", "confirm_2h"]) {
-        await saveAutomationSetting({
-          automationId,
-          enabled: true,
-          requiresApproval: true,
-        });
+      // Falha de rede/servidor (ex.: painel reiniciando) NUNCA deixa o botão preso em
+      // "Ligando...": mostra o motivo e libera para tentar de novo
+      try {
+        for (const automationId of ["reminder_24h", "confirm_2h"]) {
+          const result = await saveAutomationSetting({
+            automationId,
+            enabled: true,
+            requiresApproval: true,
+          });
+          if (!result.ok) {
+            setError(result.error ?? "Não consegui ligar as automações — tente de novo.");
+            return;
+          }
+        }
+        setAutomationsOn(true);
+      } catch {
+        setError("Não consegui ligar as automações agora — confira a conexão e tente de novo.");
       }
-      setAutomationsOn(true);
     });
   }
 
@@ -395,11 +428,14 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
                 </p>
               </div>
               <ImportButton />
+              <FieldError message={error} />
               <div className="flex justify-between pt-2">
-                <Button variant="ghost" onClick={next}>
+                <Button variant="ghost" onClick={afterCustomers} disabled={pending}>
                   Deixar para depois
                 </Button>
-                <Button onClick={next}>Continuar</Button>
+                <Button onClick={afterCustomers} disabled={pending}>
+                  {pending ? "..." : "Continuar"}
+                </Button>
               </div>
             </div>
           ) : (

@@ -1,6 +1,6 @@
 "use server";
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { schema } from "@clinicaos/db";
@@ -60,6 +60,25 @@ export const saveClinicBasics = authAction({
 
     revalidatePath("/implantacao");
     return { ok: true };
+  },
+});
+
+/** O wizard decide se mostra o passo de automações: sem número conectado, elas não têm como sair. */
+export const whatsappConnected = authAction({
+  permission: "settings.manage",
+  schema: z.object({}),
+  handler: async (_input, { auth, tx }): Promise<WizardResult & { connected: boolean }> => {
+    const rows = await tx
+      .select({ id: schema.whatsappInstances.id })
+      .from(schema.whatsappInstances)
+      .where(
+        and(
+          eq(schema.whatsappInstances.clinicId, auth.clinicId),
+          eq(schema.whatsappInstances.status, "connected"),
+        ),
+      )
+      .limit(1);
+    return { ok: true, connected: rows.length > 0 };
   },
 });
 
