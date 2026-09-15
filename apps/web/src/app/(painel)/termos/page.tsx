@@ -95,7 +95,11 @@ export default async function TermosPage({
         <div className="flex gap-2">
           <TemplateFormButton />
           <GenerateTermButton
-            templates={activeTemplates.map((t) => ({ id: t.id, name: t.name }))}
+            templates={activeTemplates.map((t) => ({
+              id: t.id,
+              name: t.name,
+              bodyText: t.bodyText,
+            }))}
             procedures={procedures.map((p) => ({
               id: p.id,
               name: p.name,

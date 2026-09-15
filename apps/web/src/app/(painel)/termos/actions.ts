@@ -74,18 +74,138 @@ export const toggleTemplateActive = authAction({
 
 // ── Gerar e enviar ───────────────────────────────────────────────────
 
+const valorSchema = z.string().transform((v, ctx) => {
+  const parsed = parseBRLDecimal(v);
+  if (parsed === null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Valor inválido" });
+    return z.NEVER;
+  }
+  return parsed;
+});
+
 const generateSchema = z.object({
   customerId: z.string().uuid("Escolha a cliente"),
   templateId: z.string().uuid("Escolha o modelo"),
   procedureId: z.string().uuid("Escolha o procedimento"),
-  valor: z.string().transform((v, ctx) => {
-    const parsed = parseBRLDecimal(v);
-    if (parsed === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Valor inválido" });
-      return z.NEVER;
-    }
-    return parsed;
+  valor: valorSchema,
+  /** Valores conferidos/editados na tela — prevalecem sobre os automáticos. */
+  overrides: z.record(z.string(), z.string()).optional(),
+});
+
+/** Rótulos humanos das variáveis (vão para a tela dentro da resposta do preview —
+ *  módulo "use server" só pode exportar funções assíncronas). */
+const VARIABLE_LABELS: Record<string, string> = {
+  nome: "Nome completo",
+  cpf: "CPF",
+  telefone: "Telefone",
+  email: "E-mail",
+  endereco: "Endereço",
+  valor: "Valor (R$)",
+  procedimento: "Procedimento",
+  clinica: "Clínica",
+  data: "Data",
+};
+
+/** Valores automáticos das variáveis, vindos da ficha/catálogo/clínica.
+ *  Campo vazio na ficha vira "" (a tela pede para preencher) — nunca inventa. */
+async function autoTermValues(
+  tx: Tx,
+  clinicId: string,
+  customer: typeof schema.customers.$inferSelect,
+  procedureId: string | null,
+  /** Decimal normalizado por parseBRLDecimal ("1500.00") ou null. */
+  valor: string | null,
+): Promise<Record<string, string>> {
+  const procedure = procedureId
+    ? (
+        await tx
+          .select({ name: schema.procedures.name })
+          .from(schema.procedures)
+          .where(eq(schema.procedures.id, procedureId))
+          .limit(1)
+      )[0]
+    : undefined;
+  const clinic = (
+    await tx
+      .select({ name: schema.clinics.name, timezone: schema.clinics.timezone })
+      .from(schema.clinics)
+      .where(eq(schema.clinics.id, clinicId))
+      .limit(1)
+  )[0];
+  const endereco = [
+    customer.addressStreet,
+    customer.addressNumber,
+    customer.addressDistrict,
+    customer.addressCity && customer.addressState
+      ? `${customer.addressCity}/${customer.addressState}`
+      : customer.addressCity,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const hoje = todayISO(clinic?.timezone ?? "America/Sao_Paulo");
+  const [y, m, d] = hoje.split("-");
+  return {
+    nome: customer.fullName ?? "",
+    cpf: customer.cpf ?? "",
+    telefone: customer.phoneE164 ? formatPhoneBR(customer.phoneE164) : "",
+    email: customer.email ?? "",
+    endereco,
+    valor:
+      valor !== null && Number.isFinite(Number(valor))
+        ? Number(valor).toLocaleString("pt-BR", { minimumFractionDigits: 2 })
+        : "",
+    procedimento: procedure?.name ?? "",
+    clinica: clinic?.name ?? "",
+    data: `${d}/${m}/${y}`,
+  };
+}
+
+/** Passo de conferência: quais variáveis o modelo usa e o que já vem preenchido. */
+export const previewTermVariables = authAction({
+  permission: "terms.manage",
+  schema: z.object({
+    customerId: z.string().uuid(),
+    templateId: z.string().uuid(),
+    procedureId: z.string().uuid().optional(),
+    valor: z.string().optional(),
   }),
+  handler: async (input, { auth, tx }) => {
+    const customer = (
+      await tx
+        .select()
+        .from(schema.customers)
+        .where(eq(schema.customers.id, input.customerId))
+        .limit(1)
+    )[0];
+    const template = (
+      await tx
+        .select({ bodyText: schema.documentTemplates.bodyText })
+        .from(schema.documentTemplates)
+        .where(eq(schema.documentTemplates.id, input.templateId))
+        .limit(1)
+    )[0];
+    if (!customer || !template) {
+      return { ok: false as const, error: "Cliente ou modelo não encontrado." };
+    }
+    const valorNum = input.valor ? parseBRLDecimal(input.valor) : null;
+    const auto = await autoTermValues(
+      tx,
+      auth.clinicId,
+      customer,
+      input.procedureId ?? null,
+      valorNum,
+    );
+    const usadas = extractVariables(template.bodyText);
+    return {
+      ok: true as const,
+      variables: usadas.map((name) => ({
+        name,
+        label: VARIABLE_LABELS[name] ?? name,
+        value: auto[name] ?? "",
+        auto: Boolean(auto[name]),
+      })),
+    };
+  },
 });
 
 async function queueWhatsAppText(
@@ -152,17 +272,6 @@ export const generateAndSendTerm = authAction({
     )[0];
     if (!customer) return { ok: false, error: "Cliente não encontrada." };
 
-    // Termo legal exige os dados completos — honestidade > placeholder vazio
-    const missing: string[] = [];
-    if (!customer.cpf) missing.push("CPF");
-    if (!customer.addressStreet || !customer.addressCity) missing.push("endereço");
-    if (missing.length > 0) {
-      return {
-        ok: false,
-        error: `Complete a ficha da cliente antes: falta ${missing.join(" e ")}. (Clientes → ${customer.fullName} → Dados)`,
-      };
-    }
-
     const template = (
       await tx
         .select()
@@ -177,40 +286,37 @@ export const generateAndSendTerm = authAction({
         .where(eq(schema.procedures.id, input.procedureId))
         .limit(1)
     )[0];
-    const clinic = (
-      await tx
-        .select({ name: schema.clinics.name, timezone: schema.clinics.timezone })
-        .from(schema.clinics)
-        .where(eq(schema.clinics.id, auth.clinicId))
-        .limit(1)
-    )[0];
-    if (!template || !procedure || !clinic) {
+    if (!template || !procedure) {
       return { ok: false, error: "Modelo ou procedimento não encontrado." };
     }
 
-    const endereco = [
-      customer.addressStreet,
-      customer.addressNumber,
-      customer.addressDistrict,
-      customer.addressCity && customer.addressState
-        ? `${customer.addressCity}/${customer.addressState}`
-        : customer.addressCity,
-    ]
-      .filter(Boolean)
-      .join(", ");
-    const hoje = todayISO(clinic.timezone);
-    const [y, m, d] = hoje.split("-");
-    const valores = {
-      nome: customer.fullName,
-      cpf: customer.cpf!,
-      telefone: formatPhoneBR(customer.phoneE164),
-      email: customer.email ?? "não informado",
-      endereco,
-      valor: Number(input.valor).toLocaleString("pt-BR", { minimumFractionDigits: 2 }),
-      procedimento: procedure.name,
-      clinica: clinic.name,
-      data: `${d}/${m}/${y}`,
-    };
+    // Automático (ficha/catálogo) + o que a equipe conferiu/editou na tela.
+    // Termo legal não sai com lacuna: variável usada pelo modelo e ainda vazia
+    // bloqueia, dizendo exatamente qual — nunca placeholder inventado.
+    const auto = await autoTermValues(tx, auth.clinicId, customer, input.procedureId, input.valor);
+    const valores: Record<string, string> = { ...auto };
+    for (const [k, v] of Object.entries(input.overrides ?? {})) {
+      if (k in VARIABLE_LABELS && v.trim()) valores[k] = v.trim();
+    }
+    const usadas = extractVariables(template.bodyText);
+    const faltando = usadas.filter((v) => !valores[v]);
+    if (faltando.length > 0) {
+      return {
+        ok: false,
+        error: `Preencha antes de enviar: ${faltando.map((v) => VARIABLE_LABELS[v] ?? v).join(", ")}.`,
+      };
+    }
+
+    // O que foi digitado aqui completa a ficha — SÓ campos vazios (a ficha manda)
+    const fichaPatch: Partial<{ cpf: string; email: string }> = {};
+    if (!customer.cpf && valores.cpf && usadas.includes("cpf")) fichaPatch.cpf = valores.cpf;
+    if (!customer.email && valores.email && usadas.includes("email")) fichaPatch.email = valores.email;
+    if (Object.keys(fichaPatch).length > 0) {
+      await tx
+        .update(schema.customers)
+        .set({ ...fichaPatch, updatedAt: new Date() })
+        .where(eq(schema.customers.id, customer.id));
+    }
 
     let bodyHtml: string;
     try {
