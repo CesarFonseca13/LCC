@@ -171,7 +171,7 @@ export function AiProviderCard({
             className="mt-0.5 h-4 w-4 accent-teal-700"
           />
           <span>
-            Padrão do ClinicaOS <span className="text-stone-400">(recomendado)</span>
+            Padrão do VesaliusX <span className="text-stone-400">(recomendado)</span>
             <span className="block text-xs text-stone-400">
               {systemDefaultLabel
                 ? `Hoje: ${systemDefaultLabel} — sem configuração nenhuma da sua parte.`

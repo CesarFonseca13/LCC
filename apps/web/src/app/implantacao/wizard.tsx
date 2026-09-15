@@ -160,7 +160,7 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
     <main className="min-h-screen bg-stone-50 px-4 py-10">
       <div className="mx-auto max-w-2xl">
         <div className="mb-2 flex items-center justify-between">
-          <h1 className="text-lg font-semibold text-teal-800">ClinicaOS</h1>
+          <h1 className="text-lg font-semibold text-teal-800">VesaliusX</h1>
           <button
             type="button"
             onClick={finish}

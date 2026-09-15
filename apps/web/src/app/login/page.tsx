@@ -5,7 +5,7 @@ import { getAuth } from "@/lib/session";
 import { LoginForm } from "./login-form";
 
 export const metadata: Metadata = {
-  title: "Entrar — ClinicaOS",
+  title: "Entrar — VesaliusX",
 };
 
 const PROVAS = [
@@ -44,7 +44,7 @@ export default async function LoginPage() {
 
         <div className="relative z-10 flex h-full flex-col justify-between p-12">
           <Link href="/" className="text-xl font-semibold tracking-tight text-white">
-            Clinica<span className="text-emerald-300">OS</span>
+            Vesalius<span className="text-emerald-300">X</span>
           </Link>
 
           <div className="max-w-md">
@@ -70,6 +70,8 @@ export default async function LoginPage() {
 
           <p className="text-xs text-teal-200/50">
             Feito para clínicas de estética e saúde · LGPD desde o primeiro dia
+            <br />
+            <span className="text-teal-200/40">powered by Billions Technology</span>
           </p>
         </div>
       </section>
@@ -80,7 +82,7 @@ export default async function LoginPage() {
         <div className="relative w-full max-w-sm">
           <div className="mb-8">
             <Link href="/" className="text-2xl font-semibold tracking-tight text-teal-800 lg:hidden">
-              Clinica<span className="text-emerald-500">OS</span>
+              Vesalius<span className="text-emerald-500">X</span>
             </Link>
             <h1 className="mt-6 text-2xl font-semibold tracking-tight text-stone-900 lg:mt-0">
               Que bom te ver 👋
@@ -92,6 +94,9 @@ export default async function LoginPage() {
           <LoginForm />
           <p className="mt-6 text-center text-xs text-stone-400">
             Problemas para entrar? Fale com a administradora da sua clínica.
+          </p>
+          <p className="mt-3 text-center text-[11px] text-stone-300">
+            powered by Billions Technology
           </p>
         </div>
       </section>

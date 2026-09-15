@@ -127,7 +127,7 @@ export function TopNav({
         {/* Marca + clínica */}
         <div className="flex shrink-0 flex-col justify-center pr-2">
           <span className="text-lg font-semibold leading-tight tracking-tight text-white">
-            Clinica<span className="text-cyan-300">OS</span>
+            Vesalius<span className="text-cyan-300">X</span>
           </span>
           {clinicName ? (
             <span className="max-w-[140px] truncate text-[11px] leading-tight text-teal-100/60">

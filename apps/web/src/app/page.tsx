@@ -5,7 +5,7 @@ import { getAuth } from "@/lib/session";
 import { LandingFx } from "./landing-fx";
 
 export const metadata: Metadata = {
-  title: "ClinicaOS — sua clínica no piloto automático humano",
+  title: "VesaliusX — sua clínica no piloto automático humano",
   description:
     "Agenda que confirma sozinha, WhatsApp humanizado, reativação de clientes e financeiro completo — feito para clínicas de estética e saúde.",
 };
@@ -48,7 +48,7 @@ export default async function RootPage() {
 
         <nav className="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
           <span className="text-xl font-semibold tracking-tight">
-            Clinica<span className="text-emerald-300">OS</span>
+            Vesalius<span className="text-emerald-300">X</span>
           </span>
           <Link
             href="/login"
@@ -65,7 +65,7 @@ export default async function RootPage() {
               Para clínicas de estética e saúde
             </p>
             <h1 className="fx-rise fx-rise-1 mt-6 text-4xl font-semibold leading-[1.15] tracking-tight sm:text-5xl">
-              A recepcionista que <span className="fx-shine-text">nunca dorme</span> — e ninguém percebe que é um sistema.
+              A recepcionista que <span className="fx-shine-text">nunca dorme</span>.
             </h1>
             <p className="fx-rise fx-rise-2 mt-6 max-w-lg text-lg leading-relaxed text-teal-100/80">
               Agenda que confirma sozinha, WhatsApp que conversa como gente,
@@ -115,7 +115,7 @@ export default async function RootPage() {
                 ))}
               </div>
               <p className="mt-4 text-center text-[11px] text-teal-200/50">
-                escrita, enviada e agendada pelo ClinicaOS ✨
+                escrita, enviada e agendada pelo VesaliusX ✨
               </p>
             </div>
           </div>
@@ -190,7 +190,7 @@ export default async function RootPage() {
       <footer className="border-t border-white/10 py-8">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-6 text-xs text-teal-200/50">
           <span>
-            Clinica<span className="text-emerald-300/70">OS</span> — gestão e atendimento para clínicas
+            Vesalius<span className="text-emerald-300/70">X</span> — gestão e atendimento para clínicas · powered by Billions Technology
           </span>
           <span>Feito com carinho no Brasil 🇧🇷</span>
         </div>

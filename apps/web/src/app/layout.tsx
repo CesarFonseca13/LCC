@@ -9,8 +9,8 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: {
-    default: "ClinicaOS",
-    template: "%s — ClinicaOS",
+    default: "VesaliusX",
+    template: "%s — VesaliusX",
   },
   description: "Gestão e atendimento da sua clínica em um só lugar",
 };
