@@ -119,6 +119,16 @@ export default async function PainelLayout({
         </div>
       ) : null}
       <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-stone-200 bg-white px-6 py-1.5 text-[11px] text-stone-400">
+        <span>
+          <span className="font-semibold text-stone-500">VesaliusX</span> — gestão e atendimento
+          para clínicas
+        </span>
+        <span>
+          powered by <span className="font-medium text-stone-500">Billions Technology</span> · ©{" "}
+          {new Date().getFullYear()}
+        </span>
+      </footer>
     </div>
   );
 }
