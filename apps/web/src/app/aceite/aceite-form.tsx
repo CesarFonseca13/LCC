@@ -28,10 +28,7 @@ export function AceiteForm() {
           onChange={(e) => setChecked(e.target.checked)}
           className="mt-0.5 h-4 w-4 accent-teal-700"
         />
-        <span>
-          Li e concordo com os Termos de Uso, inclusive as condições sobre a integração com o
-          WhatsApp (item 4).
-        </span>
+        <span>Li e concordo com os Termos de Uso.</span>
       </label>
       <div className="flex justify-end">
         <SubmitButton disabled={!checked} />
