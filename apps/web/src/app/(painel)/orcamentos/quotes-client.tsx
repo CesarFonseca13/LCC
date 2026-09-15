@@ -129,7 +129,7 @@ export function CreateQuoteButton({
   return (
     <>
       <Button onClick={() => setOpen(true)}>+ Novo orçamento</Button>
-      <Modal open={open} onClose={close} title="Novo orçamento">
+      <Modal open={open} onClose={close} title="Novo orçamento" size="lg">
         {success ? (
           <div className="space-y-4">
             {success.whatsappSent ? (
@@ -221,12 +221,23 @@ export function CreateQuoteButton({
                 </p>
               ) : (
                 <div className="space-y-2">
+                  {/* Grade: o nome do serviço tem prioridade de espaço (minmax(0,1fr)
+                      deixa o select encolher com elegância em vez de sumir) */}
+                  <div className="grid grid-cols-[minmax(0,1fr)_5rem_8rem_2rem] gap-2 px-1 text-[11px] font-medium uppercase tracking-wide text-stone-400">
+                    <span>Item</span>
+                    <span>Qtd</span>
+                    <span>Valor unit.</span>
+                    <span />
+                  </div>
                   {rows.map((row) => (
-                    <div key={row.key} className="flex items-center gap-2">
+                    <div
+                      key={row.key}
+                      className="grid grid-cols-[minmax(0,1fr)_5rem_8rem_2rem] items-center gap-2"
+                    >
                       <Select
                         value={row.refId}
                         onChange={(e) => updateRow(row.key, { refId: e.target.value })}
-                        className="flex-1"
+                        className="min-w-0"
                         aria-label="Item"
                       >
                         {(row.kind === "procedure" ? procedures : packages).map((i) => (
@@ -244,20 +255,18 @@ export function CreateQuoteButton({
                         onChange={(e) =>
                           updateRow(row.key, { quantity: Number(e.target.value) || 1 })
                         }
-                        className="w-16"
                         aria-label="Quantidade"
                       />
                       <Input
                         inputMode="decimal"
                         value={row.unitPrice}
                         onChange={(e) => updateRow(row.key, { unitPrice: e.target.value })}
-                        className="w-28"
                         aria-label="Preço unitário"
                       />
                       <button
                         type="button"
                         aria-label="Remover item"
-                        className="text-stone-400 hover:text-red-500"
+                        className="justify-self-center text-stone-400 hover:text-red-500"
                         onClick={() => setRows((r) => r.filter((x) => x.key !== row.key))}
                       >
                         ✕

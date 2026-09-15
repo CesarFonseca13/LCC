@@ -77,11 +77,14 @@ export function Modal({
   onClose,
   title,
   children,
+  size = "md",
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  /** "lg" para formulários com tabela/linhas de itens (orçamento, etc.). */
+  size?: "md" | "lg";
 }) {
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -97,7 +100,9 @@ export function Modal({
       ref={ref}
       onClose={onClose}
       onCancel={onClose}
-      className="m-auto w-full max-w-lg rounded-xl border border-stone-200 bg-white p-0 shadow-xl backdrop:bg-stone-900/30"
+      className={`m-auto w-full rounded-xl border border-stone-200 bg-white p-0 shadow-xl backdrop:bg-stone-900/30 ${
+        size === "lg" ? "max-w-3xl" : "max-w-lg"
+      }`}
     >
       {open ? (
         <div className="max-h-[85vh] overflow-y-auto p-6">
