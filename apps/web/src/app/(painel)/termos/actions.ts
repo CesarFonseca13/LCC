@@ -239,6 +239,8 @@ async function queueWhatsAppText(
   clinicId: string,
   customerPhone: string,
   body: string,
+  /** Valores para o template da Meta (API oficial fora da janela de 24h). */
+  templateVars: Record<string, string>,
 ): Promise<boolean> {
   const instance = (
     await tx
@@ -281,6 +283,7 @@ async function queueWhatsAppText(
     status: "queued",
     automationId: "consent_term",
     scheduledFor: new Date(Date.now() + 2_000 + Math.floor(Math.random() * 5_000)),
+    templateVars,
   });
   return true;
 }
@@ -399,6 +402,7 @@ export const generateAndSendTerm = authAction({
       auth.clinicId,
       customer.phoneE164,
       `Oi ${primeiroNome}! Para deixar tudo certinho para o seu procedimento de ${procedure.name}, preparei seu termo de consentimento. É rapidinho — é só abrir, revisar e assinar aqui: ${signUrl}`,
+      { nome: primeiroNome, procedimento: procedure.name, link_token: signToken },
     );
 
     revalidatePath("/termos");
@@ -444,11 +448,23 @@ export const resendTerm = authAction({
 
     const appUrl = process.env.APP_URL ?? "http://localhost:3000";
     const signUrl = `${appUrl}/assinar/${doc.signToken}`;
+    const procedureName =
+      (doc.procedureId
+        ? (
+            await tx
+              .select({ name: schema.procedures.name })
+              .from(schema.procedures)
+              .where(eq(schema.procedures.id, doc.procedureId))
+              .limit(1)
+          )[0]?.name
+        : null) ?? "procedimento";
+    const primeiroNome = customer.fullName.split(" ")[0] ?? customer.fullName;
     const sent = await queueWhatsAppText(
       tx,
       auth.clinicId,
       customer.phoneE164,
-      `Oi ${customer.fullName.split(" ")[0]}! Passando para lembrar do seu termo de consentimento — leva 1 minutinho para assinar: ${signUrl}`,
+      `Oi ${primeiroNome}! Passando para lembrar do seu termo de consentimento — leva 1 minutinho para assinar: ${signUrl}`,
+      { nome: primeiroNome, procedimento: procedureName, link_token: newToken },
     );
     await tx.insert(schema.documentAuditLog).values({
       clinicId: auth.clinicId,

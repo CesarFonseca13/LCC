@@ -1,9 +1,17 @@
 import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
-import { jidToPhone, normalizeEvent, type EvolutionClient } from "@clinicaos/whatsapp";
+import {
+  jidToPhone,
+  MetaApiError,
+  metaErrorToPortuguese,
+  normalizeEvent,
+  templatePurposeFor,
+  type EvolutionClient,
+} from "@clinicaos/whatsapp";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
 import { clinicHasAiEnabled, scheduleAiTurn } from "./ai-agent";
 import { classifyInbound } from "./classify-inbound";
+import { metaClientFor } from "./meta-client";
 import { pauseReactivationOnReply } from "./reactivation";
 
 /**
@@ -166,6 +174,16 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
         .limit(1);
       const msg = rows[0];
       if (!msg) return;
+      // API oficial avisa falha depois do aceite (número inválido, janela, template)
+      if (normalized.status === "failed") {
+        if (["sending", "sent"].includes(msg.status)) {
+          await db
+            .update(schema.messages)
+            .set({ status: "failed", error: normalized.error ?? "falha informada pelo WhatsApp" })
+            .where(eq(schema.messages.id, msg.id));
+        }
+        return;
+      }
       // Só avança (sent → delivered → read); nunca regride
       if ((STATUS_RANK[normalized.status] ?? -1) > (STATUS_RANK[msg.status] ?? 99)) {
         await db
@@ -476,6 +494,8 @@ export async function processOutbound(
         conversationId: schema.messages.conversationId,
         body: schema.messages.body,
         error: schema.messages.error,
+        automationId: schema.messages.automationId,
+        templateVars: schema.messages.templateVars,
       });
     const msg = claimed[0];
     if (!msg?.body) continue;
@@ -484,6 +504,7 @@ export async function processOutbound(
       .select({
         remoteJid: schema.conversations.remoteJid,
         instanceId: schema.conversations.instanceId,
+        lastInboundAt: schema.conversations.lastInboundAt,
       })
       .from(schema.conversations)
       .where(eq(schema.conversations.id, msg.conversationId))
@@ -492,19 +513,28 @@ export async function processOutbound(
     if (!conv) continue;
 
     const instRows = await db
-      .select({
-        name: schema.whatsappInstances.evolutionInstanceName,
-        status: schema.whatsappInstances.status,
-      })
+      .select()
       .from(schema.whatsappInstances)
       .where(eq(schema.whatsappInstances.id, conv.instanceId))
       .limit(1);
-    const inst = instRows[0];
-    if (!inst || inst.status !== "connected") {
+    const instRow = instRows[0];
+    if (!instRow || instRow.status !== "connected") {
       await db
         .update(schema.messages)
         .set({ status: "queued" }) // instância fora: volta para a fila
         .where(eq(schema.messages.id, msg.id));
+      continue;
+    }
+    const inst = { name: instRow.evolutionInstanceName, status: instRow.status };
+
+    if (instRow.provider === "meta") {
+      const ok = await sendViaMeta(
+        { ...msg, body: msg.body },
+        { ...conv, id: msg.conversationId },
+        instRow,
+        logger,
+      );
+      if (ok) sent++;
       continue;
     }
 
@@ -565,6 +595,228 @@ export async function processOutbound(
   return sent;
 }
 
+/** Janela de atendimento da API oficial: 24h desde a última mensagem da cliente
+ *  (com 10 min de folga — a Meta conta pelo relógio dela). */
+function insideServiceWindow(lastInboundAt: Date | null): boolean {
+  if (!lastInboundAt) return false;
+  return Date.now() - new Date(lastInboundAt).getTime() < 24 * 3_600_000 - 10 * 60_000;
+}
+
+/**
+ * Envio pela API oficial da Meta. Dentro da janela de 24h sai o texto que a
+ * clínica escreveu (grátis); fora dela só um template aprovado — os valores
+ * em template_vars viram os parâmetros. Sem template aprovado, a mensagem
+ * falha com o motivo escrito (nunca fica em silêncio na fila).
+ */
+async function sendViaMeta(
+  msg: {
+    id: string;
+    clinicId: string;
+    conversationId: string;
+    body: string;
+    error: string | null;
+    automationId: string | null;
+    templateVars: Record<string, string> | null;
+  },
+  conv: { id: string; remoteJid: string; lastInboundAt: Date | null },
+  inst: typeof schema.whatsappInstances.$inferSelect,
+  logger: Logger,
+): Promise<boolean> {
+  const db = unsafeGlobalDb();
+  const fail = async (error: string) => {
+    await db.update(schema.messages).set({ status: "failed", error }).where(eq(schema.messages.id, msg.id));
+    logger.warn({ messageId: msg.id, err: error }, "meta: envio não realizado");
+    return false;
+  };
+  const requeue = async (error: string, delayMs: number) => {
+    await db
+      .update(schema.messages)
+      .set({ status: "queued", error, scheduledFor: new Date(Date.now() + delayMs) })
+      .where(eq(schema.messages.id, msg.id));
+    logger.warn({ messageId: msg.id, err: error, delayMs }, "meta: nova tentativa agendada");
+    return false;
+  };
+
+  const client = metaClientFor(inst);
+  if (!client) return fail("Número da API oficial sem credenciais válidas — reconecte em Configurações.");
+  const to = conv.remoteJid.replace(/@.*$/, "");
+
+  try {
+    let result: { waMessageId?: string };
+    let sentAsTemplate: string | null = null;
+
+    if (insideServiceWindow(conv.lastInboundAt)) {
+      // "Digitando..." de verdade: marca a última mensagem dela como lida e mostra o indicador
+      const lastInbound = (
+        await db
+          .select({ waMessageId: schema.messages.waMessageId })
+          .from(schema.messages)
+          .where(
+            and(
+              eq(schema.messages.conversationId, conv.id),
+              eq(schema.messages.direction, "inbound"),
+              sql`${schema.messages.waMessageId} IS NOT NULL`,
+            ),
+          )
+          .orderBy(sql`created_at DESC`)
+          .limit(1)
+      )[0];
+      const baseMs = Math.min(Math.max(msg.body.length * 70, 2_500), 15_000);
+      const delayMs = Math.round(baseMs * (0.85 + Math.random() * 0.3));
+      if (lastInbound?.waMessageId) {
+        await client.markReadTyping(lastInbound.waMessageId).catch(() => {});
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+      result = await client.sendText(to, msg.body);
+    } else {
+      const purpose = templatePurposeFor(msg.automationId);
+      if (!purpose) {
+        return fail(
+          "A cliente não escreveu nas últimas 24h — na API oficial, mensagens espontâneas só saem como modelo aprovado pela Meta (esta não tem modelo).",
+        );
+      }
+      const template = (
+        await db
+          .select()
+          .from(schema.whatsappTemplates)
+          .where(
+            and(
+              eq(schema.whatsappTemplates.instanceId, inst.id),
+              eq(schema.whatsappTemplates.purpose, purpose),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (!template || template.status !== "approved") {
+        return fail(
+          `A cliente não escreveu nas últimas 24h e o modelo da Meta para esta mensagem ${
+            template ? `está "${template.status === "pending" ? "em análise" : template.status}"` : "não foi registrado"
+          } — veja Configurações → Números do WhatsApp.`,
+        );
+      }
+      const vars = msg.templateVars ?? {};
+      const bodyParams = template.paramNames.map((name) => vars[name] ?? "-");
+      const buttonUrlParam = template.buttonUrlParam ? (vars[template.buttonUrlParam] ?? null) : null;
+      if (template.buttonUrlParam && !buttonUrlParam) {
+        return fail("Modelo com botão de link sem o link desta mensagem — avise o suporte.");
+      }
+      result = await client.sendTemplate(to, {
+        name: template.metaName,
+        language: template.language,
+        bodyParams,
+        buttonUrlParam,
+      });
+      sentAsTemplate = template.metaName;
+    }
+
+    await db
+      .update(schema.messages)
+      .set({
+        status: "sent",
+        waMessageId: result.waMessageId ?? null,
+        sentAt: new Date(),
+        sentAsTemplate,
+        error: null,
+      })
+      .where(eq(schema.messages.id, msg.id));
+    await db
+      .update(schema.conversations)
+      .set({ lastMessageAt: new Date() })
+      .where(eq(schema.conversations.id, conv.id));
+    await db
+      .update(schema.whatsappInstances)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(schema.whatsappInstances.id, inst.id));
+    return true;
+  } catch (err) {
+    if (err instanceof MetaApiError) {
+      const friendly = metaErrorToPortuguese(err.code, err.message);
+      if (err.code === 190 || err.status === 401) {
+        // Token morreu: o número inteiro cai, a equipe é avisada, a mensagem espera
+        await db
+          .update(schema.whatsappInstances)
+          .set({ status: "disconnected", lastDisconnectAt: new Date() })
+          .where(eq(schema.whatsappInstances.id, inst.id));
+        await db.insert(schema.notifications).values({
+          clinicId: inst.clinicId,
+          type: "whatsapp_disconnected",
+          title: `API oficial do WhatsApp desconectou — ${inst.label ?? "número"}`,
+          body: "O token da Meta expirou ou foi revogado. Vá em Configurações → Números do WhatsApp e reconecte com um token novo.",
+          refTable: "whatsapp_instances",
+          refId: inst.id,
+        });
+        return requeue(friendly, 10 * 60_000);
+      }
+      if (err.code === 130429 || err.code === 80007 || err.code === 131056) {
+        return requeue(friendly, 60_000 + Math.floor(Math.random() * 240_000));
+      }
+      if (err.code === 132001 || err.code === 132015 || err.code === 132016) {
+        const purpose = templatePurposeFor(msg.automationId);
+        if (purpose) {
+          await db
+            .update(schema.whatsappTemplates)
+            .set({ status: err.code === 132001 ? "pending" : "paused", updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.whatsappTemplates.instanceId, inst.id),
+                eq(schema.whatsappTemplates.purpose, purpose),
+              ),
+            );
+        }
+      }
+      return fail(friendly);
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    // Conexão que nem abriu = com certeza não saiu → UMA nova tentativa
+    if (/ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message) && !msg.error) {
+      return requeue(message, 30_000);
+    }
+    return fail(message);
+  }
+}
+
+/** Saúde do número da API oficial: token e número válidos na Meta. */
+async function checkMetaHealth(
+  inst: typeof schema.whatsappInstances.$inferSelect,
+  logger: Logger,
+): Promise<void> {
+  const db = unsafeGlobalDb();
+  const client = metaClientFor(inst);
+  if (!client) return;
+  try {
+    await client.getPhoneNumber();
+    if (inst.status !== "connected") {
+      await db
+        .update(schema.whatsappInstances)
+        .set({ status: "connected", lastSeenAt: new Date() })
+        .where(eq(schema.whatsappInstances.id, inst.id));
+      logger.info({ instance: inst.evolutionInstanceName }, "meta: número voltou a responder — conectado");
+    } else {
+      await db
+        .update(schema.whatsappInstances)
+        .set({ lastSeenAt: new Date() })
+        .where(eq(schema.whatsappInstances.id, inst.id));
+    }
+  } catch (err) {
+    const meta = err instanceof MetaApiError ? err : null;
+    const credencialRuim = meta && (meta.code === 190 || meta.status === 401 || meta.status === 403 || meta.status === 404);
+    if (!credencialRuim || inst.status !== "connected") return; // Meta fora do ar ≠ número caído
+    await db
+      .update(schema.whatsappInstances)
+      .set({ status: "disconnected", lastDisconnectAt: new Date() })
+      .where(eq(schema.whatsappInstances.id, inst.id));
+    await db.insert(schema.notifications).values({
+      clinicId: inst.clinicId,
+      type: "whatsapp_disconnected",
+      title: `API oficial do WhatsApp desconectou — ${inst.label ?? "número"}`,
+      body: "A Meta recusou as credenciais do número (token expirado ou revogado). Vá em Configurações → Números do WhatsApp e reconecte.",
+      refTable: "whatsapp_instances",
+      refId: inst.id,
+    });
+    logger.warn({ instance: inst.evolutionInstanceName, err: meta?.message }, "meta: credenciais recusadas — desconectado");
+  }
+}
+
 /**
  * Vigia de conexão: o status do banco vem de webhook, e webhook mente por
  * omissão — Evolution reinicia sem avisar, ou o WhatsApp derruba o socket e a
@@ -605,6 +857,10 @@ export async function reconcileInstanceHealth(
 
   for (const inst of instances) {
     if (inst.evolutionInstanceName.startsWith("lcc-demo-")) continue;
+    if (inst.provider === "meta") {
+      await checkMetaHealth(inst, logger);
+      continue;
+    }
 
     let state: string;
     try {

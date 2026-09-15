@@ -179,6 +179,10 @@ async function generatePdf(
         status: "queued",
         automationId: "consent_term_copy",
         scheduledFor: new Date(Date.now() + 3_000 + Math.floor(Math.random() * 7_000)),
+        templateVars: {
+          nome: customer.fullName.split(" ")[0] ?? customer.fullName,
+          link_token: doc.signToken,
+        },
       });
     }
   }

@@ -15,6 +15,7 @@ import { expireApprovals, processAutomationTick, processBirthdays } from "./auto
 import { processPdfGeneration } from "./documents";
 import { processCampaignsSweep } from "./campaigns";
 import { processGrowthSweep } from "./growth";
+import { syncMetaTemplates } from "./meta-templates";
 import { processReactivationSweep } from "./reactivation";
 import { processScoresSweep } from "./scores";
 import {
@@ -57,6 +58,7 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("reactivation-sweep", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("growth-sweep", { every: 120_000 });
   await schedulerQueue.upsertJobScheduler("campaigns-sweep", { every: 60_000 });
+  await schedulerQueue.upsertJobScheduler("meta-templates-sync", { every: 300_000 });
 
   const worker = new Worker(
     "q-scheduler",
@@ -73,6 +75,9 @@ async function main() {
           break;
         case "instance-health":
           await reconcileInstanceHealth(evolution, logger);
+          break;
+        case "meta-templates-sync":
+          await syncMetaTemplates(logger);
           break;
         case "automations-tick":
           await processAutomationTick(logger);

@@ -225,11 +225,18 @@ function apptVars(ctx: RunContext): Record<string, string> {
   return vars;
 }
 
-/** Cria a mensagem (direto ou via Aprovações) + log + encerra a run. */
+/** Cria a mensagem (direto ou via Aprovações) + log + encerra a run.
+ *  `vars` são os valores que renderizaram o texto — na API oficial da Meta,
+ *  fora da janela de 24h, viram os parâmetros do template aprovado. */
 async function emit(
   ctx: RunContext,
   body: string,
-  opts: { forceDirect?: boolean; approvalExpiresAt?: Date | null; contextLine?: string } = {},
+  opts: {
+    forceDirect?: boolean;
+    approvalExpiresAt?: Date | null;
+    contextLine?: string;
+    vars?: Record<string, string>;
+  } = {},
 ): Promise<void> {
   const db = unsafeGlobalDb();
   const remoteJid = `${ctx.customer.phoneE164.replace("+", "")}@s.whatsapp.net`;
@@ -253,6 +260,7 @@ async function emit(
       automationId: ctx.run.automationId,
       automationRunId: ctx.run.id,
       scheduledFor: new Date(Date.now() + 5_000 + Math.floor(Math.random() * 25_000)),
+      templateVars: opts.vars ?? null,
     })
     .returning({ id: schema.messages.id });
   if (!message) throw new Error("falha ao criar mensagem");
@@ -315,6 +323,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         approvalExpiresAt: new Date(ctx.appointment.startsAt),
         contextLine: [vars.procedimento, `${vars.data} às ${vars.hora}`, vars.profissional].join(" · "),
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -326,8 +335,10 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       }
       const untilStart = new Date(ctx.appointment.startsAt).getTime() - Date.now();
       if (untilStart < 5 * 60_000) return skip("em cima da hora — não faz mais sentido");
-      await emit(ctx, renderTemplate(template(ctx), apptVars(ctx), { html: false }), {
+      const vars45 = apptVars(ctx);
+      await emit(ctx, renderTemplate(template(ctx), vars45, { html: false }), {
         forceDirect: true,
+        vars: vars45,
       });
       return finishRun(run.id, "completed");
     }
@@ -344,6 +355,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         approvalExpiresAt: new Date(ctx.appointment.startsAt),
         contextLine: `${vars.procedimento} · ${vars.data} às ${vars.hora}`,
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -374,6 +386,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       const vars = apptVars(ctx);
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         contextLine: `Faltou: ${vars.procedimento} de ${vars.data} às ${vars.hora}`,
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -391,6 +404,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       };
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         contextLine: `Pós-atendimento · ${vars.procedimento} de hoje`,
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -402,6 +416,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       const vars = apptVars(ctx);
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         contextLine: `Feedback · ${vars.procedimento} de ${vars.data}`,
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -436,6 +451,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       };
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         contextLine: `Retoque de ${vars.procedimento} (${vars.dias} dias)`,
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -476,6 +492,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       const vars = apptVars(ctx);
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         contextLine: `Pós-venda ${run.currentStep + 1}/${days.length} · ${vars.procedimento}`,
+        vars,
       });
 
       const nextStep = run.currentStep + 1;
@@ -558,6 +575,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
           contextLine: `Reativação ${run.currentStep + 1}/${steps.length}${
             ctx.procedure ? ` · ${ctx.procedure.name}` : ""
           }`,
+          vars,
         });
       }
 
@@ -660,6 +678,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
         contextLine: `Preenchimento de agenda · ${slot.label}`,
         // Oferta de horário envelhece rápido: aprovação vale só até o próprio slot
         approvalExpiresAt: zonedToUtc(slot.dateISO, slot.timeHHMM, ctx.clinic.timezone),
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -723,6 +742,7 @@ async function executeRun(run: Run, logger: Logger): Promise<void> {
       };
       await emit(ctx, renderTemplate(template(ctx), vars, { html: false }), {
         contextLine: `Renovação · ${pkgRow.name} (${isSessions ? `${pkgRow.sessions_left} sessão(ões) restante(s)` : "vencendo em breve"})`,
+        vars,
       });
       return finishRun(run.id, "completed");
     }
@@ -799,6 +819,7 @@ export async function processBirthdays(logger: Logger): Promise<void> {
       };
       await emit(loaded, renderTemplate(template(loaded), vars, { html: false }), {
         contextLine: "Aniversário de hoje 🎉",
+        vars,
       });
       await finishRun(activeRun.id, "completed");
       logger.info({ customerId: row.customer_id }, "parabéns de aniversário preparado");

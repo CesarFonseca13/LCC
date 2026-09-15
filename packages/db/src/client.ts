@@ -41,6 +41,8 @@ export interface DbContext {
   quoteToken?: string;
   /** Página pública de agendamento: resolve a clínica pelo slug (política booking_resolve). */
   bookingSlug?: string;
+  /** Webhook da Meta: resolve o número pelo phone_number_id (política meta_webhook_resolve). */
+  metaPhoneNumberId?: string;
 }
 
 /** Transação com contexto de tenant/usuário aplicado via set_config (lido pelas políticas RLS). */
@@ -54,7 +56,8 @@ export async function withContext<T>(
     !ctx.webhookToken &&
     !ctx.signToken &&
     !ctx.quoteToken &&
-    !ctx.bookingSlug
+    !ctx.bookingSlug &&
+    !ctx.metaPhoneNumberId
   ) {
     throw new Error("withContext exige clinicId, userId ou um token público.");
   }
@@ -78,6 +81,11 @@ export async function withContext<T>(
     }
     if (ctx.bookingSlug) {
       await tx.execute(sql`SELECT set_config('app.booking_slug', ${ctx.bookingSlug}, true)`);
+    }
+    if (ctx.metaPhoneNumberId) {
+      await tx.execute(
+        sql`SELECT set_config('app.meta_phone_number_id', ${ctx.metaPhoneNumberId}, true)`,
+      );
     }
     return fn(tx);
   });

@@ -36,7 +36,9 @@ export interface NormalizedStatusUpdate {
   kind: "status";
   waMessageId: string;
   remoteJid: string | null;
-  status: "delivered" | "read" | null;
+  status: "delivered" | "read" | "failed" | null;
+  /** Só na API oficial: motivo da falha em pt-BR (janela de 24h, template etc.). */
+  error?: string | null;
 }
 
 export interface NormalizedConnection {
@@ -80,7 +82,93 @@ export function extractWaMessageId(eventType: string, data: unknown): string | n
   return null;
 }
 
+/** Mensagens de erro da Meta traduzidas para a equipe (as demais saem cruas). */
+export function metaErrorToPortuguese(code: number | null, fallback: string): string {
+  switch (code) {
+    case 131047:
+      return "A cliente não escreveu nas últimas 24h — na API oficial só é possível enviar um modelo aprovado pela Meta.";
+    case 131026:
+      return "Número não recebe mensagens (sem WhatsApp, app desatualizado ou bloqueou a clínica).";
+    case 131056:
+      return "Muitas mensagens para este número em pouco tempo — a Meta pediu para esperar.";
+    case 132000:
+      return "O modelo aprovado espera outra quantidade de campos — avise o suporte.";
+    case 132001:
+      return "O modelo desta mensagem ainda não foi aprovado pela Meta.";
+    case 132015:
+    case 132016:
+      return "A Meta pausou este modelo por baixa qualidade — é preciso um modelo novo.";
+    case 190:
+      return "O token da API oficial expirou ou foi revogado — reconecte o número em Configurações.";
+    case 131042:
+      return "Problema no pagamento da conta do WhatsApp Business (Meta) — confira o método de pagamento.";
+    case 133010:
+      return "O número não está registrado na plataforma do WhatsApp Business.";
+    default:
+      return fallback;
+  }
+}
+
+/** Evento bruto da Meta → mesmo formato dos eventos da Evolution.
+ *  META_MESSAGE: { message, contact, metadata }; META_STATUS_*: { status }. */
+function normalizeMetaEvent(eventType: string, data: unknown): NormalizedEvent {
+  if (eventType === "META_MESSAGE") {
+    const message = get(data, ["message"]);
+    const waMessageId = str(get(message, ["id"]));
+    const from = str(get(message, ["from"]));
+    if (!waMessageId || !from) return { kind: "ignored" };
+    const type = str(get(message, ["type"])) ?? "other";
+    const known = ["text", "image", "audio", "video", "document", "sticker", "location"] as const;
+    const messageType = (known as readonly string[]).includes(type)
+      ? (type as NormalizedInbound["messageType"])
+      : "other";
+    const body =
+      str(get(message, ["text", "body"])) ??
+      str(get(message, [type, "caption"])) ??
+      str(get(message, ["button", "text"])) ??
+      str(get(message, ["interactive", "button_reply", "title"])) ??
+      null;
+    const ts = Number(get(message, ["timestamp"]));
+    return {
+      kind: "message",
+      waMessageId,
+      remoteJid: `${from.replace(/\D/g, "")}@s.whatsapp.net`,
+      fromMe: false,
+      messageType: body && messageType === "other" ? "text" : messageType,
+      body,
+      pushName: str(get(data, ["contact", "profile", "name"])),
+      timestamp: Number.isFinite(ts) ? ts : null,
+    };
+  }
+  if (eventType.startsWith("META_STATUS")) {
+    const status = get(data, ["status"]);
+    const waMessageId = str(get(status, ["id"]));
+    if (!waMessageId) return { kind: "ignored" };
+    const raw = str(get(status, ["status"])) ?? "";
+    const mapped =
+      raw === "read" ? ("read" as const) : raw === "delivered" ? ("delivered" as const) : raw === "failed" ? ("failed" as const) : null;
+    const errors = get(status, ["errors"]) as { code?: number; title?: string; message?: string; error_data?: { details?: string } }[] | undefined;
+    const first = Array.isArray(errors) ? errors[0] : undefined;
+    const recipient = str(get(status, ["recipient_id"]));
+    return {
+      kind: "status",
+      waMessageId,
+      remoteJid: recipient ? `${recipient}@s.whatsapp.net` : null,
+      status: mapped,
+      error:
+        mapped === "failed"
+          ? metaErrorToPortuguese(
+              typeof first?.code === "number" ? first.code : null,
+              first?.error_data?.details ?? first?.message ?? first?.title ?? "falha no envio",
+            )
+          : null,
+    };
+  }
+  return { kind: "ignored" };
+}
+
 export function normalizeEvent(eventType: string, data: unknown): NormalizedEvent {
+  if (eventType.startsWith("META_")) return normalizeMetaEvent(eventType, data);
   switch (eventType) {
     case "MESSAGES_UPSERT":
     case "SEND_MESSAGE": {

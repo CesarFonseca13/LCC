@@ -12,7 +12,15 @@ import {
 } from "@clinicaos/ai/provider";
 import { decryptSensitive, encryptSensitive } from "@clinicaos/core/crypto";
 import { normalizePhoneBR } from "@clinicaos/core/phone";
-import { evolutionFromEnv } from "@clinicaos/whatsapp";
+import {
+  evolutionFromEnv,
+  META_TEMPLATE_CATALOG,
+  META_TEMPLATE_LANGUAGE,
+  MetaApiError,
+  MetaCloudClient,
+  metaStatusToLocal,
+  toMetaSpec,
+} from "@clinicaos/whatsapp";
 import { schema } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
 import { SPECIALTY_VALUES, WEEKDAYS } from "@/lib/clinic-profile";
@@ -21,10 +29,13 @@ import { formatCEP, formatCNPJ, isValidEmail, normalizeCEP, normalizeCNPJ } from
 export interface WhatsAppState {
   ok: boolean;
   error?: string;
+  /** Deu certo, mas com um aviso para a equipe (ex.: webhook não assinado sozinho). */
+  warning?: string;
   status?: string;
   qrCode?: string | null;
   phone?: string | null;
   instanceId?: string;
+  templates?: { approved: number; pending: number; rejected: number; total: number };
 }
 
 const emptySchema = z.object({});
@@ -151,6 +162,10 @@ export const pollWhatsApp = authAction({
         .limit(1)
     )[0];
     if (!instance) return { ok: true, status: "none" };
+    // API oficial não tem QR: o status é o do banco (vigia do worker confere na Meta)
+    if (instance.provider === "meta") {
+      return { ok: true, status: instance.status, phone: instance.phoneE164 };
+    }
 
     // Enquanto aguarda leitura do QR, confere o estado direto na Evolution
     // (webhook pode falhar silenciosamente) e renova o QR expirado.
@@ -545,10 +560,12 @@ export const disconnectWhatsApp = authAction({
     )[0];
     if (!instance) return { ok: true, status: "none" };
 
-    try {
-      await evolutionFromEnv().logout(instance.evolutionInstanceName);
-    } catch {
-      // Evolution pode já estar deslogada — estado local manda
+    if (instance.provider !== "meta") {
+      try {
+        await evolutionFromEnv().logout(instance.evolutionInstanceName);
+      } catch {
+        // Evolution pode já estar deslogada — estado local manda
+      }
     }
     await tx
       .update(schema.whatsappInstances)
@@ -556,6 +573,297 @@ export const disconnectWhatsApp = authAction({
       .where(eq(schema.whatsappInstances.id, instance.id));
     revalidatePath("/configuracoes");
     return { ok: true, status: "disconnected", instanceId: instance.id };
+  },
+});
+
+// ── API oficial da Meta (Cloud API) ─────────────────────────────────
+
+const metaConnectSchema = z.object({
+  instanceId: z.string().uuid().optional(),
+  phoneNumberId: z.string().trim().regex(/^\d{5,25}$/, "Phone Number ID inválido — só números."),
+  wabaId: z
+    .string()
+    .trim()
+    .regex(/^\d{5,25}$/, "ID da conta do WhatsApp Business inválido — só números."),
+  /** Vazio = manter o token já salvo (reconexão). */
+  accessToken: z.string().trim().max(1000),
+  /** App Secret do app da Meta (vazio = usar o do app central, se houver). */
+  appSecret: z.string().trim().max(200),
+  label: z.string().trim().max(40),
+});
+
+function metaErrorFriendly(err: unknown): string {
+  if (err instanceof MetaApiError) {
+    if (err.code === 190 || err.status === 401) {
+      return "A Meta recusou o token — confira se copiou o token permanente inteiro (usuário do sistema com permissão whatsapp_business_messaging e whatsapp_business_management).";
+    }
+    if (err.status === 404 || err.code === 100) {
+      return "A Meta não encontrou esse Phone Number ID com esse token — confira os dois em WhatsApp → Configuração da API, no painel do app.";
+    }
+    if (err.status === 403) {
+      return "O token não tem acesso a este número — no Meta Business, dê ao usuário do sistema acesso à conta do WhatsApp Business.";
+    }
+    return `A Meta respondeu: ${err.message.slice(0, 200)}`;
+  }
+  return "Não consegui falar com a Meta agora — tente de novo em instantes.";
+}
+
+/** Conecta (ou reconecta) um número pela API oficial: valida as credenciais na
+ *  Meta, guarda cifrado, assina os webhooks e registra o catálogo de templates. */
+export const connectMetaWhatsApp = authAction({
+  permission: "settings.manage",
+  schema: metaConnectSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    const key = process.env.SENSITIVE_DATA_KEY;
+    if (!key) {
+      return {
+        ok: false,
+        error: "O servidor está sem SENSITIVE_DATA_KEY — não é seguro guardar o token. Avise o suporte.",
+      };
+    }
+    const existing = input.instanceId
+      ? (
+          await tx
+            .select()
+            .from(schema.whatsappInstances)
+            .where(
+              and(
+                eq(schema.whatsappInstances.id, input.instanceId),
+                eq(schema.whatsappInstances.clinicId, auth.clinicId),
+              ),
+            )
+            .limit(1)
+        )[0]
+      : undefined;
+    if (input.instanceId && !existing) return { ok: false, error: "Número não encontrado." };
+
+    let accessToken = input.accessToken;
+    if (!accessToken && existing?.metaAccessTokenEnc) {
+      try {
+        accessToken = decryptSensitive(existing.metaAccessTokenEnc, key);
+      } catch {
+        accessToken = "";
+      }
+    }
+    if (!accessToken) return { ok: false, error: "Cole o token permanente da Meta (usuário do sistema)." };
+    let appSecret = input.appSecret;
+    if (!appSecret && existing?.metaAppSecretEnc) {
+      try {
+        appSecret = decryptSensitive(existing.metaAppSecretEnc, key);
+      } catch {
+        appSecret = "";
+      }
+    }
+    if (!appSecret && !process.env.META_APP_SECRET) {
+      return {
+        ok: false,
+        error:
+          "Cole o App Secret do app da Meta (painel do app → Configurações do app → Básico). Sem ele as mensagens recebidas não podem ser verificadas.",
+      };
+    }
+
+    const client = new MetaCloudClient({
+      accessToken,
+      phoneNumberId: input.phoneNumberId,
+      wabaId: input.wabaId,
+      graphVersion: process.env.META_GRAPH_VERSION,
+    });
+    let info: Awaited<ReturnType<MetaCloudClient["getPhoneNumber"]>>;
+    try {
+      info = await client.getPhoneNumber();
+    } catch (err) {
+      return { ok: false, error: metaErrorFriendly(err) };
+    }
+    let warning: string | undefined;
+    try {
+      await client.subscribeApp();
+    } catch (err) {
+      warning = `Conectado, mas não consegui assinar os webhooks sozinho (${
+        err instanceof Error ? err.message.slice(0, 120) : "erro"
+      }). No painel da Meta, em WhatsApp → Configuração → Webhooks, assine o campo "messages".`;
+    }
+
+    const clash = (
+      await tx
+        .select({ id: schema.whatsappInstances.id })
+        .from(schema.whatsappInstances)
+        .where(
+          and(
+            eq(schema.whatsappInstances.metaPhoneNumberId, input.phoneNumberId),
+            existing ? ne(schema.whatsappInstances.id, existing.id) : sql`true`,
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (clash) return { ok: false, error: "Este Phone Number ID já está conectado em outro número da clínica." };
+
+    const phoneE164 = info.displayPhoneNumber
+      ? `+${info.displayPhoneNumber.replace(/\D/g, "")}`
+      : (existing?.phoneE164 ?? null);
+    const values = {
+      provider: "meta" as const,
+      metaPhoneNumberId: input.phoneNumberId,
+      metaWabaId: input.wabaId,
+      metaAccessTokenEnc: encryptSensitive(accessToken, key),
+      metaAppSecretEnc: appSecret ? encryptSensitive(appSecret, key) : null,
+      metaTokenHint: accessToken.slice(-4),
+      metaVerifiedName: info.verifiedName,
+      phoneE164,
+      status: "connected" as const,
+      qrCode: null,
+      lastSeenAt: new Date(),
+      updatedAt: new Date(),
+    };
+    let instanceId: string;
+    if (existing) {
+      await tx
+        .update(schema.whatsappInstances)
+        .set({ ...values, label: input.label || existing.label })
+        .where(eq(schema.whatsappInstances.id, existing.id));
+      instanceId = existing.id;
+    } else {
+      const n =
+        (
+          await tx
+            .select({ n: sql<number>`count(*)::int` })
+            .from(schema.whatsappInstances)
+            .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
+        )[0]?.n ?? 0;
+      const [created] = await tx
+        .insert(schema.whatsappInstances)
+        .values({
+          clinicId: auth.clinicId,
+          evolutionInstanceName: `meta-${input.phoneNumberId}`,
+          webhookToken: randomBytes(24).toString("base64url"),
+          isPrimary: n === 0,
+          label: input.label || (n === 0 ? "Principal" : `Número ${n + 1}`),
+          ...values,
+        })
+        .returning({ id: schema.whatsappInstances.id });
+      if (!created) return { ok: false, error: "Não foi possível salvar o número." };
+      instanceId = created.id;
+    }
+
+    // Catálogo de templates: cria as linhas e registra na Meta (aprovação em até 24h)
+    const appUrl = process.env.APP_URL ?? "http://localhost:3000";
+    for (const entry of META_TEMPLATE_CATALOG) {
+      await tx
+        .insert(schema.whatsappTemplates)
+        .values({
+          clinicId: auth.clinicId,
+          instanceId,
+          purpose: entry.purpose,
+          metaName: entry.name,
+          language: META_TEMPLATE_LANGUAGE,
+          category: entry.category,
+          bodyText: entry.bodyText,
+          paramNames: entry.paramNames,
+          buttonUrlParam: entry.button?.param ?? null,
+        })
+        .onConflictDoNothing();
+    }
+    const remote = await client.listTemplates().catch(() => []);
+    const outcomes = await Promise.all(
+      META_TEMPLATE_CATALOG.map(async (entry) => {
+        const found = remote.find((r) => r.name === entry.name && r.language === META_TEMPLATE_LANGUAGE);
+        if (found) {
+          return { entry, status: metaStatusToLocal(found.status), id: found.id, reason: found.rejectedReason };
+        }
+        try {
+          const created = await client.createTemplate(toMetaSpec(entry, appUrl));
+          return { entry, status: metaStatusToLocal(created.status), id: created.id, reason: null };
+        } catch (err) {
+          return {
+            entry,
+            status: "error" as const,
+            id: null,
+            reason: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+          };
+        }
+      }),
+    );
+    const counts = { approved: 0, pending: 0, rejected: 0, total: outcomes.length };
+    for (const o of outcomes) {
+      await tx
+        .update(schema.whatsappTemplates)
+        .set({ status: o.status, metaTemplateId: o.id, rejectReason: o.reason, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.whatsappTemplates.instanceId, instanceId),
+            eq(schema.whatsappTemplates.purpose, o.entry.purpose),
+          ),
+        );
+      if (o.status === "approved") counts.approved++;
+      else if (o.status === "pending") counts.pending++;
+      else counts.rejected++;
+    }
+
+    revalidatePath("/configuracoes");
+    revalidatePath("/whatsapp");
+    return { ok: true, status: "connected", instanceId, phone: phoneE164, warning, templates: counts };
+  },
+});
+
+/** Atualiza o status dos templates deste número direto na Meta. */
+export const syncMetaTemplates = authAction({
+  permission: "settings.manage",
+  schema: z.object({ instanceId: z.string().uuid() }),
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    const instance = (
+      await tx
+        .select()
+        .from(schema.whatsappInstances)
+        .where(
+          and(
+            eq(schema.whatsappInstances.id, input.instanceId),
+            eq(schema.whatsappInstances.clinicId, auth.clinicId),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!instance || instance.provider !== "meta" || !instance.metaAccessTokenEnc) {
+      return { ok: false, error: "Número não encontrado." };
+    }
+    const key = process.env.SENSITIVE_DATA_KEY;
+    if (!key) return { ok: false, error: "Servidor sem SENSITIVE_DATA_KEY." };
+    let token: string;
+    try {
+      token = decryptSensitive(instance.metaAccessTokenEnc, key);
+    } catch {
+      return { ok: false, error: "Token ilegível — reconecte o número." };
+    }
+    const client = new MetaCloudClient({
+      accessToken: token,
+      phoneNumberId: instance.metaPhoneNumberId!,
+      wabaId: instance.metaWabaId,
+      graphVersion: process.env.META_GRAPH_VERSION,
+    });
+    let remote: Awaited<ReturnType<MetaCloudClient["listTemplates"]>>;
+    try {
+      remote = await client.listTemplates();
+    } catch (err) {
+      return { ok: false, error: metaErrorFriendly(err) };
+    }
+    const local = await tx
+      .select()
+      .from(schema.whatsappTemplates)
+      .where(eq(schema.whatsappTemplates.instanceId, instance.id));
+    const counts = { approved: 0, pending: 0, rejected: 0, total: local.length };
+    for (const row of local) {
+      const found = remote.find((r) => r.name === row.metaName && r.language === row.language);
+      const status = found ? metaStatusToLocal(found.status) : row.status;
+      if (found) {
+        await tx
+          .update(schema.whatsappTemplates)
+          .set({ status, metaTemplateId: found.id, rejectReason: found.rejectedReason, updatedAt: new Date() })
+          .where(eq(schema.whatsappTemplates.id, row.id));
+      }
+      if (status === "approved") counts.approved++;
+      else if (status === "pending") counts.pending++;
+      else counts.rejected++;
+    }
+    revalidatePath("/configuracoes");
+    return { ok: true, templates: counts };
   },
 });
 
@@ -642,15 +950,18 @@ export const deleteWhatsAppNumber = authAction({
     }
 
     // Evolution: melhor esforço — a instância pode nem existir lá
-    try {
-      await evolutionFromEnv().logout(instance.evolutionInstanceName);
-    } catch {
-      // já deslogada ou inexistente
-    }
-    try {
-      await evolutionFromEnv().deleteInstance(instance.evolutionInstanceName);
-    } catch {
-      // inexistente na Evolution — o painel é a fonte da verdade
+    // (número da API oficial não tem nada na Evolution: só apaga do painel)
+    if (instance.provider !== "meta") {
+      try {
+        await evolutionFromEnv().logout(instance.evolutionInstanceName);
+      } catch {
+        // já deslogada ou inexistente
+      }
+      try {
+        await evolutionFromEnv().deleteInstance(instance.evolutionInstanceName);
+      } catch {
+        // inexistente na Evolution — o painel é a fonte da verdade
+      }
     }
 
     await tx

@@ -37,12 +37,12 @@ export const TERMS_SECTIONS: TermsSection[] = [
   {
     title: "4. Integração com o WhatsApp",
     paragraphs: [
-      "O envio e o recebimento de mensagens no WhatsApp são feitos por meio da Evolution API, uma tecnologia de integração de código aberto mantida por terceiros, que conecta o número da Clínica ao WhatsApp de forma semelhante ao WhatsApp Web — e não pela API oficial da Meta (WhatsApp Business Platform).",
-      "Por essa característica, a Clínica reconhece e aceita que:",
+      "A plataforma oferece duas formas de conectar o número da Clínica ao WhatsApp, à escolha da Clínica em Configurações: (a) a WhatsApp Business Platform, API oficial da Meta, integração autorizada pelo WhatsApp, na qual mensagens enviadas pela Clínica fora da janela de 24 horas de atendimento só podem usar modelos aprovados pela Meta e são cobradas pela própria Meta conforme a sua tabela; ou (b) a conexão por QR code, feita por meio da Evolution API, uma tecnologia de integração de código aberto mantida por terceiros, que conecta o número de forma semelhante ao WhatsApp Web — e não pela API oficial.",
+      "Ao optar pela conexão por QR code, a Clínica reconhece e aceita que:",
       "- a integração depende do funcionamento do WhatsApp e pode sofrer instabilidades, mudanças ou interrupções fora do nosso controle, inclusive exigir nova leitura do QR code para reconectar o número;",
       "- o WhatsApp pode, a seu exclusivo critério, restringir, suspender ou banir números que, na avaliação dele, violem os seus Termos de Serviço ou suas políticas — por exemplo, por envio de mensagens em volume, para contatos que não iniciaram conversa ou que as marquem como spam. Existe, portanto, um risco real de bloqueio ou banimento do número conectado, que a Clínica declara conhecer e assumir;",
       "- a Billions não se responsabiliza por bloqueios, suspensões ou banimentos aplicados pelo WhatsApp ou pela Meta, nem por perdas decorrentes deles, e não garante a recuperação de números afetados.",
-      "Para reduzir esse risco, recomendamos: usar um número exclusivo da Clínica (de preferência um chip já em uso há algum tempo), manter automações e campanhas em volumes moderados, enviar mensagens apenas a clientes que já se relacionam com a Clínica e respeitar pedidos de quem não quiser mais receber mensagens. A Clínica é responsável por cumprir os Termos de Serviço do WhatsApp e a legislação aplicável, inclusive as regras sobre comunicações comerciais.",
+      "Para reduzir esse risco, recomendamos: usar um número exclusivo da Clínica (de preferência um chip já em uso há algum tempo), manter automações e campanhas em volumes moderados, enviar mensagens apenas a clientes que já se relacionam com a Clínica e respeitar pedidos de quem não quiser mais receber mensagens — ou, para eliminar o risco, conectar o número pela API oficial da Meta. Em qualquer das duas formas, a Clínica é responsável por cumprir os Termos de Serviço do WhatsApp, as políticas da Meta e a legislação aplicável, inclusive as regras sobre comunicações comerciais.",
     ],
   },
   {

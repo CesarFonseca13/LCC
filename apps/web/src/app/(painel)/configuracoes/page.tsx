@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { parseClinicAiProvider, resolveAiConfig } from "@clinicaos/ai/provider";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
@@ -30,7 +30,7 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const { instances, aiProvider, aiSettings, booking, clinicProfile } = await withTenant(
+  const { instances, templateRows, aiProvider, aiSettings, booking, clinicProfile } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const instances = await tx
@@ -42,10 +42,23 @@ export default async function ConfiguracoesPage() {
           qrCode: schema.whatsappInstances.qrCode,
           isPrimary: schema.whatsappInstances.isPrimary,
           createdAt: schema.whatsappInstances.createdAt,
+          provider: schema.whatsappInstances.provider,
+          metaPhoneNumberId: schema.whatsappInstances.metaPhoneNumberId,
+          metaWabaId: schema.whatsappInstances.metaWabaId,
+          metaTokenHint: schema.whatsappInstances.metaTokenHint,
+          metaVerifiedName: schema.whatsappInstances.metaVerifiedName,
         })
         .from(schema.whatsappInstances)
         .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
         .orderBy(schema.whatsappInstances.createdAt);
+      const templateRows = await tx
+        .select({
+          instanceId: schema.whatsappTemplates.instanceId,
+          status: schema.whatsappTemplates.status,
+          n: sql<number>`count(*)::int`,
+        })
+        .from(schema.whatsappTemplates)
+        .groupBy(schema.whatsappTemplates.instanceId, schema.whatsappTemplates.status);
       const clinic = (
         await tx
           .select()
@@ -78,6 +91,7 @@ export default async function ConfiguracoesPage() {
       };
       return {
         instances,
+        templateRows,
         aiProvider,
         clinicProfile,
         aiSettings: {
@@ -115,14 +129,40 @@ export default async function ConfiguracoesPage() {
 
       <div className="mt-6 max-w-2xl space-y-6">
         <WhatsAppCard
-          initialInstances={instances.map((inst, i) => ({
-            id: inst.id,
-            label: inst.label ?? (inst.isPrimary ? "Principal" : `Número ${i + 1}`),
-            phone: inst.phoneE164 ? formatPhoneBR(inst.phoneE164) : null,
-            status: inst.status,
-            qr: inst.qrCode,
-            isPrimary: inst.isPrimary,
-          }))}
+          initialInstances={instances.map((inst, i) => {
+            const counts = { approved: 0, pending: 0, rejected: 0, total: 0 };
+            for (const row of templateRows) {
+              if (row.instanceId !== inst.id) continue;
+              counts.total += row.n;
+              if (row.status === "approved") counts.approved += row.n;
+              else if (row.status === "pending") counts.pending += row.n;
+              else counts.rejected += row.n;
+            }
+            return {
+              id: inst.id,
+              label: inst.label ?? (inst.isPrimary ? "Principal" : `Número ${i + 1}`),
+              phone: inst.phoneE164 ? formatPhoneBR(inst.phoneE164) : null,
+              status: inst.status,
+              qr: inst.qrCode,
+              isPrimary: inst.isPrimary,
+              provider: inst.provider,
+              meta:
+                inst.provider === "meta"
+                  ? {
+                      phoneNumberId: inst.metaPhoneNumberId ?? "",
+                      wabaId: inst.metaWabaId ?? "",
+                      tokenHint: inst.metaTokenHint,
+                      verifiedName: inst.metaVerifiedName,
+                      templates: counts,
+                    }
+                  : null,
+            };
+          })}
+          metaSetup={{
+            webhookUrl: `${process.env.APP_URL ?? "http://localhost:3000"}/api/webhooks/meta`,
+            verifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN ?? null,
+            hasCentralSecret: Boolean(process.env.META_APP_SECRET),
+          }}
         />
 
         <ClinicCard initial={clinicProfile} />

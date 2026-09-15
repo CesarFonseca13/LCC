@@ -30,6 +30,8 @@ async function queueWhatsAppText(
   clinicId: string,
   customerPhone: string,
   body: string,
+  /** Valores para o template da Meta (API oficial fora da janela de 24h). */
+  templateVars: Record<string, string>,
 ): Promise<boolean> {
   const instance = (
     await tx
@@ -39,6 +41,13 @@ async function queueWhatsAppText(
       .limit(1)
   )[0];
   if (!instance || instance.status !== "connected") return false;
+  const clinic = (
+    await tx
+      .select({ name: schema.clinics.name })
+      .from(schema.clinics)
+      .where(eq(schema.clinics.id, clinicId))
+      .limit(1)
+  )[0];
   const remoteJid = `${customerPhone.replace("+", "")}@s.whatsapp.net`;
   let conversation = (
     await tx
@@ -70,6 +79,7 @@ async function queueWhatsAppText(
     status: "queued",
     automationId: "quote",
     scheduledFor: new Date(Date.now() + 2_000 + Math.floor(Math.random() * 5_000)),
+    templateVars: { clinica: clinic?.name ?? "a clínica", ...templateVars },
   });
   return true;
 }
@@ -217,6 +227,7 @@ export const createAndSendQuote = authAction({
       auth.clinicId,
       customer.phoneE164,
       `Oi ${primeiroNome}! Preparei seu orçamento com todo carinho 💛 É só abrir aqui para ver os detalhes — e qualquer dúvida me chama: ${quoteUrl}`,
+      { nome: primeiroNome ?? customer.fullName, link_token: publicToken },
     );
 
     revalidatePath("/orcamentos");

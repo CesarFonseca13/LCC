@@ -20,8 +20,11 @@ export async function processCampaignsSweep(logger: Logger): Promise<void> {
     FROM campaigns ca
     JOIN clinics c ON c.id = ca.clinic_id
     WHERE ca.status = 'running'
+      -- Campanha é texto livre da clínica: na API oficial precisaria de template
+      -- aprovado por campanha (fase seguinte) — hoje sai só por número via QR code
       AND EXISTS (SELECT 1 FROM whatsapp_instances w
-                  WHERE w.clinic_id = ca.clinic_id AND w.status = 'connected')
+                  WHERE w.clinic_id = ca.clinic_id AND w.status = 'connected'
+                    AND w.provider = 'evolution')
     -- Rodízio justo: quem enviou há mais tempo (ou nunca) vai primeiro — duas
     -- campanhas ligadas se alternam em vez de a mais antiga monopolizar o ritmo
     ORDER BY ca.next_send_at ASC NULLS FIRST, ca.started_at ASC
@@ -101,6 +104,7 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
   const anyReady = await db.execute(sql`
     SELECT 1 FROM whatsapp_instances w
     WHERE w.clinic_id = ${campaign.clinic_id} AND w.status = 'connected'
+      AND w.provider = 'evolution'
       AND COALESCE(w.next_campaign_send_at <= now(), true)
       AND (SELECT count(*) FROM campaign_recipients r2
            JOIN messages m2 ON m2.id = r2.message_id
@@ -206,6 +210,7 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
              ) AS sent_today
       FROM whatsapp_instances w
       WHERE w.clinic_id = ${campaign.clinic_id} AND w.status = 'connected'
+        AND w.provider = 'evolution'
       ORDER BY sticky DESC, w.next_campaign_send_at ASC NULLS FIRST
     `);
     const options = instRows.rows as unknown as {

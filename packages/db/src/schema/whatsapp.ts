@@ -25,7 +25,18 @@ export const whatsappInstances = pgTable(
   {
     id: id(),
     clinicId: clinicId(),
+    /** Nome único do número. Evolution: cl-xxxxxxxx-NN; Meta: meta-<phone_number_id>. */
     evolutionInstanceName: text("evolution_instance_name").notNull().unique(),
+    /** 'evolution' = QR code (como o WhatsApp Web); 'meta' = API oficial da Meta. */
+    provider: text("provider", { enum: ["evolution", "meta"] }).notNull().default("evolution"),
+    metaPhoneNumberId: text("meta_phone_number_id"),
+    metaWabaId: text("meta_waba_id"),
+    /** Token permanente (System User) cifrado com SENSITIVE_DATA_KEY. */
+    metaAccessTokenEnc: text("meta_access_token_enc"),
+    /** App Secret do app da Meta da clínica (cifrado) — valida a assinatura do webhook. */
+    metaAppSecretEnc: text("meta_app_secret_enc"),
+    metaTokenHint: text("meta_token_hint"),
+    metaVerifiedName: text("meta_verified_name"),
     label: text("label"),
     phoneE164: text("phone_e164"),
     isPrimary: boolean("is_primary").notNull().default(false),
@@ -134,9 +145,46 @@ export const messages = pgTable(
     automationId: text("automation_id"),
     automationRunId: uuid("automation_run_id"),
     scheduledFor: timestamp("scheduled_for", { withTimezone: true }),
+    /** Valores que renderizaram o texto — na API oficial, fora da janela de 24h,
+     *  viram os parâmetros do template aprovado pela Meta. */
+    templateVars: jsonb("template_vars").$type<Record<string, string>>(),
+    /** Nome do template da Meta usado no envio (auditoria/custo). */
+    sentAsTemplate: text("sent_as_template"),
     error: text("error"),
     sentAt: timestamp("sent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("messages_conversation_idx2").on(t.clinicId, t.conversationId, t.createdAt)],
+);
+
+/** Templates registrados na Meta por número — um por finalidade (lembrete, termo...). */
+export const whatsappTemplates = pgTable(
+  "whatsapp_templates",
+  {
+    id: id(),
+    clinicId: clinicId(),
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => whatsappInstances.id, { onDelete: "cascade" }),
+    purpose: text("purpose").notNull(),
+    metaName: text("meta_name").notNull(),
+    language: text("language").notNull().default("pt_BR"),
+    category: text("category").notNull(),
+    bodyText: text("body_text").notNull(),
+    paramNames: text("param_names").array().notNull(),
+    buttonUrlParam: text("button_url_param"),
+    status: text("status", {
+      enum: ["pending", "approved", "rejected", "paused", "disabled", "error"],
+    })
+      .notNull()
+      .default("pending"),
+    metaTemplateId: text("meta_template_id"),
+    rejectReason: text("reject_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("whatsapp_templates_instance_purpose_uq").on(t.instanceId, t.purpose),
+    index("whatsapp_templates_clinic_idx").on(t.clinicId),
+  ],
 );
