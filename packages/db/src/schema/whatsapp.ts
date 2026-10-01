@@ -37,6 +37,10 @@ export const whatsappInstances = pgTable(
     metaAppSecretEnc: text("meta_app_secret_enc"),
     metaTokenHint: text("meta_token_hint"),
     metaVerifiedName: text("meta_verified_name"),
+    /** Coexistência: o número segue no app WhatsApp Business do celular. */
+    metaCoexistence: boolean("meta_coexistence").notNull().default(false),
+    /** PIN de verificação em duas etapas (registro do número pela API), cifrado. */
+    metaPinEnc: text("meta_pin_enc"),
     label: text("label"),
     phoneE164: text("phone_e164"),
     isPrimary: boolean("is_primary").notNull().default(false),

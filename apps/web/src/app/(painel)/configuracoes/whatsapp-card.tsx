@@ -6,12 +6,26 @@ import {
   connectMetaWhatsApp,
   deleteWhatsAppNumber,
   disconnectWhatsApp,
+  finishEmbeddedSignup,
   makePrimaryWhatsApp,
   pollWhatsApp,
   renameWhatsApp,
   setupWhatsApp,
   syncMetaTemplates,
 } from "./actions";
+
+declare global {
+  interface Window {
+    FB?: {
+      init: (options: Record<string, unknown>) => void;
+      login: (
+        callback: (response: { authResponse?: { code?: string } | null; status?: string }) => void,
+        options: Record<string, unknown>,
+      ) => void;
+    };
+    fbAsyncInit?: () => void;
+  }
+}
 
 export interface InstanceView {
   id: string;
@@ -27,6 +41,7 @@ export interface InstanceView {
     wabaId: string;
     tokenHint: string | null;
     verifiedName: string | null;
+    coexistence?: boolean;
     templates: { approved: number; pending: number; rejected: number; total: number };
   } | null;
 }
@@ -37,6 +52,232 @@ export interface MetaSetupInfo {
   verifyToken: string | null;
   /** Já existe um app central da Meta (segredo no servidor): a clínica pode pular o App Secret. */
   hasCentralSecret: boolean;
+  /** Embedded Signup ("Conectar com o Facebook"): id do app e da configuração de login. */
+  appId?: string | null;
+  configId?: string | null;
+  graphVersion?: string;
+}
+
+/** Carrega o SDK JS da Meta uma vez (só quando o Embedded Signup está configurado). */
+function useFacebookSdk(appId: string | null | undefined, version: string) {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!appId) return;
+    if (window.FB) {
+      setReady(true);
+      return;
+    }
+    window.fbAsyncInit = () => {
+      window.FB?.init({ appId, autoLogAppEvents: true, xfbml: true, version });
+      setReady(true);
+    };
+    if (!document.getElementById("facebook-jssdk")) {
+      const script = document.createElement("script");
+      script.id = "facebook-jssdk";
+      script.src = "https://connect.facebook.net/pt_BR/sdk.js";
+      script.async = true;
+      script.defer = true;
+      script.crossOrigin = "anonymous";
+      document.body.appendChild(script);
+    }
+  }, [appId, version]);
+  return ready;
+}
+
+/** Botão "Conectar com o Facebook": popup da Meta cria/vincula a conta do WhatsApp
+ *  Business e devolve um código; o servidor troca por token e fecha a conexão. */
+function FacebookConnect({
+  metaSetup,
+  onDone,
+  onManual,
+}: {
+  metaSetup: MetaSetupInfo;
+  onDone: (next: InstanceView) => void;
+  onManual: () => void;
+}) {
+  const ready = useFacebookSdk(metaSetup.appId, metaSetup.graphVersion ?? "v23.0");
+  const [coexistence, setCoexistence] = useState(true);
+  const [label, setLabel] = useState("");
+  const [status, setStatus] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [pending, startTransition] = useTransition();
+  const codeRef = useRef<string | null>(null);
+  const sessionRef = useRef<{ wabaId: string; phoneNumberId: string | null } | null>(null);
+  const finishedRef = useRef(false);
+
+  function tryFinish() {
+    const code = codeRef.current;
+    const session = sessionRef.current;
+    if (!code || !session || finishedRef.current) return;
+    finishedRef.current = true;
+    setStatus("Conta vinculada — finalizando a conexão...");
+    startTransition(async () => {
+      const r = await finishEmbeddedSignup({
+        code,
+        wabaId: session.wabaId,
+        phoneNumberId: session.phoneNumberId ?? undefined,
+        coexistence,
+        label,
+      });
+      if (!r.ok) {
+        setError(r.error ?? "Não deu certo — tente de novo.");
+        setStatus(undefined);
+        finishedRef.current = false;
+        codeRef.current = null;
+        return;
+      }
+      onDone({
+        id: r.instanceId ?? "",
+        label: label || "Principal",
+        phone: r.phone ?? null,
+        status: "connected",
+        qr: null,
+        isPrimary: true,
+        provider: "meta",
+        meta: {
+          phoneNumberId: session.phoneNumberId ?? "",
+          wabaId: session.wabaId,
+          tokenHint: null,
+          verifiedName: null,
+          templates: r.templates ?? { approved: 0, pending: 0, rejected: 0, total: 0 },
+        },
+      });
+    });
+  }
+
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      if (!/\.facebook\.com$/.test(new URL(event.origin).hostname) && event.origin !== "https://www.facebook.com") return;
+      let data: { type?: string; event?: string; data?: { waba_id?: string; phone_number_id?: string; current_step?: string; error_message?: string } };
+      try {
+        data = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+      } catch {
+        return;
+      }
+      if (data?.type !== "WA_EMBEDDED_SIGNUP") return;
+      if (data.data?.waba_id) {
+        sessionRef.current = { wabaId: data.data.waba_id, phoneNumberId: data.data.phone_number_id ?? null };
+      }
+      const name = String(data.event ?? "").toUpperCase();
+      if (name.startsWith("FINISH")) {
+        setStatus("Conta do WhatsApp Business vinculada — aguardando a confirmação da Meta...");
+        tryFinish();
+      } else if (name === "CANCEL") {
+        setStatus(undefined);
+        setError(`Conexão cancelada${data.data?.current_step ? ` no passo "${data.data.current_step}"` : ""}. Pode tentar de novo quando quiser.`);
+      } else if (name === "ERROR") {
+        setStatus(undefined);
+        setError(`A Meta informou um erro: ${data.data?.error_message ?? "tente de novo"}.`);
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coexistence, label]);
+
+  function launch() {
+    setError(undefined);
+    if (!window.FB || !metaSetup.configId) {
+      setError("O Facebook ainda não carregou — aguarde um instante e tente de novo.");
+      return;
+    }
+    codeRef.current = null;
+    sessionRef.current = null;
+    finishedRef.current = false;
+    setStatus("Abrindo a janela da Meta... (se nada abrir, libere pop-ups para este site)");
+    window.FB.login(
+      (response) => {
+        const code = response.authResponse?.code;
+        if (!code) {
+          setStatus(undefined);
+          setError("A janela foi fechada antes de concluir. Tente de novo.");
+          return;
+        }
+        codeRef.current = code;
+        tryFinish();
+      },
+      {
+        config_id: metaSetup.configId,
+        response_type: "code",
+        override_default_response_type: true,
+        extras: {
+          setup: {},
+          ...(coexistence ? { featureType: "whatsapp_business_app_onboarding" } : {}),
+          sessionInfoVersion: "3",
+        },
+      },
+    );
+  }
+
+  const configured = Boolean(metaSetup.appId && metaSetup.configId);
+
+  return (
+    <div className="rounded-lg border border-sky-200 bg-sky-50/40 p-4">
+      <p className="text-sm font-semibold text-stone-800">Conectar pela API oficial da Meta</p>
+      <p className="mt-1 text-sm text-stone-600">
+        Clique, entre com o Facebook da clínica e siga a janela da Meta: ela cria a conta do WhatsApp
+        Business, confirma o número e devolve tudo pronto — sem copiar código nenhum.
+      </p>
+      {configured ? (
+        <>
+          <div className="mt-3 space-y-2 text-sm text-stone-700">
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-stone-200 bg-white p-3">
+              <input type="radio" name="meta-mode" checked={coexistence} onChange={() => setCoexistence(true)} className="mt-0.5 accent-teal-700" />
+              <span>
+                <strong>API oficial + WhatsApp Business no celular (coexistência)</strong>
+                <span className="block text-xs text-stone-500">
+                  O número continua no app do celular; contatos e até 6 meses de conversas são trazidos. O que a
+                  equipe responder pelo app aparece no painel e pausa a assistente naquela conversa. Precisa do app
+                  WhatsApp Business atualizado no aparelho.
+                </span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-stone-200 bg-white p-3">
+              <input type="radio" name="meta-mode" checked={!coexistence} onChange={() => setCoexistence(false)} className="mt-0.5 accent-teal-700" />
+              <span>
+                <strong>Só API oficial (número dedicado)</strong>
+                <span className="block text-xs text-stone-500">
+                  O número sai do app do celular e passa a existir só na plataforma. Use para um chip novo da clínica.
+                </span>
+              </span>
+            </label>
+          </div>
+          <div className="mt-3 max-w-xs">
+            <Label htmlFor="meta-fb-label" hint="opcional">
+              Apelido do número
+            </Label>
+            <Input id="meta-fb-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Recepção, Campanhas..." maxLength={40} />
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={launch}
+              disabled={!ready || pending}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#1877F2] px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-[#1664d8] disabled:opacity-60"
+            >
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-white text-[13px] font-bold text-[#1877F2]">f</span>
+              {pending ? "Finalizando..." : ready ? "Conectar com o Facebook" : "Carregando o Facebook..."}
+            </button>
+            <button type="button" className="text-xs text-stone-500 underline-offset-2 hover:underline" onClick={onManual}>
+              Prefiro colar as credenciais do app da clínica
+            </button>
+          </div>
+          {status ? <p className="mt-2 text-xs text-stone-500">{status}</p> : null}
+        </>
+      ) : (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          A conexão com o Facebook ainda não está configurada neste servidor (falta o app da Meta). Enquanto isso,
+          use as credenciais do app da clínica:
+          <div className="mt-2">
+            <Button type="button" variant="secondary" onClick={onManual}>
+              Colar credenciais manualmente
+            </Button>
+          </div>
+        </div>
+      )}
+      <FieldError message={error} />
+    </div>
+  );
 }
 
 const CONNECTING = ["created", "qr_pending", "connecting"];
@@ -416,6 +657,11 @@ function InstanceRow({
           {instance.meta?.verifiedName ? (
             <span className="text-xs text-stone-400">· {instance.meta.verifiedName}</span>
           ) : null}
+          {instance.meta?.coexistence ? (
+            <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-500" title="O número continua no app WhatsApp Business do celular">
+              + app no celular
+            </span>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <StatusPill status={instance.status} />
@@ -597,9 +843,10 @@ function ConnectChooser({
             API oficial da Meta <span className="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700">recomendado</span>
           </p>
           <p className="mt-1 text-xs text-stone-600">
-            Integração autorizada pelo WhatsApp: <strong>sem risco de bloqueio</strong>. Conversas em até 24h
-            são grátis; lembretes e avisos automáticos fora desse prazo saem como modelos aprovados e a Meta
-            cobra centavos por mensagem. Precisa de um app da Meta e de um número dedicado.
+            Integração autorizada pelo WhatsApp: <strong>sem risco de bloqueio</strong>. Conecta com a conta do
+            Facebook da clínica em poucos cliques — e o número pode continuar no app WhatsApp Business do celular
+            (coexistência). Conversas em até 24h são grátis; lembretes e avisos fora desse prazo saem como modelos
+            aprovados e a Meta cobra centavos por mensagem.
           </p>
         </button>
         <button
@@ -648,7 +895,7 @@ export function WhatsAppCard({
 }) {
   const [instances, setInstances] = useState<InstanceView[]>(initialInstances);
   const [error, setError] = useState<string>();
-  const [adding, setAdding] = useState<"choose" | "meta" | null>(null);
+  const [adding, setAdding] = useState<"choose" | "meta" | "meta-manual" | null>(null);
   const [pending, startTransition] = useTransition();
 
   // O vigia muda o status no servidor e a página se recarrega sozinha — o
@@ -748,7 +995,26 @@ export function WhatsAppCard({
           />
         ) : null}
 
-        {adding === "meta" ? (
+        {adding === "meta" && metaSetup ? (
+          <FacebookConnect
+            metaSetup={metaSetup}
+            onManual={() => setAdding("meta-manual")}
+            onDone={(next) => {
+              setInstances((prev) => [
+                ...prev.map((p) => (next.isPrimary ? { ...p, isPrimary: false } : p)),
+                { ...next, isPrimary: prev.length === 0 },
+              ]);
+              setAdding(null);
+            }}
+          />
+        ) : null}
+        {adding === "meta" && !metaSetup ? (
+          <p className="rounded-lg bg-stone-50 px-3 py-2 text-xs text-stone-500">
+            Conecte pela API oficial em Configurações → Números do WhatsApp (depois do wizard).
+          </p>
+        ) : null}
+
+        {adding === "meta-manual" ? (
           <MetaConnectForm
             metaSetup={metaSetup}
             onCancel={() => setAdding(null)}

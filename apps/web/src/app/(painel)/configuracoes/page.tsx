@@ -47,6 +47,7 @@ export default async function ConfiguracoesPage() {
           metaWabaId: schema.whatsappInstances.metaWabaId,
           metaTokenHint: schema.whatsappInstances.metaTokenHint,
           metaVerifiedName: schema.whatsappInstances.metaVerifiedName,
+          metaCoexistence: schema.whatsappInstances.metaCoexistence,
         })
         .from(schema.whatsappInstances)
         .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
@@ -155,6 +156,7 @@ export default async function ConfiguracoesPage() {
                       wabaId: inst.metaWabaId ?? "",
                       tokenHint: inst.metaTokenHint,
                       verifiedName: inst.metaVerifiedName,
+                      coexistence: inst.metaCoexistence,
                       templates: counts,
                     }
                   : null,
@@ -164,6 +166,9 @@ export default async function ConfiguracoesPage() {
             webhookUrl: `${process.env.APP_URL ?? "http://localhost:3000"}/api/webhooks/meta`,
             verifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN ?? null,
             hasCentralSecret: Boolean(process.env.META_APP_SECRET),
+            appId: process.env.META_APP_ID ?? null,
+            configId: process.env.META_EMBEDDED_SIGNUP_CONFIG_ID ?? null,
+            graphVersion: process.env.META_GRAPH_VERSION ?? "v23.0",
           }}
         />
 

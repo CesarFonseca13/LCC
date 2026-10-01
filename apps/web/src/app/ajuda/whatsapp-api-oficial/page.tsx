@@ -69,7 +69,7 @@ const PASSOS: { titulo: string; itens: string[] }[] = [
 const FAQ: { p: string; r: string }[] = [
   {
     p: "Posso usar o número que já está no WhatsApp da clínica?",
-    r: "Sim, mas ele sai do aplicativo do celular: na API oficial o número passa a existir só na plataforma da Meta, e o atendimento é feito pelo painel do VesaliusX (com a assistente e a equipe). Se a clínica quer manter o WhatsApp no celular, use um número novo para a API.",
+    r: "Sim. Com a opção de coexistência, o número continua no app WhatsApp Business do celular e ao mesmo tempo funciona pela API: a assistente atende pelo painel e a equipe pode responder pelo app (o que for respondido pelo app pausa a assistente naquela conversa). Só não dá para manter o WhatsApp comum (pessoal): precisa ser o app WhatsApp Business, atualizado.",
   },
   {
     p: "Quanto vou pagar por mês?",
@@ -158,8 +158,40 @@ export default function GuiaApiOficialPage() {
           </p>
         </section>
 
+        <section className="mt-6 rounded-xl border border-sky-200 bg-sky-50/40 p-6">
+          <h2 className="text-base font-semibold text-stone-800">O jeito rápido: conectar com o Facebook</h2>
+          <p className="mt-2 text-sm text-stone-600">
+            Em Configurações → Números do WhatsApp → API oficial da Meta, clique em{" "}
+            <strong>Conectar com o Facebook</strong>. Entre com a conta do Facebook da responsável pela clínica e
+            siga a janela da Meta: ela cria (ou usa) o portfólio da empresa e a conta do WhatsApp Business, confirma o
+            número e devolve tudo pronto para o VesaliusX — sem copiar token ou chave. Leva uns 5 minutos.
+          </p>
+          <ul className="mt-3 list-disc space-y-1.5 pl-5 text-sm text-stone-600">
+            <li>
+              <strong>API oficial + WhatsApp Business no celular (coexistência):</strong> o número continua no app do
+              celular. Durante a conexão a janela pede para abrir o app WhatsApp Business (versão 2.24.17 ou mais nova),
+              tocar em “Conectar à Plataforma” e autorizar: contatos e até 6 meses de conversas são trazidos para o
+              painel. O que a equipe responder pelo app aparece no VesaliusX e pausa a assistente naquela conversa.
+              Grupos, listas de transmissão, localização em tempo real e mensagens temporárias deixam de funcionar no
+              número.
+            </li>
+            <li>
+              <strong>Só API oficial (número dedicado):</strong> para um chip novo. O número passa a existir só na
+              plataforma; o atendimento é feito pelo painel.
+            </li>
+            <li>
+              Depois da conexão, cadastre o <strong>cartão da clínica</strong> em WhatsApp Manager → Configurações da
+              conta → Métodos de pagamento (passo 4 abaixo) — é por ele que a Meta cobra as mensagens de modelo.
+            </li>
+          </ul>
+          <p className="mt-3 text-xs text-stone-500">
+            O passo a passo manual a seguir é a alternativa para quem prefere usar um app próprio da Meta (ou enquanto a
+            conexão com o Facebook não estiver habilitada no servidor).
+          </p>
+        </section>
+
         <section className="mt-6 rounded-xl border border-stone-200 bg-white p-6">
-          <h2 className="text-base font-semibold text-stone-800">Antes de começar</h2>
+          <h2 className="text-base font-semibold text-stone-800">Antes de começar (caminho manual)</h2>
           <ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm text-stone-600">
             <li>Um número de telefone <strong>exclusivo</strong> para a API (chip da clínica que receba SMS ou ligação).</li>
             <li>CNPJ e documentos da clínica para a verificação da empresa na Meta.</li>

@@ -38,7 +38,13 @@ interface MetaChangeValue {
   contacts?: { wa_id?: string; profile?: { name?: string } }[];
   messages?: { id?: string; from?: string }[];
   statuses?: { id?: string; status?: string }[];
+  /** Coexistência: mensagens enviadas pela clínica no app do celular. */
+  message_echoes?: { id?: string; to?: string }[];
 }
+
+/** Campos que gravamos; history (sincronização de histórico), smb_app_state_sync
+ *  (contatos) e account_update só precisam do 200. */
+const HANDLED_FIELDS = new Set(["messages", "smb_message_echoes"]);
 
 export async function POST(request: NextRequest) {
   const raw = await request.text();
@@ -57,7 +63,7 @@ export async function POST(request: NextRequest) {
   try {
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {
-        if (change.field !== "messages" || !change.value) continue;
+        if (!change.field || !HANDLED_FIELDS.has(change.field) || !change.value) continue;
         const value = change.value;
         const phoneNumberId = value.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
@@ -99,6 +105,15 @@ export async function POST(request: NextRequest) {
               INSERT INTO whatsapp_events (instance_id, clinic_id, event_type, wa_message_id, payload, processed)
               VALUES (${instance.id}, ${instance.clinicId}, 'META_MESSAGE', ${message.id},
                       ${JSON.stringify({ message, contact, metadata: value.metadata ?? null })}::jsonb, false)
+              ON CONFLICT DO NOTHING
+            `);
+          }
+          for (const echo of value.message_echoes ?? []) {
+            if (!echo.id) continue;
+            await tx.execute(sql`
+              INSERT INTO whatsapp_events (instance_id, clinic_id, event_type, wa_message_id, payload, processed)
+              VALUES (${instance.id}, ${instance.clinicId}, 'META_ECHO', ${echo.id},
+                      ${JSON.stringify({ echo, metadata: value.metadata ?? null })}::jsonb, false)
               ON CONFLICT DO NOTHING
             `);
           }

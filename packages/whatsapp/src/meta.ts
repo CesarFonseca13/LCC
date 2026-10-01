@@ -111,6 +111,30 @@ export class MetaCloudClient {
     };
   }
 
+  /** Números da conta do WhatsApp Business (o popup da Meta nem sempre devolve o phone_number_id). */
+  async listPhoneNumbers(): Promise<
+    { id: string; displayPhoneNumber: string | null; verifiedName: string | null; platformType: string | null }[]
+  > {
+    if (!this.config.wabaId) return [];
+    const r = await this.request<{
+      data?: { id: string; display_phone_number?: string; verified_name?: string; platform_type?: string }[];
+    }>("GET", `/${this.config.wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,platform_type`);
+    return (r.data ?? []).map((p) => ({
+      id: p.id,
+      displayPhoneNumber: p.display_phone_number ?? null,
+      verifiedName: p.verified_name ?? null,
+      platformType: p.platform_type ?? null,
+    }));
+  }
+
+  /** Registra o número na Cloud API (só sem coexistência) com o PIN de duas etapas. */
+  async registerPhone(pin: string): Promise<void> {
+    await this.request("POST", `/${this.config.phoneNumberId}/register`, {
+      messaging_product: "whatsapp",
+      pin,
+    });
+  }
+
   /** Assina o app nos webhooks da conta (sem isso, nenhum evento chega). */
   async subscribeApp(): Promise<void> {
     if (!this.config.wabaId) return;
@@ -245,4 +269,31 @@ export class MetaCloudClient {
       components,
     });
   }
+}
+
+/** Embedded Signup: troca o código devolvido pelo popup da Meta por um token
+ *  de usuário do sistema de integração (não expira). O código vale ~30s. */
+export async function exchangeEmbeddedSignupCode(opts: {
+  appId: string;
+  appSecret: string;
+  code: string;
+  graphVersion?: string;
+}): Promise<string> {
+  const v = opts.graphVersion ?? "v23.0";
+  const url =
+    `https://graph.facebook.com/${v}/oauth/access_token?client_id=${encodeURIComponent(opts.appId)}` +
+    `&client_secret=${encodeURIComponent(opts.appSecret)}&code=${encodeURIComponent(opts.code)}`;
+  const res = await fetch(url);
+  const json = (await res.json().catch(() => ({}))) as {
+    access_token?: string;
+    error?: { message?: string; code?: number };
+  };
+  if (!res.ok || !json.access_token) {
+    throw new MetaApiError(
+      `troca do código → ${res.status}: ${json.error?.message ?? "sem token"}`,
+      res.status,
+      json.error?.code ?? null,
+    );
+  }
+  return json.access_token;
 }

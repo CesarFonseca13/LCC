@@ -14,6 +14,7 @@ import { decryptSensitive, encryptSensitive } from "@clinicaos/core/crypto";
 import { normalizePhoneBR } from "@clinicaos/core/phone";
 import {
   evolutionFromEnv,
+  exchangeEmbeddedSignupCode,
   META_TEMPLATE_CATALOG,
   META_TEMPLATE_LANGUAGE,
   MetaApiError,
@@ -21,7 +22,7 @@ import {
   metaStatusToLocal,
   toMetaSpec,
 } from "@clinicaos/whatsapp";
-import { schema } from "@clinicaos/db";
+import { schema, type Tx } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
 import { SPECIALTY_VALUES, WEEKDAYS } from "@/lib/clinic-profile";
 import { formatCEP, formatCNPJ, isValidEmail, normalizeCEP, normalizeCNPJ } from "@/lib/format";
@@ -691,124 +692,273 @@ export const connectMetaWhatsApp = authAction({
       }). No painel da Meta, em WhatsApp → Configuração → Webhooks, assine o campo "messages".`;
     }
 
-    const clash = (
+    return saveMetaInstance(tx, auth.clinicId, client, {
+      existing,
+      phoneNumberId: input.phoneNumberId,
+      wabaId: input.wabaId,
+      accessToken,
+      appSecret: appSecret || null,
+      label: input.label,
+      coexistence: existing?.metaCoexistence ?? false,
+      pin: null,
+      info,
+      warning,
+      key,
+    });
+  },
+});
+
+/** Grava (ou atualiza) o número da API oficial e registra o catálogo de templates
+ *  na conta — compartilhado pelo formulário manual e pelo Embedded Signup. */
+async function saveMetaInstance(
+  tx: Tx,
+  clinicId: string,
+  client: MetaCloudClient,
+  p: {
+    existing: typeof schema.whatsappInstances.$inferSelect | undefined;
+    phoneNumberId: string;
+    wabaId: string;
+    accessToken: string;
+    appSecret: string | null;
+    label: string;
+    coexistence: boolean;
+    pin: string | null;
+    info: { displayPhoneNumber: string | null; verifiedName: string | null };
+    warning?: string;
+    key: string;
+  },
+): Promise<WhatsAppState> {
+  const clash = (
+    await tx
+      .select({ id: schema.whatsappInstances.id })
+      .from(schema.whatsappInstances)
+      .where(
+        and(
+          eq(schema.whatsappInstances.metaPhoneNumberId, p.phoneNumberId),
+          p.existing ? ne(schema.whatsappInstances.id, p.existing.id) : sql`true`,
+        ),
+      )
+      .limit(1)
+  )[0];
+  if (clash) return { ok: false, error: "Este número já está conectado em outro cadastro da clínica." };
+
+  const phoneE164 = p.info.displayPhoneNumber
+    ? `+${p.info.displayPhoneNumber.replace(/\D/g, "")}`
+    : (p.existing?.phoneE164 ?? null);
+  const values = {
+    provider: "meta" as const,
+    metaPhoneNumberId: p.phoneNumberId,
+    metaWabaId: p.wabaId,
+    metaAccessTokenEnc: encryptSensitive(p.accessToken, p.key),
+    metaAppSecretEnc: p.appSecret ? encryptSensitive(p.appSecret, p.key) : null,
+    metaTokenHint: p.accessToken.slice(-4),
+    metaVerifiedName: p.info.verifiedName,
+    metaCoexistence: p.coexistence,
+    metaPinEnc: p.pin ? encryptSensitive(p.pin, p.key) : (p.existing?.metaPinEnc ?? null),
+    phoneE164,
+    status: "connected" as const,
+    qrCode: null,
+    lastSeenAt: new Date(),
+    updatedAt: new Date(),
+  };
+  let instanceId: string;
+  if (p.existing) {
+    await tx
+      .update(schema.whatsappInstances)
+      .set({ ...values, label: p.label || p.existing.label })
+      .where(eq(schema.whatsappInstances.id, p.existing.id));
+    instanceId = p.existing.id;
+  } else {
+    const n =
+      (
+        await tx
+          .select({ n: sql<number>`count(*)::int` })
+          .from(schema.whatsappInstances)
+          .where(eq(schema.whatsappInstances.clinicId, clinicId))
+      )[0]?.n ?? 0;
+    const [created] = await tx
+      .insert(schema.whatsappInstances)
+      .values({
+        clinicId,
+        evolutionInstanceName: `meta-${p.phoneNumberId}`,
+        webhookToken: randomBytes(24).toString("base64url"),
+        isPrimary: n === 0,
+        label: p.label || (n === 0 ? "Principal" : `Número ${n + 1}`),
+        ...values,
+      })
+      .returning({ id: schema.whatsappInstances.id });
+    if (!created) return { ok: false, error: "Não foi possível salvar o número." };
+    instanceId = created.id;
+  }
+
+  // Catálogo de templates: cria as linhas e registra na Meta (aprovação em até 24h)
+  const appUrl = process.env.APP_URL ?? "http://localhost:3000";
+  for (const entry of META_TEMPLATE_CATALOG) {
+    await tx
+      .insert(schema.whatsappTemplates)
+      .values({
+        clinicId,
+        instanceId,
+        purpose: entry.purpose,
+        metaName: entry.name,
+        language: META_TEMPLATE_LANGUAGE,
+        category: entry.category,
+        bodyText: entry.bodyText,
+        paramNames: entry.paramNames,
+        buttonUrlParam: entry.button?.param ?? null,
+      })
+      .onConflictDoNothing();
+  }
+  const remote = await client.listTemplates().catch(() => []);
+  const outcomes = await Promise.all(
+    META_TEMPLATE_CATALOG.map(async (entry) => {
+      const found = remote.find((r) => r.name === entry.name && r.language === META_TEMPLATE_LANGUAGE);
+      if (found) {
+        return { entry, status: metaStatusToLocal(found.status), id: found.id, reason: found.rejectedReason };
+      }
+      try {
+        const created = await client.createTemplate(toMetaSpec(entry, appUrl));
+        return { entry, status: metaStatusToLocal(created.status), id: created.id, reason: null };
+      } catch (err) {
+        return {
+          entry,
+          status: "error" as const,
+          id: null,
+          reason: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+        };
+      }
+    }),
+  );
+  const counts = { approved: 0, pending: 0, rejected: 0, total: outcomes.length };
+  for (const o of outcomes) {
+    await tx
+      .update(schema.whatsappTemplates)
+      .set({ status: o.status, metaTemplateId: o.id, rejectReason: o.reason, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.whatsappTemplates.instanceId, instanceId),
+          eq(schema.whatsappTemplates.purpose, o.entry.purpose),
+        ),
+      );
+    if (o.status === "approved") counts.approved++;
+    else if (o.status === "pending") counts.pending++;
+    else counts.rejected++;
+  }
+
+  revalidatePath("/configuracoes");
+  revalidatePath("/whatsapp");
+  return { ok: true, status: "connected", instanceId, phone: phoneE164, warning: p.warning, templates: counts };
+}
+
+/** Embedded Signup: o popup da Meta devolveu o código e os ids — fecha a conexão
+ *  no servidor (troca por token, assina webhooks, registra o número se preciso). */
+export const finishEmbeddedSignup = authAction({
+  permission: "settings.manage",
+  schema: z.object({
+    code: z.string().trim().min(10).max(2000),
+    wabaId: z.string().trim().regex(/^\d{5,25}$/, "Conta do WhatsApp Business não identificada."),
+    phoneNumberId: z.string().trim().regex(/^\d{5,25}$/).optional(),
+    coexistence: z.boolean(),
+    label: z.string().trim().max(40),
+  }),
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    const key = process.env.SENSITIVE_DATA_KEY;
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!key || !appId || !appSecret) {
+      return { ok: false, error: "A conexão com o Facebook ainda não está configurada no servidor — avise o suporte." };
+    }
+    const graphVersion = process.env.META_GRAPH_VERSION;
+
+    let accessToken: string;
+    try {
+      accessToken = await exchangeEmbeddedSignupCode({ appId, appSecret, code: input.code, graphVersion });
+    } catch (err) {
+      return {
+        ok: false,
+        error: `A Meta não aceitou o código da conexão (${err instanceof Error ? err.message.slice(0, 120) : "erro"}) — feche o popup e tente de novo.`,
+      };
+    }
+
+    // O popup nem sempre devolve o phone_number_id (coexistência): busca na conta
+    let phoneNumberId = input.phoneNumberId ?? "";
+    const probe = new MetaCloudClient({ accessToken, phoneNumberId, wabaId: input.wabaId, graphVersion });
+    if (!phoneNumberId) {
+      try {
+        const numbers = await probe.listPhoneNumbers();
+        phoneNumberId = numbers[0]?.id ?? "";
+      } catch (err) {
+        return { ok: false, error: metaErrorFriendly(err) };
+      }
+      if (!phoneNumberId) {
+        return {
+          ok: false,
+          error: "A conta foi vinculada, mas nenhum número apareceu nela — conclua o cadastro do número no popup e tente de novo.",
+        };
+      }
+    }
+    const client = new MetaCloudClient({ accessToken, phoneNumberId, wabaId: input.wabaId, graphVersion });
+
+    let warning: string | undefined;
+    try {
+      await client.subscribeApp();
+    } catch (err) {
+      warning = `Conectado, mas não consegui assinar os webhooks sozinho (${err instanceof Error ? err.message.slice(0, 120) : "erro"}).`;
+    }
+
+    // Sem coexistência o número precisa ser registrado na API com um PIN de 2 etapas
+    let pin: string | null = null;
+    if (!input.coexistence) {
+      pin = String(Math.floor(100000 + Math.random() * 900000));
+      try {
+        await client.registerPhone(pin);
+      } catch (err) {
+        const meta = err instanceof MetaApiError ? err : null;
+        if (meta && /2388001|already|still/i.test(`${meta.message} ${meta.details ?? ""}`)) {
+          return {
+            ok: false,
+            error:
+              "Este número ainda está preso a um aplicativo do WhatsApp. Exclua a conta no celular (Configurações → Conta → Excluir conta) ou conecte usando a opção com coexistência.",
+          };
+        }
+        if (meta?.code === 133016) {
+          return { ok: false, error: "Muitas tentativas de registro deste número — a Meta pede para aguardar 72 horas." };
+        }
+        return { ok: false, error: `Não consegui registrar o número na API: ${err instanceof Error ? err.message.slice(0, 160) : "erro"}` };
+      }
+    }
+
+    let info: Awaited<ReturnType<MetaCloudClient["getPhoneNumber"]>>;
+    try {
+      info = await client.getPhoneNumber();
+    } catch (err) {
+      return { ok: false, error: metaErrorFriendly(err) };
+    }
+    const existing = (
       await tx
-        .select({ id: schema.whatsappInstances.id })
+        .select()
         .from(schema.whatsappInstances)
         .where(
           and(
-            eq(schema.whatsappInstances.metaPhoneNumberId, input.phoneNumberId),
-            existing ? ne(schema.whatsappInstances.id, existing.id) : sql`true`,
+            eq(schema.whatsappInstances.clinicId, auth.clinicId),
+            eq(schema.whatsappInstances.metaPhoneNumberId, phoneNumberId),
           ),
         )
         .limit(1)
     )[0];
-    if (clash) return { ok: false, error: "Este Phone Number ID já está conectado em outro número da clínica." };
-
-    const phoneE164 = info.displayPhoneNumber
-      ? `+${info.displayPhoneNumber.replace(/\D/g, "")}`
-      : (existing?.phoneE164 ?? null);
-    const values = {
-      provider: "meta" as const,
-      metaPhoneNumberId: input.phoneNumberId,
-      metaWabaId: input.wabaId,
-      metaAccessTokenEnc: encryptSensitive(accessToken, key),
-      metaAppSecretEnc: appSecret ? encryptSensitive(appSecret, key) : null,
-      metaTokenHint: accessToken.slice(-4),
-      metaVerifiedName: info.verifiedName,
-      phoneE164,
-      status: "connected" as const,
-      qrCode: null,
-      lastSeenAt: new Date(),
-      updatedAt: new Date(),
-    };
-    let instanceId: string;
-    if (existing) {
-      await tx
-        .update(schema.whatsappInstances)
-        .set({ ...values, label: input.label || existing.label })
-        .where(eq(schema.whatsappInstances.id, existing.id));
-      instanceId = existing.id;
-    } else {
-      const n =
-        (
-          await tx
-            .select({ n: sql<number>`count(*)::int` })
-            .from(schema.whatsappInstances)
-            .where(eq(schema.whatsappInstances.clinicId, auth.clinicId))
-        )[0]?.n ?? 0;
-      const [created] = await tx
-        .insert(schema.whatsappInstances)
-        .values({
-          clinicId: auth.clinicId,
-          evolutionInstanceName: `meta-${input.phoneNumberId}`,
-          webhookToken: randomBytes(24).toString("base64url"),
-          isPrimary: n === 0,
-          label: input.label || (n === 0 ? "Principal" : `Número ${n + 1}`),
-          ...values,
-        })
-        .returning({ id: schema.whatsappInstances.id });
-      if (!created) return { ok: false, error: "Não foi possível salvar o número." };
-      instanceId = created.id;
-    }
-
-    // Catálogo de templates: cria as linhas e registra na Meta (aprovação em até 24h)
-    const appUrl = process.env.APP_URL ?? "http://localhost:3000";
-    for (const entry of META_TEMPLATE_CATALOG) {
-      await tx
-        .insert(schema.whatsappTemplates)
-        .values({
-          clinicId: auth.clinicId,
-          instanceId,
-          purpose: entry.purpose,
-          metaName: entry.name,
-          language: META_TEMPLATE_LANGUAGE,
-          category: entry.category,
-          bodyText: entry.bodyText,
-          paramNames: entry.paramNames,
-          buttonUrlParam: entry.button?.param ?? null,
-        })
-        .onConflictDoNothing();
-    }
-    const remote = await client.listTemplates().catch(() => []);
-    const outcomes = await Promise.all(
-      META_TEMPLATE_CATALOG.map(async (entry) => {
-        const found = remote.find((r) => r.name === entry.name && r.language === META_TEMPLATE_LANGUAGE);
-        if (found) {
-          return { entry, status: metaStatusToLocal(found.status), id: found.id, reason: found.rejectedReason };
-        }
-        try {
-          const created = await client.createTemplate(toMetaSpec(entry, appUrl));
-          return { entry, status: metaStatusToLocal(created.status), id: created.id, reason: null };
-        } catch (err) {
-          return {
-            entry,
-            status: "error" as const,
-            id: null,
-            reason: (err instanceof Error ? err.message : String(err)).slice(0, 500),
-          };
-        }
-      }),
-    );
-    const counts = { approved: 0, pending: 0, rejected: 0, total: outcomes.length };
-    for (const o of outcomes) {
-      await tx
-        .update(schema.whatsappTemplates)
-        .set({ status: o.status, metaTemplateId: o.id, rejectReason: o.reason, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.whatsappTemplates.instanceId, instanceId),
-            eq(schema.whatsappTemplates.purpose, o.entry.purpose),
-          ),
-        );
-      if (o.status === "approved") counts.approved++;
-      else if (o.status === "pending") counts.pending++;
-      else counts.rejected++;
-    }
-
-    revalidatePath("/configuracoes");
-    revalidatePath("/whatsapp");
-    return { ok: true, status: "connected", instanceId, phone: phoneE164, warning, templates: counts };
+    return saveMetaInstance(tx, auth.clinicId, client, {
+      existing,
+      phoneNumberId,
+      wabaId: input.wabaId,
+      accessToken,
+      appSecret: null,
+      label: input.label,
+      coexistence: input.coexistence,
+      pin,
+      info,
+      warning,
+      key,
+    });
   },
 });
 

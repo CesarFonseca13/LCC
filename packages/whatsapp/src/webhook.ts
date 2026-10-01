@@ -140,6 +140,28 @@ function normalizeMetaEvent(eventType: string, data: unknown): NormalizedEvent {
       timestamp: Number.isFinite(ts) ? ts : null,
     };
   }
+  // Coexistência: mensagem enviada pela clínica no app do celular (eco) —
+  // vira "fromMe" e pausa a IA, como a resposta pelo celular na Evolution
+  if (eventType === "META_ECHO") {
+    const echo = get(data, ["echo"]);
+    const waMessageId = str(get(echo, ["id"]));
+    const to = str(get(echo, ["to"]));
+    if (!waMessageId || !to) return { kind: "ignored" };
+    const type = str(get(echo, ["type"])) ?? "other";
+    const known = ["text", "image", "audio", "video", "document", "sticker", "location"] as const;
+    const body = str(get(echo, ["text", "body"])) ?? str(get(echo, [type, "caption"])) ?? null;
+    const ts = Number(get(echo, ["timestamp"]));
+    return {
+      kind: "message",
+      waMessageId,
+      remoteJid: `${to.replace(/D/g, "")}@s.whatsapp.net`,
+      fromMe: true,
+      messageType: (known as readonly string[]).includes(type) ? (type as NormalizedInbound["messageType"]) : "other",
+      body,
+      pushName: null,
+      timestamp: Number.isFinite(ts) ? ts : null,
+    };
+  }
   if (eventType.startsWith("META_STATUS")) {
     const status = get(data, ["status"]);
     const waMessageId = str(get(status, ["id"]));
