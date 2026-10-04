@@ -192,6 +192,11 @@ export default async function RootPage() {
           <span>
             Vesalius<span className="text-emerald-300/70">X</span> — gestão e atendimento para clínicas · powered by Billions Technology
           </span>
+          <span className="flex gap-3">
+            <Link href="/termos-de-uso" className="hover:text-teal-100">Termos de uso</Link>
+            <Link href="/privacidade" className="hover:text-teal-100">Privacidade</Link>
+            <Link href="/exclusao-de-dados" className="hover:text-teal-100">Exclusão de dados</Link>
+          </span>
         </div>
       </footer>
     </main>

@@ -99,6 +99,9 @@ export default async function LoginPage() {
             powered by Billions Technology ·{" "}
             <Link href="/termos-de-uso" className="hover:text-stone-500 hover:underline">
               Termos de uso
+            </Link>{" · "}
+            <Link href="/privacidade" className="hover:text-stone-500 hover:underline">
+              Privacidade
             </Link>
           </p>
         </div>
