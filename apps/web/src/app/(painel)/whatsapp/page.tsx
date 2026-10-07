@@ -119,6 +119,7 @@ export default async function WhatsAppPage({
         author: string;
         body: string | null;
         status: string;
+        error: string | null;
         time: string;
         automationId: string | null;
       }[] = [];
@@ -148,6 +149,7 @@ export default async function WhatsAppPage({
           author: m.author,
           body: m.body,
           status: m.status,
+          error: m.error ?? null,
           time: utcToZoned(new Date(m.createdAt), tz).timeHHMM,
           automationId: m.automationId,
         }));
@@ -400,6 +402,11 @@ export default async function WhatsAppPage({
                                   : " ⏳"
                           : ""}
                       </p>
+                      {mine && m.status === "failed" ? (
+                        <p className="mt-1 rounded bg-white/90 px-2 py-1 text-left text-[11px] text-red-700">
+                          Não foi entregue: {m.error ?? "motivo não informado pelo WhatsApp"}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                 );
