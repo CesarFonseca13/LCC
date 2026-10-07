@@ -181,10 +181,22 @@ export interface ChatRequest {
   maxTokens: number;
 }
 
+/**
+ * Tokens de uma chamada. inputTokens = entrada cobrada a preço cheio;
+ * cacheWriteTokens/cacheReadTokens = gravação/leitura de cache de prompt,
+ * cobradas com preço diferente (Anthropic 1,25×/0,1×; OpenAI leitura 0,5×).
+ */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens?: number;
+  cacheReadTokens?: number;
+}
+
 export interface ChatResponse {
   text: string;
   toolCalls: ToolCall[];
-  usage: { inputTokens: number; outputTokens: number };
+  usage: TokenUsage;
 }
 
 export interface LlmClient {
@@ -273,6 +285,8 @@ class AnthropicClient implements LlmClient {
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
+        cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
+        cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
       },
     };
   }
@@ -289,7 +303,11 @@ interface OpenAiResponse {
   choices?: {
     message?: { content?: string | null; tool_calls?: OpenAiToolCall[] };
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
   error?: { message?: string };
 }
 
@@ -412,8 +430,10 @@ class OpenAiCompatClient implements LlmClient {
       text: (message?.content ?? "").trim(),
       toolCalls,
       usage: {
-        inputTokens: data.usage?.prompt_tokens ?? 0,
+        // prompt_tokens inclui os lidos do cache; separa para cobrar o cache mais barato
+        inputTokens: Math.max(0, (data.usage?.prompt_tokens ?? 0) - (data.usage?.prompt_tokens_details?.cached_tokens ?? 0)),
         outputTokens: data.usage?.completion_tokens ?? 0,
+        cacheReadTokens: data.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       },
     };
   }

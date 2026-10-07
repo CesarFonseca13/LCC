@@ -68,16 +68,29 @@ export function llmPriceFor(model: string): LlmPrice {
   return best ?? DEFAULT_LLM_PRICE;
 }
 
-/** Custo em reais de uma chamada de modelo. */
-export function llmCostBrl(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  env: NodeJS.ProcessEnv = process.env,
-): number {
+export interface LlmUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Gravação de cache de prompt (Anthropic cobra 1,25× a entrada). */
+  cacheWriteTokens?: number;
+  /** Leitura de cache de prompt (Anthropic 0,1× e OpenAI 0,5× a entrada). */
+  cacheReadTokens?: number;
+}
+
+/** Custo em reais de uma chamada de modelo, incluindo tokens de cache. */
+export function llmCostBrl(model: string, usage: LlmUsage, env: NodeJS.ProcessEnv = process.env): number {
   const p = llmPriceFor(model);
-  const usd = (inputTokens / 1_000_000) * p.inputPerM + (outputTokens / 1_000_000) * p.outputPerM;
-  return round6(usd * usdBrlRate(env));
+  const anthropic = model.trim().toLowerCase().startsWith("claude");
+  const cacheWriteFactor = anthropic ? 1.25 : 1;
+  const cacheReadFactor = anthropic ? 0.1 : 0.5;
+  const inputUsd =
+    ((usage.inputTokens +
+      (usage.cacheWriteTokens ?? 0) * cacheWriteFactor +
+      (usage.cacheReadTokens ?? 0) * cacheReadFactor) /
+      1_000_000) *
+    p.inputPerM;
+  const outputUsd = (usage.outputTokens / 1_000_000) * p.outputPerM;
+  return round6((inputUsd + outputUsd) * usdBrlRate(env));
 }
 
 // ── Meta (WhatsApp Business Platform) — reais por modelo entregue ────
@@ -110,8 +123,8 @@ export function metaTemplateCostBrl(
 
 // ── Configuração da clínica (clinics.settings.spend) ─────────────────
 
-/** Limite padrão quando a clínica nunca mexeu: cobre meses normais sem susto. */
-export const DEFAULT_MONTHLY_LIMIT_BRL = 300;
+/** Limite padrão quando a clínica nunca mexeu — baixo de propósito: quem precisa de mais, sobe. */
+export const DEFAULT_MONTHLY_LIMIT_BRL = 50;
 export const MAX_MONTHLY_LIMIT_BRL = 100_000;
 
 export interface SpendSettings {

@@ -6,7 +6,7 @@ import {
   type AgentPersona,
   type AgentToolExecutors,
 } from "@clinicaos/ai/agent";
-import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
+import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { eligibleProfessionalIds, findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 import { getSpendStatus, notifySpendThresholds, recordAiUsage } from "./spend";
@@ -980,8 +980,8 @@ async function runTurn(
     clinicId: clinic.id,
     purpose: "agent",
     model: aiConfig.agentModel,
-    inputTokens: reply.usage.inputTokens,
-    outputTokens: reply.usage.outputTokens,
+    usage: reply.usage,
+    ownKey: parseClinicAiProvider(clinic.settings).mode === "custom",
   });
   await notifySpendThresholds(clinic, logger).catch((err) =>
     logger.warn({ err }, "aviso de gastos falhou"),

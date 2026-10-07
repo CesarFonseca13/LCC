@@ -17,8 +17,24 @@ describe("preços de IA", () => {
   });
   it("converte para reais com o câmbio informado", () => {
     // 1M in + 1M out no gpt-4o-mini = US$ 0,75 → R$ 3,75 a 5,00
-    expect(llmCostBrl("gpt-4o-mini", 1_000_000, 1_000_000, { USD_BRL_RATE: "5" })).toBe(3.75);
-    expect(llmCostBrl("gpt-4o-mini", 0, 0)).toBe(0);
+    expect(
+      llmCostBrl("gpt-4o-mini", { inputTokens: 1_000_000, outputTokens: 1_000_000 }, { USD_BRL_RATE: "5" }),
+    ).toBe(3.75);
+    expect(llmCostBrl("gpt-4o-mini", { inputTokens: 0, outputTokens: 0 })).toBe(0);
+  });
+  it("cobra tokens de cache com o fator do provedor", () => {
+    const env = { USD_BRL_RATE: "1" };
+    // Anthropic: 1M gravação = 1,25 × US$ 3 ; 1M leitura = 0,1 × US$ 3
+    expect(
+      llmCostBrl("claude-sonnet-4-5", { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 1_000_000 }, env),
+    ).toBe(3.75);
+    expect(
+      llmCostBrl("claude-sonnet-4-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000 }, env),
+    ).toBe(0.3);
+    // OpenAI: leitura de cache a 50% da entrada (gpt-4o-mini US$ 0,15/1M)
+    expect(llmCostBrl("gpt-4o-mini", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000 }, env)).toBe(
+      0.075,
+    );
   });
 });
 

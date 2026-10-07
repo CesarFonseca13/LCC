@@ -133,6 +133,7 @@ export default async function ConfiguracoesPage() {
         history: spendRows.filter((r) => r.month !== currentMonth),
         monthlyLimitBrl: spendSettings.monthlyLimitBrl,
         allowOverage: spendSettings.allowOverage,
+        ownAiKey: aiProvider.mode === "custom",
         usdBrlRate: usdBrlRate(process.env),
         metaPrices: {
           utility: metaTemplateCostBrl("utility"),

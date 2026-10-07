@@ -1,4 +1,4 @@
-import { createLlmClient, type AiConfig } from "./provider";
+import { createLlmClient, type AiConfig, type TokenUsage } from "./provider";
 import { REPLY_INTENTS, type ReplyIntent } from "./index";
 
 /**
@@ -81,7 +81,7 @@ export async function classifyByLlm(
   text: string,
   context: ClassifyContext,
   config: AiConfig,
-  onUsage?: (usage: { model: string; inputTokens: number; outputTokens: number }) => void,
+  onUsage?: (usage: { model: string } & TokenUsage) => void,
 ): Promise<ReplyIntent> {
   const client = createLlmClient(config);
   const response = await client.chat({
@@ -128,7 +128,7 @@ export async function classifyReply(
   text: string,
   context: ClassifyContext,
   config: AiConfig | null | undefined,
-  onUsage?: (usage: { model: string; inputTokens: number; outputTokens: number }) => void,
+  onUsage?: (usage: { model: string } & TokenUsage) => void,
 ): Promise<{ intent: ReplyIntent; via: "keywords" | "llm" | "fallback" }> {
   const byKeywords = classifyByKeywords(text);
   if (byKeywords) return { intent: byKeywords, via: "keywords" };

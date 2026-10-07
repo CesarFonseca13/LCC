@@ -21,6 +21,8 @@ export interface SpendView {
   history: SpendMonthRow[];
   monthlyLimitBrl: number;
   allowOverage: boolean;
+  /** Clínica com chave própria de IA: paga direto ao provedor, não entra no limite. */
+  ownAiKey: boolean;
   usdBrlRate: number;
   metaPrices: { utility: number; marketing: number; authentication: number };
 }
@@ -52,7 +54,7 @@ export function SpendCard({ view }: { view: SpendView }) {
     setSaved(false);
     const n = Number(limit.replace(/\./g, "").replace(",", "."));
     if (!Number.isFinite(n)) {
-      setError("Informe o limite em reais, ex.: 300");
+      setError("Informe o limite em reais, ex.: 50");
       return;
     }
     startTransition(async () => {
@@ -113,6 +115,12 @@ export function SpendCard({ view }: { view: SpendView }) {
         </div>
       </div>
 
+      {view.ownAiKey ? (
+        <p className="mt-3 rounded-lg border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
+          Esta clínica usa a própria chave de IA: o custo da assistente é pago direto ao provedor e aparece
+          aqui como R$ 0,00. O limite vale para o que a plataforma paga (modelos da Meta).
+        </p>
+      ) : null}
       {blocked ? (
         <p className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
           A assistente e os modelos pagos da Meta estão pausados até o próximo mês. Para voltar agora,
@@ -131,7 +139,7 @@ export function SpendCard({ view }: { view: SpendView }) {
               inputMode="decimal"
               value={limit}
               onChange={(e) => setLimit(e.target.value)}
-              placeholder="300"
+              placeholder="50"
             />
             <p className="mt-1 text-[11px] text-stone-400">
               Ao chegar em 80% e em 100% a clínica recebe um aviso no painel.

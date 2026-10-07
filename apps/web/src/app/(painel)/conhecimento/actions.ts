@@ -3,7 +3,8 @@
 import { and, eq, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { createLlmClient, resolveClinicAiConfig } from "@clinicaos/ai/provider";
+import { createLlmClient, parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
+import { recordAiUsageTx } from "@/lib/ai-usage";
 import { schema, type Tx } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
 
@@ -206,6 +207,13 @@ async function checagemSemantica(
         },
       ],
     });
+    await recordAiUsageTx(tx, {
+      clinicId,
+      purpose: "kb_check",
+      model: config.classifierModel,
+      usage: res.usage,
+      ownKey: parseClinicAiProvider(clinic?.settings).mode === "custom",
+    }).catch(() => {});
     const raw = res.text ?? "";
     const jsonStart = raw.indexOf("{");
     const jsonEnd = raw.lastIndexOf("}");

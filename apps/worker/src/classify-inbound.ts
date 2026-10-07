@@ -1,7 +1,7 @@
 import { and, asc, eq, gt, inArray } from "drizzle-orm";
 import type { Logger } from "pino";
 import { classifyReply } from "@clinicaos/ai/classify";
-import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
+import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
@@ -90,10 +90,14 @@ export async function classifyInbound(
     text,
     { procedureName, appointmentWhen: when },
     spendBlocked ? null : resolveClinicAiConfig(clinic?.settings, process.env),
-    (usage) => {
-      void recordAiUsage({ clinicId, purpose: "classifier", ...usage }).catch((err) =>
-        logger.warn({ err }, "registro de uso do classificador falhou"),
-      );
+    ({ model, ...usage }) => {
+      void recordAiUsage({
+        clinicId,
+        purpose: "classifier",
+        model,
+        usage,
+        ownKey: parseClinicAiProvider(clinic?.settings).mode === "custom",
+      }).catch((err) => logger.warn({ err }, "registro de uso do classificador falhou"));
     },
   );
   logger.info({ conversationId, intent, via }, "resposta classificada");

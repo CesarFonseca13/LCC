@@ -11,6 +11,7 @@
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import {
+  type LlmUsage,
   llmCostBrl,
   metaTemplateCategory,
   metaTemplateCostBrl,
@@ -62,23 +63,29 @@ export async function getSpendStatus(clinic: {
   return { ...spendStatus(spend.totalBrl, settings), month: spend.month };
 }
 
-/** Grava o uso de IA com o custo estimado e devolve o custo. */
+/**
+ * Grava o uso de IA com o custo estimado e devolve o custo.
+ * ownKey = a clínica usa a própria chave do provedor: os tokens ficam
+ * registrados, mas o custo para a plataforma é zero (ela paga direto).
+ */
 export async function recordAiUsage(input: {
   clinicId: string;
   purpose: string;
   model: string;
-  inputTokens: number;
-  outputTokens: number;
+  usage: LlmUsage;
+  ownKey: boolean;
 }): Promise<number> {
-  const cost = llmCostBrl(input.model, input.inputTokens, input.outputTokens);
+  const cost = input.ownKey ? 0 : llmCostBrl(input.model, input.usage);
   await unsafeGlobalDb()
     .insert(schema.aiUsage)
     .values({
       clinicId: input.clinicId,
       purpose: input.purpose,
       model: input.model,
-      inputTokens: input.inputTokens,
-      outputTokens: input.outputTokens,
+      // entrada total (inclui cache) — o custo já pondera cada tipo
+      inputTokens:
+        input.usage.inputTokens + (input.usage.cacheWriteTokens ?? 0) + (input.usage.cacheReadTokens ?? 0),
+      outputTokens: input.usage.outputTokens,
       costBrl: cost.toFixed(6),
     });
   return cost;

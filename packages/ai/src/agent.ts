@@ -64,7 +64,13 @@ export interface AgentReply {
   internalNote: string | null;
   confidence: "alta" | "media" | "baixa";
   escalated: boolean;
-  usage: { inputTokens: number; outputTokens: number; calls: number };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheWriteTokens: number;
+    cacheReadTokens: number;
+    calls: number;
+  };
   /** Ferramentas chamadas por iteração (diagnóstico de loops). */
   toolTrace: string[];
 }
@@ -386,7 +392,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
   }
 
   let escalated = false;
-  const usage = { inputTokens: 0, outputTokens: 0, calls: 0 };
+  const usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, calls: 0 };
 
   // Garantia MECÂNICA de boas-vindas: modelo econômico esquece a regra 10
   // de vez em quando — na primeira resposta da conversa, se o 1º balão não
@@ -464,6 +470,8 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     });
     usage.inputTokens += response.usage.inputTokens;
     usage.outputTokens += response.usage.outputTokens;
+    usage.cacheWriteTokens += response.usage.cacheWriteTokens ?? 0;
+    usage.cacheReadTokens += response.usage.cacheReadTokens ?? 0;
     usage.calls += 1;
     toolTrace.push(response.toolCalls.map((c) => c.name).join("+") || "(texto)");
 
