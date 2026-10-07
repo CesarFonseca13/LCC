@@ -54,6 +54,10 @@ describe("configuração e status", () => {
     expect(s.allowOverage).toBe(false);
     expect(s.alerts).toBeNull();
   });
+  it("usa a franquia do plano quando não há limite salvo", () => {
+    expect(parseSpendSettings({ plan: "profissional" }).monthlyLimitBrl).toBe(80);
+    expect(parseSpendSettings({ plan: "clinica", spend: { monthlyLimitBrl: 500 } }).monthlyLimitBrl).toBe(500);
+  });
   it("bloqueia só quando passou e não liberou excedente", () => {
     const base = parseSpendSettings({ spend: { monthlyLimitBrl: 100, allowOverage: false } });
     expect(spendStatus(99.99, base).blocked).toBe(false);

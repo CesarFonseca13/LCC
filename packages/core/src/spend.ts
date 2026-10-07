@@ -9,6 +9,8 @@
  * ambiente sem redeploy de código.
  */
 
+import { parseClinicPlan } from "./plans";
+
 // ── Câmbio ───────────────────────────────────────────────────────────
 
 const DEFAULT_USD_BRL = 5.4;
@@ -141,10 +143,13 @@ export function parseSpendSettings(settings: unknown): SpendSettings {
     | Record<string, unknown>
     | undefined;
   const limit = Number(spend?.monthlyLimitBrl);
+  // Sem limite salvo: vale a franquia do plano da clínica; sem plano, o padrão da plataforma
+  const planAllowance = parseClinicPlan(settings)?.apiAllowanceBrl;
+  const fallback = planAllowance ?? DEFAULT_MONTHLY_LIMIT_BRL;
   const alerts = spend?.alerts as Record<string, unknown> | undefined;
   return {
     monthlyLimitBrl:
-      Number.isFinite(limit) && limit > 0 ? Math.min(limit, MAX_MONTHLY_LIMIT_BRL) : DEFAULT_MONTHLY_LIMIT_BRL,
+      Number.isFinite(limit) && limit > 0 ? Math.min(limit, MAX_MONTHLY_LIMIT_BRL) : fallback,
     allowOverage: spend?.allowOverage === true,
     alerts:
       alerts && typeof alerts.month === "string"

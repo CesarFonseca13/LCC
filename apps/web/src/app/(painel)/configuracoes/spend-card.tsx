@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { COMMERCIAL_RULES } from "@clinicaos/core/plans";
 import { formatBrl } from "@clinicaos/core/spend";
 import { Button, FieldError, Input, Label } from "@/components/ui";
 import { saveSpendSettings } from "./actions";
@@ -23,6 +24,8 @@ export interface SpendView {
   allowOverage: boolean;
   /** Clínica com chave própria de IA: paga direto ao provedor, não entra no limite. */
   ownAiKey: boolean;
+  /** Plano contratado (null = sem plano definido ainda). */
+  plan: { name: string; apiAllowanceBrl: number } | null;
   usdBrlRate: number;
   metaPrices: { utility: number; marketing: number; authentication: number };
 }
@@ -77,6 +80,12 @@ export function SpendCard({ view }: { view: SpendView }) {
             O que a assistente (modelos de IA) e os modelos de mensagem da Meta custaram neste mês.
             Mensagens pela conexão por QR code e respostas dentro da janela de 24h não custam nada.
           </p>
+          {view.plan ? (
+            <p className="mt-1 text-xs text-stone-500">
+              Plano <strong className="text-stone-700">{view.plan.name}</strong>: franquia de{" "}
+              {formatBrl(view.plan.apiAllowanceBrl)} por mês já incluída na mensalidade.
+            </p>
+          ) : null}
         </div>
         {blocked ? (
           <span className="shrink-0 rounded-full bg-red-100 px-2.5 py-1 text-[11px] font-medium text-red-700">
@@ -106,7 +115,9 @@ export function SpendCard({ view }: { view: SpendView }) {
           {overage > 0 ? (
             <span className={view.allowOverage ? "text-amber-700" : "text-red-700"}>
               Excedente: {formatBrl(overage)}
-              {view.allowOverage ? " · entra na próxima mensalidade" : ""}
+              {view.allowOverage
+                ? ` · na próxima mensalidade: ${formatBrl(overage * (1 + COMMERCIAL_RULES.apiOverageMarkup))} (com ${Math.round(COMMERCIAL_RULES.apiOverageMarkup * 100)}%)`
+                : ""}
             </span>
           ) : null}
         </div>
@@ -166,7 +177,8 @@ export function SpendCard({ view }: { view: SpendView }) {
                 {allowOverage ? (
                   <>
                     <strong className="text-stone-800">Permitir ultrapassar.</strong> Tudo continua funcionando e o
-                    excedente é cobrado na próxima mensalidade da plataforma.
+                    excedente é cobrado na próxima mensalidade com acréscimo de{" "}
+                    {Math.round(COMMERCIAL_RULES.apiOverageMarkup * 100)}%.
                   </>
                 ) : (
                   <>

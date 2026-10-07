@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { parseClinicAiProvider, resolveAiConfig } from "@clinicaos/ai/provider";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
+import { parseClinicPlan } from "@clinicaos/core/plans";
 import { metaTemplateCostBrl, parseSpendSettings, usdBrlRate } from "@clinicaos/core/spend";
 import { todayISO } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
@@ -134,6 +135,10 @@ export default async function ConfiguracoesPage() {
         monthlyLimitBrl: spendSettings.monthlyLimitBrl,
         allowOverage: spendSettings.allowOverage,
         ownAiKey: aiProvider.mode === "custom",
+        plan: (() => {
+          const plan = parseClinicPlan(clinic?.settings);
+          return plan ? { name: plan.name, apiAllowanceBrl: plan.apiAllowanceBrl } : null;
+        })(),
         usdBrlRate: usdBrlRate(process.env),
         metaPrices: {
           utility: metaTemplateCostBrl("utility"),

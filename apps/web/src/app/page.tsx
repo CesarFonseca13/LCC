@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getAuth } from "@/lib/session";
+import { COMMERCIAL_RULES, PLANS, SETUP_FEE } from "@clinicaos/core/plans";
+import { formatBrl } from "@clinicaos/core/spend";
 import { LandingFx } from "./landing-fx";
 
 export const metadata: Metadata = {
@@ -162,6 +164,101 @@ export default async function RootPage() {
                 <p className="mt-2 text-sm leading-relaxed text-stone-500">{p.texto}</p>
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Planos ───────────────────────────────────────────────── */}
+      <section id="planos" className="bg-stone-50 py-24 text-stone-800">
+        <div className="mx-auto max-w-6xl px-6">
+          <p className="text-center text-xs font-semibold uppercase tracking-widest text-teal-600">
+            Planos
+          </p>
+          <h2 className="mx-auto mt-3 max-w-2xl text-center text-3xl font-semibold tracking-tight text-stone-900">
+            Uma falta evitada por mês já paga o plano
+          </h2>
+          <p className="mx-auto mt-3 max-w-2xl text-center text-sm text-stone-500">
+            Sem fidelidade no mensal. Desconto para quem fecha o semestre ou o ano.
+          </p>
+          <div className="mt-14 grid gap-6 lg:grid-cols-3">
+            {PLANS.map((plan) => (
+              <div
+                key={plan.id}
+                className={`relative flex flex-col rounded-2xl border bg-white p-7 ${
+                  plan.highlight ? "border-teal-500 shadow-xl shadow-teal-900/10" : "border-stone-200"
+                }`}
+              >
+                {plan.highlight ? (
+                  <span className="absolute -top-3 left-6 rounded-full bg-teal-600 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-white">
+                    Mais escolhido
+                  </span>
+                ) : null}
+                <h3 className="text-lg font-semibold text-stone-900">{plan.name}</h3>
+                <p className="mt-1 text-sm text-stone-500">{plan.tagline}</p>
+                <p className="mt-5">
+                  <span className="text-4xl font-semibold tracking-tight text-stone-900">
+                    {formatBrl(plan.monthlyBrl).replace(",00", "")}
+                  </span>
+                  <span className="text-sm text-stone-500"> /mês</span>
+                </p>
+                <p className="mt-1 text-xs text-stone-400">
+                  {plan.whatsappNumbers === null ? "Números ilimitados" : `${plan.whatsappNumbers} número${plan.whatsappNumbers > 1 ? "s" : ""} de WhatsApp`}
+                  {" · "}
+                  {plan.professionals === null ? "profissionais ilimitados" : `até ${plan.professionals} profissionais`}
+                </p>
+                <ul className="mt-6 space-y-2 text-sm text-stone-600">
+                  {plan.features.map((f) => (
+                    <li key={f} className="flex gap-2">
+                      <span className="text-teal-600">✓</span>
+                      <span>{f}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-6 text-xs text-stone-400">
+                  Inclui {formatBrl(plan.apiAllowanceBrl)}/mês de uso de IA e mensagens oficiais da Meta.
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-10 grid gap-6 md:grid-cols-2">
+            <div className="rounded-2xl border border-stone-200 bg-white p-6">
+              <h3 className="text-base font-semibold text-stone-900">
+                Implantação{" "}
+                <span className="ml-1 text-sm font-normal text-stone-400 line-through">{formatBrl(SETUP_FEE.listBrl).replace(",00", "")}</span>{" "}
+                <span className="text-teal-700">{formatBrl(SETUP_FEE.brl).replace(",00", "")}</span>
+                <span className="text-sm font-normal text-stone-500"> · em até {SETUP_FEE.installments}×</span>
+              </h3>
+              <ul className="mt-3 space-y-1.5 text-sm text-stone-600">
+                {SETUP_FEE.includes.map((i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="text-teal-600">✓</span>
+                    <span>{i}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="rounded-2xl border border-stone-200 bg-white p-6">
+              <h3 className="text-base font-semibold text-stone-900">Como pagar menos</h3>
+              <ul className="mt-3 space-y-2 text-sm text-stone-600">
+                <li>
+                  <strong className="text-stone-800">Anual à vista:</strong> {Math.round(COMMERCIAL_RULES.annualUpfrontDiscount * 100)}% de desconto e implantação grátis.
+                </li>
+                <li>
+                  <strong className="text-stone-800">Semestral à vista:</strong> {Math.round(COMMERCIAL_RULES.semiannualUpfrontDiscount * 100)}% de desconto.
+                </li>
+                <li>
+                  <strong className="text-stone-800">Anual pagando por mês:</strong> {Math.round(COMMERCIAL_RULES.annualMonthlyDiscount * 100)}% de desconto, e os{" "}
+                  {COMMERCIAL_RULES.rampMonths} primeiros meses do Profissional saem pelo preço do Essencial ({formatBrl(COMMERCIAL_RULES.rampPriceBrl).replace(",00", "")}).
+                </li>
+                <li>
+                  <strong className="text-stone-800">Mensal sem fidelidade:</strong> garantia de {COMMERCIAL_RULES.guaranteeDays} dias. Não gostou, devolvemos.
+                </li>
+              </ul>
+              <p className="mt-4 text-xs text-stone-400">
+                Uso de IA e mensagens da Meta acima da franquia: cobrado na mensalidade seguinte com {Math.round(COMMERCIAL_RULES.apiOverageMarkup * 100)}%, só se a clínica liberar. Reajuste anual pelo {COMMERCIAL_RULES.indexation}.
+              </p>
+            </div>
           </div>
         </div>
       </section>

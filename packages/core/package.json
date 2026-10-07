@@ -15,7 +15,8 @@
     "./timezone": "./src/timezone.ts",
     "./documents": "./src/documents.ts",
     "./terms-of-use": "./src/terms-of-use.ts",
-    "./spend": "./src/spend.ts"
+    "./spend": "./src/spend.ts",
+    "./plans": "./src/plans.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
