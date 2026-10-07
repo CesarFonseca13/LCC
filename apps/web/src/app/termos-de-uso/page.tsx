@@ -18,7 +18,7 @@ export default function TermosDeUsoPage() {
           <TermsBody />
         </div>
         <p className="mt-6 text-center text-[11px] text-stone-400">
-          VesaliusX · powered by Billions Technology
+          VesaliusX · powered by Billions Technology · 53.133.495 CESAR EUSTAQUIO DA FONSECA FILHO - ME · CNPJ 53.133.495/0001-93
         </p>
       </div>
     </main>

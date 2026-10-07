@@ -23,7 +23,7 @@ export default function PrivacidadePage() {
           <section className="rounded-lg border border-stone-200 bg-stone-50 p-4 text-xs text-stone-600">
             <p className="font-semibold text-stone-700">English summary</p>
             <p className="mt-1">
-              VesaliusX is a clinic management platform operated by Billions Technology (Brazil).
+              VesaliusX is a clinic management platform operated by Billions Technology, trade name of 53.133.495 CESAR EUSTAQUIO DA FONSECA FILHO - ME, Brazilian company registration (CNPJ) 53.133.495/0001-93.
               Clinics connect their WhatsApp Business number through Meta&apos;s official WhatsApp
               Business Platform. We only use the WhatsApp Business Account ID, phone number ID and
               access token obtained during onboarding to send and receive messages on the
@@ -40,7 +40,8 @@ export default function PrivacidadePage() {
           <Section title="1. Quem somos">
             <p>
               A VesaliusX é uma plataforma de gestão e atendimento para clínicas, desenvolvida e
-              operada pela Billions Technology (“Billions”, “nós”). Esta Política explica quais dados
+              operada pela Billions Technology, nome fantasia de 53.133.495 CESAR EUSTAQUIO DA FONSECA
+              FILHO - ME, CNPJ 53.133.495/0001-93 (“Billions”, “nós”). Esta Política explica quais dados
               pessoais tratamos, para quê, com quem compartilhamos e como você pode exercer seus
               direitos. Ela complementa os{" "}
               <Link href="/termos-de-uso" className="text-teal-700 underline">
@@ -196,7 +197,7 @@ export default function PrivacidadePage() {
         </div>
 
         <p className="mt-6 text-center text-[11px] text-stone-400">
-          VesaliusX · powered by Billions Technology
+          VesaliusX · powered by Billions Technology · 53.133.495 CESAR EUSTAQUIO DA FONSECA FILHO - ME · CNPJ 53.133.495/0001-93
         </p>
       </div>
     </main>

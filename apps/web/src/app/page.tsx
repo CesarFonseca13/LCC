@@ -190,7 +190,7 @@ export default async function RootPage() {
       <footer className="border-t border-white/10 py-8">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-6 text-xs text-teal-200/50">
           <span>
-            Vesalius<span className="text-emerald-300/70">X</span> — gestão e atendimento para clínicas · powered by Billions Technology
+            Vesalius<span className="text-emerald-300/70">X</span> — gestão e atendimento para clínicas · powered by Billions Technology · 53.133.495 CESAR EUSTAQUIO DA FONSECA FILHO - ME · CNPJ 53.133.495/0001-93
           </span>
           <span className="flex gap-3">
             <Link href="/termos-de-uso" className="hover:text-teal-100">Termos de uso</Link>

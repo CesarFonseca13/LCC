@@ -17,7 +17,7 @@ export const TERMS_SECTIONS: TermsSection[] = [
   {
     title: "1. Quem somos e o que você está aceitando",
     paragraphs: [
-      "A VesaliusX é uma plataforma de gestão e atendimento para clínicas, desenvolvida e operada pela Billions Technology (“Billions”, “nós”). Estes Termos de Uso regulam o acesso e o uso da plataforma pela clínica contratante (“Clínica”) e por cada pessoa que acessa a conta da Clínica (“Usuário”).",
+      "A VesaliusX é uma plataforma de gestão e atendimento para clínicas, desenvolvida e operada pela Billions Technology, nome fantasia de 53.133.495 CESAR EUSTAQUIO DA FONSECA FILHO - ME, CNPJ 53.133.495/0001-93 (“Billions”, “nós”). Estes Termos de Uso regulam o acesso e o uso da plataforma pela clínica contratante (“Clínica”) e por cada pessoa que acessa a conta da Clínica (“Usuário”).",
       "Ao acessar a plataforma pela primeira vez, o Usuário declara que leu, entendeu e concorda com estes Termos, em seu nome e, quando for a administradora da conta, em nome da Clínica. Se não concordar, não utilize a plataforma.",
     ],
   },
