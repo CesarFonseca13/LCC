@@ -2,6 +2,8 @@ import { eq, sql } from "drizzle-orm";
 import { parseClinicAiProvider, resolveAiConfig } from "@clinicaos/ai/provider";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
+import { metaTemplateCostBrl, parseSpendSettings, usdBrlRate } from "@clinicaos/core/spend";
+import { todayISO } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/ui";
@@ -11,6 +13,7 @@ import { AiCard } from "./ai-card";
 import { AiProviderCard } from "./ai-provider-card";
 import { BookingCard } from "./booking-card";
 import { ClinicCard, type ClinicProfileView } from "./clinic-card";
+import { SpendCard, type SpendMonthRow, type SpendView } from "./spend-card";
 import { WhatsAppCard } from "./whatsapp-card";
 
 export const metadata = { title: "Configurações" };
@@ -30,7 +33,7 @@ export default async function ConfiguracoesPage() {
     );
   }
 
-  const { instances, templateRows, aiProvider, aiSettings, booking, clinicProfile } = await withTenant(
+  const { instances, templateRows, aiProvider, aiSettings, booking, clinicProfile, spendView } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const instances = await tx
@@ -92,11 +95,57 @@ export default async function ConfiguracoesPage() {
           typeof clinicSettings.specialtyOther === "string" ? clinicSettings.specialtyOther : "",
         businessHours: Object.keys(savedHours).length > 0 ? savedHours : DEFAULT_BUSINESS_HOURS,
       };
+      // Gastos com API: mês atual + 6 anteriores, no fuso da clínica
+      const tz = clinic?.timezone ?? "America/Sao_Paulo";
+      const currentMonth = todayISO(tz).slice(0, 7);
+      const spendRaw = await tx.execute(sql`
+        SELECT month,
+               sum(ai)::text AS ai_brl, sum(meta)::text AS meta_brl,
+               sum(ai_calls)::int AS ai_calls, sum(meta_msgs)::int AS meta_msgs
+        FROM (
+          SELECT to_char(created_at AT TIME ZONE ${tz}, 'YYYY-MM') AS month,
+                 cost_brl AS ai, 0 AS meta, 1 AS ai_calls, 0 AS meta_msgs
+            FROM ai_usage
+           WHERE clinic_id = ${auth.clinicId!} AND created_at >= now() - interval '7 months'
+          UNION ALL
+          SELECT to_char(created_at AT TIME ZONE ${tz}, 'YYYY-MM'),
+                 0, cost_brl, 0, 1
+            FROM whatsapp_usage
+           WHERE clinic_id = ${auth.clinicId!} AND created_at >= now() - interval '7 months'
+        ) u
+        GROUP BY month ORDER BY month DESC LIMIT 7
+      `);
+      const spendRows = (spendRaw.rows as unknown as {
+        month: string; ai_brl: string; meta_brl: string; ai_calls: number; meta_msgs: number;
+      }[]).map<SpendMonthRow>((r) => ({
+        month: r.month,
+        aiBrl: Number(r.ai_brl),
+        metaBrl: Number(r.meta_brl),
+        aiCalls: r.ai_calls,
+        metaMessages: r.meta_msgs,
+      }));
+      const spendSettings = parseSpendSettings(clinic?.settings);
+      const spendView: SpendView = {
+        currentMonth,
+        current: spendRows.find((r) => r.month === currentMonth) ?? {
+          month: currentMonth, aiBrl: 0, metaBrl: 0, aiCalls: 0, metaMessages: 0,
+        },
+        history: spendRows.filter((r) => r.month !== currentMonth),
+        monthlyLimitBrl: spendSettings.monthlyLimitBrl,
+        allowOverage: spendSettings.allowOverage,
+        usdBrlRate: usdBrlRate(process.env),
+        metaPrices: {
+          utility: metaTemplateCostBrl("utility"),
+          marketing: metaTemplateCostBrl("marketing"),
+          authentication: metaTemplateCostBrl("authentication"),
+        },
+      };
       return {
         instances,
         templateRows,
         aiProvider,
         clinicProfile,
+        spendView,
         aiSettings: {
           enabled: ai?.enabled === true,
           assistantName:
@@ -173,6 +222,8 @@ export default async function ConfiguracoesPage() {
         />
 
         <ClinicCard initial={clinicProfile} />
+
+        <SpendCard view={spendView} />
 
         <AiCard
           hasApiKey={

@@ -11,6 +11,7 @@ import {
   type AiConfig,
 } from "@clinicaos/ai/provider";
 import { decryptSensitive, encryptSensitive } from "@clinicaos/core/crypto";
+import { MAX_MONTHLY_LIMIT_BRL } from "@clinicaos/core/spend";
 import { normalizePhoneBR } from "@clinicaos/core/phone";
 import {
   evolutionFromEnv,
@@ -1191,6 +1192,35 @@ export const makePrimaryWhatsApp = authAction({
       .update(schema.whatsappInstances)
       .set({ isPrimary: true, updatedAt: new Date() })
       .where(eq(schema.whatsappInstances.id, input.instanceId));
+    revalidatePath("/configuracoes");
+    return { ok: true };
+  },
+});
+
+// ── Gastos com API (limite mensal) ───────────────────────────────────
+
+const spendSettingsSchema = z.object({
+  monthlyLimitBrl: z
+    .number({ invalid_type_error: "Informe o limite em reais" })
+    .min(10, "O limite mínimo é R$ 10")
+    .max(MAX_MONTHLY_LIMIT_BRL, "Limite alto demais — fale com o suporte"),
+  allowOverage: z.boolean(),
+});
+
+export const saveSpendSettings = authAction({
+  permission: "settings.manage",
+  schema: spendSettingsSchema,
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    // Mudou o limite? Zera os avisos do mês para avisar de novo nos novos 80%/100%.
+    await tx.execute(sql`
+      UPDATE clinics SET settings = settings || jsonb_build_object('spend',
+        COALESCE(settings->'spend', '{}'::jsonb) || jsonb_build_object(
+          'monthlyLimitBrl', ${Math.round(input.monthlyLimitBrl * 100) / 100}::numeric,
+          'allowOverage', ${input.allowOverage}::boolean,
+          'alerts', NULL::jsonb
+        ))
+      WHERE id = ${auth.clinicId}
+    `);
     revalidatePath("/configuracoes");
     return { ok: true };
   },

@@ -9,6 +9,7 @@ import {
 import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { eligibleProfessionalIds, findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
+import { getSpendStatus, notifySpendThresholds, recordAiUsage } from "./spend";
 
 /**
  * Turnos da IA conversacional.
@@ -246,6 +247,19 @@ async function runTurn(
   if (!clinic) return;
   const aiSettings = parseAiSettings(clinic.settings);
   if (!aiSettings.enabled) return;
+
+  // Limite mensal de gastos em reais (Configurações → Gastos com API). Passou e a
+  // clínica não liberou excedente → o turno vai para humano, sem gastar.
+  const spend = await getSpendStatus(clinic);
+  if (spend.blocked) {
+    logger.warn({ clinicId: conversation.clinicId, spent: spend.spentBrl }, "limite de gastos atingido — turno vai p/ humano");
+    await db
+      .update(schema.conversations)
+      .set({ mode: "waiting_human" })
+      .where(eq(schema.conversations.id, conversation.id));
+    await notifySpendThresholds(clinic, logger);
+    return;
+  }
 
   // Kill-switch mensal de custo. Variável ausente, VAZIA ou inválida = padrão
   // de 5M — Number("") é 0 e transformaria o cap num "IA desligada" silencioso.
@@ -962,13 +976,16 @@ async function runTurn(
     { config: aiConfig },
   );
 
-  await db.insert(schema.aiUsage).values({
+  await recordAiUsage({
     clinicId: clinic.id,
     purpose: "agent",
     model: aiConfig.agentModel,
     inputTokens: reply.usage.inputTokens,
     outputTokens: reply.usage.outputTokens,
   });
+  await notifySpendThresholds(clinic, logger).catch((err) =>
+    logger.warn({ err }, "aviso de gastos falhou"),
+  );
 
   // Interrupção: chegou mensagem nova durante o turno? Descarta os balões.
   const fresh = (

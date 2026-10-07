@@ -8,10 +8,12 @@ import {
   templatePurposeFor,
   type EvolutionClient,
 } from "@clinicaos/whatsapp";
+import { SPEND_BLOCKED_MESSAGE } from "@clinicaos/core/spend";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
 import { clinicHasAiEnabled, scheduleAiTurn } from "./ai-agent";
 import { classifyInbound } from "./classify-inbound";
 import { metaClientFor } from "./meta-client";
+import { getSpendStatus, notifySpendThresholds, recordMetaUsage } from "./spend";
 import { pauseReactivationOnReply } from "./reactivation";
 
 /**
@@ -694,6 +696,18 @@ async function sendViaMeta(
           } — veja Configurações → Números do WhatsApp.`,
         );
       }
+      // Modelo da Meta custa dinheiro: respeita o limite mensal da clínica
+      const clinicRow = (
+        await db
+          .select({ id: schema.clinics.id, timezone: schema.clinics.timezone, settings: schema.clinics.settings })
+          .from(schema.clinics)
+          .where(eq(schema.clinics.id, msg.clinicId))
+          .limit(1)
+      )[0];
+      if (clinicRow && (await getSpendStatus(clinicRow)).blocked) {
+        await notifySpendThresholds(clinicRow, logger).catch(() => {});
+        return fail(SPEND_BLOCKED_MESSAGE);
+      }
       const vars = msg.templateVars ?? {};
       const bodyParams = template.paramNames.map((name) => vars[name] ?? "-");
       const buttonUrlParam = template.buttonUrlParam ? (vars[template.buttonUrlParam] ?? null) : null;
@@ -707,6 +721,14 @@ async function sendViaMeta(
         buttonUrlParam,
       });
       sentAsTemplate = template.metaName;
+      await recordMetaUsage({
+        clinicId: msg.clinicId,
+        instanceId: inst.id,
+        messageId: msg.id,
+        category: template.category,
+        templateName: template.metaName,
+      }).catch((err) => logger.warn({ err }, "registro de custo da Meta falhou"));
+      if (clinicRow) await notifySpendThresholds(clinicRow, logger).catch(() => {});
     }
 
     await db

@@ -81,6 +81,7 @@ export async function classifyByLlm(
   text: string,
   context: ClassifyContext,
   config: AiConfig,
+  onUsage?: (usage: { model: string; inputTokens: number; outputTokens: number }) => void,
 ): Promise<ReplyIntent> {
   const client = createLlmClient(config);
   const response = await client.chat({
@@ -116,6 +117,7 @@ export async function classifyByLlm(
     forceTool: "classificar",
   });
 
+  onUsage?.({ model: config.classifierModel, ...response.usage });
   const toolUse = response.toolCalls.find((c) => c.name === "classificar");
   const intent = (toolUse?.input as { intent?: string } | undefined)?.intent;
   return REPLY_INTENTS.includes(intent as ReplyIntent) ? (intent as ReplyIntent) : "other";
@@ -126,12 +128,13 @@ export async function classifyReply(
   text: string,
   context: ClassifyContext,
   config: AiConfig | null | undefined,
+  onUsage?: (usage: { model: string; inputTokens: number; outputTokens: number }) => void,
 ): Promise<{ intent: ReplyIntent; via: "keywords" | "llm" | "fallback" }> {
   const byKeywords = classifyByKeywords(text);
   if (byKeywords) return { intent: byKeywords, via: "keywords" };
   if (config) {
     try {
-      return { intent: await classifyByLlm(text, context, config), via: "llm" };
+      return { intent: await classifyByLlm(text, context, config, onUsage), via: "llm" };
     } catch {
       return { intent: "other", via: "fallback" };
     }

@@ -5,6 +5,7 @@ import { resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { getSpendStatus, recordAiUsage } from "./spend";
 
 /**
  * Classifica a resposta da cliente (Fase 1 — sem conversa livre):
@@ -81,10 +82,19 @@ export async function classifyInbound(
     }
   }
 
+  // Passou do limite de gastos sem excedente liberado? Só palavras-chave (grátis).
+  const spendBlocked = clinic
+    ? (await getSpendStatus({ id: clinicId, timezone: clinic.timezone, settings: clinic.settings })).blocked
+    : false;
   const { intent, via } = await classifyReply(
     text,
     { procedureName, appointmentWhen: when },
-    resolveClinicAiConfig(clinic?.settings, process.env),
+    spendBlocked ? null : resolveClinicAiConfig(clinic?.settings, process.env),
+    (usage) => {
+      void recordAiUsage({ clinicId, purpose: "classifier", ...usage }).catch((err) =>
+        logger.warn({ err }, "registro de uso do classificador falhou"),
+      );
+    },
   );
   logger.info({ conversationId, intent, via }, "resposta classificada");
 
