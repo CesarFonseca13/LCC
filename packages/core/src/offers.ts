@@ -56,6 +56,19 @@ export interface OfferSuggestion {
   why: string;
   /** Frase pronta para colar na conversa (a atendente pode editar). */
   message: string;
+  /** Serviço pedido com o qual esta sugestão combina (para buscar horário da visita conjunta). */
+  pairedWithId: string | null;
+}
+
+/** Anexa os horários livres à frase pronta (ou avisa que a equipe vai ver). */
+export function appendSlotsToMessage(message: string, slotLabels: string[], combined: boolean): string {
+  if (slotLabels.length === 0) return `${message} Se quiser, vejo um horário com a equipe.`;
+  const lista =
+    slotLabels.length === 1
+      ? slotLabels[0]
+      : `${slotLabels.slice(0, -1).join(", ")} ou ${slotLabels[slotLabels.length - 1]}`;
+  const intro = combined ? "Dá para fazer os dois na mesma visita: " : "Tenho horário ";
+  return `${message} ${intro}${lista}. Quer que eu reserve?`;
 }
 
 const REASON_PRIORITY: Record<OfferReason, number> = { combina: 0, promocao: 1, retorno: 2 };
@@ -96,6 +109,7 @@ export function suggestOffers(ctx: OfferContext): OfferSuggestion[] {
           ? `Combina com ${askedProc?.name ?? "o que ela pediu"} e está em promoção até ${brDate(rel.promoUntil)}`
           : `A clínica marcou que combina com ${askedProc?.name ?? "o que ela pediu"}`,
         message: composeMessage(rel, ctx.customerFirstName, promo, askedProc?.name ?? null, "combina"),
+        pairedWithId: askedId,
       });
     }
   }
@@ -111,6 +125,7 @@ export function suggestOffers(ctx: OfferContext): OfferSuggestion[] {
       reason: "promocao",
       why: `Ela pediu este serviço e ele está em promoção até ${brDate(p.promoUntil)}`,
       message: `${greet(ctx.customerFirstName)}boa notícia: ${p.name} está com condição especial até ${brDate(p.promoUntil)}: ${promo} 😊`,
+      pairedWithId: null,
     });
   }
 
@@ -126,6 +141,7 @@ export function suggestOffers(ctx: OfferContext): OfferSuggestion[] {
       reason: "retorno",
       why: `Ela fez ${p.name} em ${brDate(lastOn)} e o retorno recomendado (${p.returnDays} dias) já passou`,
       message: composeMessage(p, ctx.customerFirstName, promo, null, "retorno"),
+      pairedWithId: null,
     });
   }
 

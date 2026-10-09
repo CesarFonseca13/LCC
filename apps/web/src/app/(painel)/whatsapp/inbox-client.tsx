@@ -143,6 +143,12 @@ export interface OfferView {
   reason: "combina" | "retorno" | "promocao";
   why: string;
   message: string;
+  /** Horários livres encontrados (até 3) para esta sugestão. */
+  slots: string[];
+  /** true = horários para fazer junto com o serviço pedido, na mesma visita. */
+  combined: boolean;
+  /** Nenhuma profissional ativa faz este procedimento. */
+  noProfessional: boolean;
 }
 
 const REASON_LABEL: Record<OfferView["reason"], string> = {
@@ -180,6 +186,18 @@ export function OfferPanel({ offers }: { offers: OfferView[] }) {
               </span>
             </div>
             <p className="mt-1 text-[11px] leading-snug text-stone-500">{o.why}</p>
+            {o.noProfessional ? (
+              <p className="mt-1 text-[11px] text-red-600">Nenhuma profissional ativa faz este serviço.</p>
+            ) : o.slots.length === 0 ? (
+              <p className="mt-1 text-[11px] text-amber-700">Sem horário livre nos próximos 7 dias.</p>
+            ) : (
+              <ul className="mt-1.5 space-y-0.5 text-[11px] text-stone-600">
+                <li className="text-stone-400">{o.combined ? "Mesma visita, horários livres:" : "Horários livres:"}</li>
+                {o.slots.map((sl) => (
+                  <li key={sl}>• {sl}</li>
+                ))}
+              </ul>
+            )}
             <button
               type="button"
               onClick={() => window.dispatchEvent(new CustomEvent(COMPOSE_EVENT, { detail: o.message }))}

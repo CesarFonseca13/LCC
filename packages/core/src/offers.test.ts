@@ -143,3 +143,16 @@ describe("findMentionedProcedures", () => {
     expect(findMentionedProcedures("botox e peeling leve", catalog)).toEqual(["peeling", "botox"]);
   });
 });
+
+describe("appendSlotsToMessage", () => {
+  it("lista os horários e distingue visita conjunta", async () => {
+    const { appendSlotsToMessage } = await import("./offers");
+    expect(appendSlotsToMessage("Oi.", [], false)).toBe("Oi. Se quiser, vejo um horário com a equipe.");
+    expect(appendSlotsToMessage("Oi.", ["qui 10/10 às 14:00 com Paula"], false)).toBe(
+      "Oi. Tenho horário qui 10/10 às 14:00 com Paula. Quer que eu reserve?",
+    );
+    expect(appendSlotsToMessage("Oi.", ["A", "B", "C"], true)).toBe(
+      "Oi. Dá para fazer os dois na mesma visita: A, B ou C. Quer que eu reserve?",
+    );
+  });
+});

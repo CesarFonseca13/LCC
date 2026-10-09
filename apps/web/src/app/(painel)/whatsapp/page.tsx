@@ -2,9 +2,9 @@ import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import Link from "next/link";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
-import { findMentionedProcedures, suggestOffers } from "@clinicaos/core/offers";
+import { appendSlotsToMessage, findMentionedProcedures, suggestOffers } from "@clinicaos/core/offers";
 import { todayISO, utcToZoned } from "@clinicaos/core/timezone";
-import { schema, withTenant } from "@clinicaos/db";
+import { eligibleProfessionalIds, findSlots, schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
@@ -207,6 +207,7 @@ export default async function WhatsAppPage({
               offerNote: schema.procedures.offerNote,
               promoText: schema.procedures.promoText,
               promoUntil: schema.procedures.promoUntil,
+              durationMinutes: schema.procedures.durationMinutes,
             })
             .from(schema.procedures);
           const catalog = catalogRows.map((p) => ({ ...p, price: Number(p.price) }));
@@ -244,7 +245,7 @@ export default async function WhatsAppPage({
             .map((m) => m.body as string)
             .join("\n");
           const askedIds = [...new Set([...findMentionedProcedures(recentInbound, catalog), ...upcomingIds])];
-          offers = suggestOffers({
+          const suggestions = suggestOffers({
             askedIds,
             upcomingIds,
             history,
@@ -252,13 +253,41 @@ export default async function WhatsAppPage({
             pairings,
             today: todayISO(tz),
             customerFirstName: selected.customerName?.trim().split(/\s+/)[0] ?? null,
-          }).map((s) => ({
-            procedureName: s.procedure.name,
-            price: s.procedure.price,
-            reason: s.reason,
-            why: s.why,
-            message: s.message,
-          }));
+          });
+          // Horários REALMENTE livres para cada sugestão: só profissionais aptas ao
+          // procedimento, duração certa, agenda e bloqueios. Combinação = mesma visita.
+          const durationOf = new Map(catalogRows.map((p) => [p.id, p.durationMinutes]));
+          offers = [];
+          for (const s of suggestions) {
+            const comboIds = s.pairedWithId ? [s.pairedWithId, s.procedure.id] : [s.procedure.id];
+            let combined = comboIds.length > 1;
+            let pros = await eligibleProfessionalIds(tx, auth.clinicId!, comboIds);
+            let slots = await findSlots(
+              tx,
+              auth.clinicId!,
+              tz,
+              comboIds.reduce((acc, id) => acc + (durationOf.get(id) ?? 60), 0),
+              3,
+              pros,
+            );
+            if (slots.length === 0 && combined) {
+              // Ninguém faz os dois na mesma visita (ou sem vaga): oferece o serviço sozinho
+              combined = false;
+              pros = await eligibleProfessionalIds(tx, auth.clinicId!, [s.procedure.id]);
+              slots = await findSlots(tx, auth.clinicId!, tz, durationOf.get(s.procedure.id) ?? 60, 3, pros);
+            }
+            const labels = slots.map((x) => x.label);
+            offers.push({
+              procedureName: s.procedure.name,
+              price: s.procedure.price,
+              reason: s.reason,
+              why: s.why,
+              message: appendSlotsToMessage(s.message, labels, combined),
+              slots: labels,
+              combined,
+              noProfessional: pros.length === 0,
+            });
+          }
         }
         panel = {
           customerId: selected.customerId,
