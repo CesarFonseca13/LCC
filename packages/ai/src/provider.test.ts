@@ -114,6 +114,7 @@ const executors: AgentToolExecutors = {
   escalarParaHumano: async () => "escalado",
   registrarOptOut: async () => "opt-out",
   atualizarCadastro: async () => "guardado",
+  sugerirComplementos: async () => "nenhuma",
 };
 
 describe("provedor OpenAI-compatível", () => {
@@ -129,6 +130,7 @@ describe("provedor OpenAI-compatível", () => {
           businessHoursLabel: "seg-sex 9h-18h",
           catalog: [{ name: "Botox", price: "800,00", durationMinutes: 30 }],
           facts: null,
+          offersEnabled: false,
         },
         customer: {
           firstName: "Maria",

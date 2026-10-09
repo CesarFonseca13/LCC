@@ -7,6 +7,7 @@ import {
   type AgentToolExecutors,
 } from "@clinicaos/ai/agent";
 import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
+import { activePromo, suggestOffers } from "@clinicaos/core/offers";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { eligibleProfessionalIds, findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 import { getSpendStatus, notifySpendThresholds, recordAiUsage } from "./spend";
@@ -25,6 +26,8 @@ interface ClinicAiSettings {
   enabled: boolean;
   assistantName: string;
   tone: AgentPersona["tone"];
+  /** Venda complementar pela assistente (padrão: ligada). */
+  offers: boolean;
 }
 
 function parseAiSettings(settings: unknown): ClinicAiSettings {
@@ -39,6 +42,7 @@ function parseAiSettings(settings: unknown): ClinicAiSettings {
         ? ai.assistantName.trim()
         : "Ana",
     tone: tone === "elegante" || tone === "animada" ? tone : "acolhedora",
+    offers: ai?.offers !== false,
   };
 }
 
@@ -936,6 +940,105 @@ async function runTurn(
         );
       return "Opt-out registrado. Despeça-se com carinho e diga que ela pode chamar quando quiser.";
     },
+
+    // Venda complementar: MESMAS regras do card "Sugerir também" da caixa de
+    // Conversas — só o que a clínica marcou em "Oferecer junto" ou retorno
+    // vencido do histórico dela; nunca inferência sobre a pessoa.
+    async sugerirComplementos(procedimentosNomes) {
+      const procs = matchProcedures(procedures, procedimentosNomes);
+      if (typeof procs === "string") return "nenhuma";
+      const catalogRows = await db
+        .select({
+          id: schema.procedures.id,
+          name: schema.procedures.name,
+          price: schema.procedures.price,
+          active: schema.procedures.active,
+          returnDays: schema.procedures.returnDays,
+          offerNote: schema.procedures.offerNote,
+          promoText: schema.procedures.promoText,
+          promoUntil: schema.procedures.promoUntil,
+          durationMinutes: schema.procedures.durationMinutes,
+        })
+        .from(schema.procedures)
+        .where(eq(schema.procedures.clinicId, clinic.id));
+      const pairings = await db
+        .select({ procedureId: schema.procedurePairings.procedureId, relatedId: schema.procedurePairings.relatedId })
+        .from(schema.procedurePairings)
+        .where(eq(schema.procedurePairings.clinicId, clinic.id));
+      const doneAppts = await db
+        .select({ procedureId: schema.appointments.procedureId, startsAt: schema.appointments.startsAt })
+        .from(schema.appointments)
+        .where(and(eq(schema.appointments.customerId, customer.id), eq(schema.appointments.status, "showed")));
+      const doneHist = await db
+        .select({ procedureId: schema.customerHistoryEntries.procedureId, occurredOn: schema.customerHistoryEntries.occurredOn })
+        .from(schema.customerHistoryEntries)
+        .where(eq(schema.customerHistoryEntries.customerId, customer.id));
+      const history = [
+        ...doneAppts
+          .filter((a) => a.procedureId)
+          .map((a) => ({ procedureId: a.procedureId!, lastOn: utcToZoned(new Date(a.startsAt), tz).dateISO })),
+        ...doneHist.filter((h) => h.procedureId).map((h) => ({ procedureId: h.procedureId!, lastOn: h.occurredOn })),
+      ];
+      const futureAppts = await db
+        .select({ procedureId: schema.appointments.procedureId })
+        .from(schema.appointments)
+        .where(
+          and(
+            eq(schema.appointments.customerId, customer.id),
+            inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+            gt(schema.appointments.startsAt, new Date()),
+          ),
+        );
+      const upcomingIds = futureAppts.map((u) => u.procedureId).filter((x): x is string => Boolean(x));
+      const suggestions = suggestOffers({
+        askedIds: procs.map((p) => p.id),
+        upcomingIds,
+        history,
+        catalog: catalogRows.map((p) => ({ ...p, price: Number(p.price) })),
+        pairings,
+        today: todayISO(tz),
+        customerFirstName: null,
+        max: 2,
+      });
+      if (suggestions.length === 0) return "nenhuma";
+      const durationOf = new Map(catalogRows.map((p) => [p.id, p.durationMinutes]));
+      const linhas: string[] = [];
+      for (const s of suggestions) {
+        const comboIds = s.pairedWithId ? [s.pairedWithId, s.procedure.id] : [s.procedure.id];
+        let combined = comboIds.length > 1;
+        let pros = await eligibleProfessionalIds(db, clinic.id, comboIds);
+        let slots = await findSlots(
+          db,
+          clinic.id,
+          tz,
+          comboIds.reduce((acc, id) => acc + (durationOf.get(id) ?? 60), 0),
+          3,
+          pros,
+        );
+        if (slots.length === 0 && combined) {
+          combined = false;
+          pros = await eligibleProfessionalIds(db, clinic.id, [s.procedure.id]);
+          slots = await findSlots(db, clinic.id, tz, durationOf.get(s.procedure.id) ?? 60, 3, pros);
+        }
+        if (pros.length === 0) continue;
+        const promo = activePromo(s.procedure, todayISO(tz));
+        linhas.push(
+          [
+            `- ${s.procedure.name} (a partir de R$ ${Number(s.procedure.price).toLocaleString("pt-BR", { minimumFractionDigits: 2 })})`,
+            `  motivo: ${s.why}`,
+            s.procedure.offerNote ? `  como a clínica quer oferecer: "${s.procedure.offerNote}"` : null,
+            promo ? `  promoção vigente: ${promo}` : null,
+            slots.length === 0
+              ? "  horários: nenhum livre nos próximos 7 dias — se oferecer, diga que a equipe confirma o horário"
+              : `  horários ${combined ? "na MESMA visita que o pedido" : "(visita separada)"}: ${slots.map((x) => x.label).join("; ")}`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }
+      if (linhas.length === 0) return "nenhuma";
+      return `Ofertas complementares AUTORIZADAS pela clínica (ofereça no máximo uma, uma única vez, em uma frase leve; use só estes horários):\n${linhas.join("\n")}`;
+    },
   };
 
   // ── Chamada do agente ────────────────────────────────────────────
@@ -958,6 +1061,7 @@ async function runTurn(
           durationMinutes: p.durationMinutes,
         })),
         facts: knowledgeFactsText(clinic.settings),
+        offersEnabled: aiSettings.offers,
       },
       customer: {
         firstName: nameReliability(customer.fullName).firstName,

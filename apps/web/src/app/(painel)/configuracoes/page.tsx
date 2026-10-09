@@ -159,6 +159,7 @@ export default async function ConfiguracoesPage() {
               ? ai.assistantName
               : "Ana",
           tone: typeof ai?.tone === "string" ? ai.tone : "acolhedora",
+          offers: ai?.offers !== false,
         },
         booking: {
           enabled: clinic?.onlineBookingEnabled ?? false,

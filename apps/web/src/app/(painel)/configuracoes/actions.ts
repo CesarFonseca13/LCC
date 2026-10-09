@@ -352,6 +352,7 @@ const aiSettingsSchema = z.object({
   enabled: z.boolean(),
   assistantName: z.string().trim().min(2, "Dê um nome à assistente").max(30),
   tone: z.enum(["acolhedora", "elegante", "animada"]),
+  offers: z.boolean().default(true),
 });
 
 export const saveAiSettings = authAction({
@@ -362,7 +363,8 @@ export const saveAiSettings = authAction({
       UPDATE clinics SET settings = settings || jsonb_build_object('ai', jsonb_build_object(
         'enabled', ${input.enabled}::boolean,
         'assistantName', ${input.assistantName}::text,
-        'tone', ${input.tone}::text
+        'tone', ${input.tone}::text,
+        'offers', ${input.offers}::boolean
       ))
       WHERE id = ${auth.clinicId}
     `);

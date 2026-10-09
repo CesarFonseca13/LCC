@@ -33,6 +33,8 @@ export interface AgentClinicInfo {
    *  convênios, políticas) — entra INTEIRA no prompt: fatos essenciais
    *  nunca dependem de busca. Null = dono ainda não preencheu. */
   facts: string | null;
+  /** Venda complementar pela assistente (Configurações → Assistente virtual). */
+  offersEnabled: boolean;
 }
 
 export interface AgentCustomerContext {
@@ -90,6 +92,8 @@ export interface AgentToolExecutors {
   registrarOptOut(): Promise<string>;
   /** Completa a ficha APENAS nos campos vazios — nunca sobrescreve. */
   atualizarCadastro(dados: Record<string, string>): Promise<string>;
+  /** Ofertas complementares autorizadas pela clínica para estes procedimentos, com horários reais; "nenhuma" se não houver. */
+  sugerirComplementos(procedimentosNomes: string[]): Promise<string>;
 }
 
 const TONE_STYLES: Record<AgentPersona["tone"], string> = {
@@ -131,10 +135,16 @@ REGRAS INEGOCIÁVEIS
 10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.
 11. Dados pessoais que a cliente informar na conversa (nome completo, e-mail, CPF, RG, nascimento, endereço, convênio/plano) → guarde na hora com atualizar_cadastro e siga a conversa com naturalidade, sem dizer "atualizei no sistema". NUNCA transforme a conversa em formulário pedindo dados em sequência — no máximo, pergunte o nome completo na hora de marcar pela primeira vez. Para remarcar ou cancelar, use o id do agendamento que está no seu contexto.
 12. Tenha noção de tempo como uma pessoa tem: você sabe que dia é hoje. Fale "hoje", "amanhã", "sábado" — nunca fórmulas burocráticas como "no dia anterior" ou "na data em questão". Um horário marcado para amanhã tem véspera HOJE — perceba isso antes de falar. E não ofereça nem prometa lembretes por conta própria: os lembretes automáticos da clínica cuidam disso; se a cliente pedir para ser lembrada, diga só que ela recebe uma mensagem antes do horário.
-13. Fato sobre a clínica (endereço, como chegar, estacionamento, convênio, forma de pagamento, cuidados pré/pós, política de cancelamento etc.) só sai de TRÊS fontes: o bloco SOBRE A CLÍNICA acima (horário, endereço, telefone, catálogo), as INFORMAÇÕES OFICIAIS acima, ou o resultado de consultar_informacoes. Não está em nenhuma? NUNCA responda de memória ou "conhecimento geral" — diga com naturalidade que vai confirmar com a equipe e use escalar_para_humano. Antes de responder pergunta factual que não esteja no prompt, SEMPRE chame consultar_informacoes primeiro.`;
+13. Fato sobre a clínica (endereço, como chegar, estacionamento, convênio, forma de pagamento, cuidados pré/pós, política de cancelamento etc.) só sai de TRÊS fontes: o bloco SOBRE A CLÍNICA acima (horário, endereço, telefone, catálogo), as INFORMAÇÕES OFICIAIS acima, ou o resultado de consultar_informacoes. Não está em nenhuma? NUNCA responda de memória ou "conhecimento geral" — diga com naturalidade que vai confirmar com a equipe e use escalar_para_humano. Antes de responder pergunta factual que não esteja no prompt, SEMPRE chame consultar_informacoes primeiro.${
+    clinic.offersEnabled
+      ? `
+14. VENDA COMPLEMENTAR, com cuidado. Quando a cliente disser o que quer marcar, chame sugerir_complementos com esses procedimentos ANTES de responder com os horários. Só ofereça EXATAMENTE o que a ferramenta devolver (serviço, motivo e horários), uma única vez na conversa, em UMA frase leve junto com os horários do que ela pediu — nunca como pressão. Se ela não quiser, não responder ou mudar de assunto, não volte ao tema. Se a ferramenta devolver "nenhuma", não ofereça nada a mais. É PROIBIDO sugerir serviço por conta própria ou comentar aparência, idade, corpo ou "necessidade" da cliente — a oferta é sempre pelo que a clínica autorizou, nunca pelo que você acha que ela precisa.`
+      : ""
+  }`;
 }
 
 const TOOL_NAMES = [
+  "sugerir_complementos",
   "consultar_horarios",
   "agendar",
   "reagendar",
@@ -200,6 +210,22 @@ export function salvageBalloons(text: string): string[] | null {
 }
 
 const TOOLS: ToolDef[] = [
+  {
+    name: "sugerir_complementos",
+    description:
+      "Lista as ofertas complementares que a clínica AUTORIZOU para os procedimentos que a cliente quer marcar, já com horários livres (de preferência na mesma visita). Chame ANTES de oferecer horários. Devolve \"nenhuma\" quando não há oferta permitida — aí não ofereça nada a mais.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        procedimentos: {
+          type: "array",
+          items: { type: "string" },
+          description: "Procedimentos que a cliente quer marcar, como estão no catálogo",
+        },
+      },
+      required: ["procedimentos"],
+    },
+  },
   {
     name: "consultar_horarios",
     description:
@@ -432,6 +458,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       : [];
   };
   const wrappedExecutors: Record<string, (raw: Record<string, unknown>) => Promise<string>> = {
+    sugerir_complementos: (raw) => executors.sugerirComplementos(listaProcedimentos(raw)),
     consultar_horarios: (raw) => executors.consultarHorarios(listaProcedimentos(raw)),
     agendar: (raw) => executors.agendar(String(raw.slot_id ?? ""), listaProcedimentos(raw)),
     reagendar: (raw) => executors.reagendar(String(raw.agendamento_id ?? ""), String(raw.slot_id ?? "")),
@@ -466,7 +493,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       maxTokens: 700,
       system,
       messages,
-      tools: TOOLS,
+      tools: input.clinic.offersEnabled ? TOOLS : TOOLS.filter((t) => t.name !== "sugerir_complementos"),
     });
     usage.inputTokens += response.usage.inputTokens;
     usage.outputTokens += response.usage.outputTokens;

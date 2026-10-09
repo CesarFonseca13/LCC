@@ -16,11 +16,12 @@ export function AiCard({
   initial,
 }: {
   hasApiKey: boolean;
-  initial: { enabled: boolean; assistantName: string; tone: string };
+  initial: { enabled: boolean; assistantName: string; tone: string; offers: boolean };
 }) {
   const router = useRouter();
   const [enabled, setEnabled] = useState(initial.enabled);
   const [tone, setTone] = useState(initial.tone);
+  const [offers, setOffers] = useState(initial.offers);
   const [error, setError] = useState<string>();
   const [saved, setSaved] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -33,6 +34,7 @@ export function AiCard({
         enabled,
         assistantName: String(fd.get("assistantName") ?? ""),
         tone,
+        offers,
       });
       if (result.ok) {
         setSaved(true);
@@ -116,6 +118,24 @@ export function AiCard({
                 </label>
               ))}
             </div>
+          </div>
+          <div className="sm:col-span-2">
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-stone-200 p-3 hover:bg-stone-50">
+              <input
+                type="checkbox"
+                checked={offers}
+                onChange={(e) => setOffers(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-stone-300 accent-teal-700"
+              />
+              <span className="text-sm text-stone-700">
+                <strong className="text-stone-800">Oferecer serviços complementares</strong>
+                <span className="mt-0.5 block text-xs text-stone-500">
+                  Quando a cliente pedir um serviço, a assistente oferece, uma única vez e sem insistir, só o que
+                  você marcou em Serviços → &quot;Oferecer junto&quot;, já com horário livre. Nunca sugere por conta
+                  própria.
+                </span>
+              </span>
+            </label>
           </div>
         </div>
 
