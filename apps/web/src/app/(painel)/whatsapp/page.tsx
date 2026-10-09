@@ -2,12 +2,13 @@ import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import Link from "next/link";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
-import { utcToZoned } from "@clinicaos/core/timezone";
+import { findMentionedProcedures, suggestOffers } from "@clinicaos/core/offers";
+import { todayISO, utcToZoned } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
-import { Composer, ModeBanner, ReadOnOpen, AutoRefresh } from "./inbox-client";
+import { Composer, ModeBanner, OfferPanel, type OfferView, ReadOnOpen, AutoRefresh } from "./inbox-client";
 
 export const metadata = { title: "WhatsApp" };
 
@@ -132,6 +133,7 @@ export default async function WhatsAppPage({
         totalSpent: string | null;
         visits: number;
       } | null = null;
+      let offers: OfferView[] = [];
 
       const selected = conversations.find((c) => c.id === selectedId);
       if (selected) {
@@ -193,6 +195,70 @@ export default async function WhatsAppPage({
           )[0];
           visits = hist?.visits ?? 0;
           totalSpent = hist?.total ?? null;
+
+          // ── Sugestões de oferta (só o que a clínica autorizou em "combina com") ──
+          const catalogRows = await tx
+            .select({
+              id: schema.procedures.id,
+              name: schema.procedures.name,
+              price: schema.procedures.price,
+              active: schema.procedures.active,
+              returnDays: schema.procedures.returnDays,
+              offerNote: schema.procedures.offerNote,
+              promoText: schema.procedures.promoText,
+              promoUntil: schema.procedures.promoUntil,
+            })
+            .from(schema.procedures);
+          const catalog = catalogRows.map((p) => ({ ...p, price: Number(p.price) }));
+          const pairings = await tx
+            .select({ procedureId: schema.procedurePairings.procedureId, relatedId: schema.procedurePairings.relatedId })
+            .from(schema.procedurePairings);
+          const upcoming = await tx
+            .select({ procedureId: schema.appointments.procedureId })
+            .from(schema.appointments)
+            .where(
+              and(
+                eq(schema.appointments.customerId, selected.customerId),
+                inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+                gt(schema.appointments.startsAt, new Date()),
+              ),
+            );
+          const upcomingIds = upcoming.map((a) => a.procedureId).filter((x): x is string => Boolean(x));
+          const doneAppts = await tx
+            .select({ procedureId: schema.appointments.procedureId, startsAt: schema.appointments.startsAt })
+            .from(schema.appointments)
+            .where(and(eq(schema.appointments.customerId, selected.customerId), eq(schema.appointments.status, "showed")));
+          const doneHist = await tx
+            .select({ procedureId: schema.customerHistoryEntries.procedureId, occurredOn: schema.customerHistoryEntries.occurredOn })
+            .from(schema.customerHistoryEntries)
+            .where(eq(schema.customerHistoryEntries.customerId, selected.customerId));
+          const history = [
+            ...doneAppts
+              .filter((a) => a.procedureId)
+              .map((a) => ({ procedureId: a.procedureId!, lastOn: utcToZoned(new Date(a.startsAt), tz).dateISO })),
+            ...doneHist.filter((h) => h.procedureId).map((h) => ({ procedureId: h.procedureId!, lastOn: h.occurredOn })),
+          ];
+          const recentInbound = messages
+            .filter((m) => m.direction === "inbound" && m.body)
+            .slice(-10)
+            .map((m) => m.body as string)
+            .join("\n");
+          const askedIds = [...new Set([...findMentionedProcedures(recentInbound, catalog), ...upcomingIds])];
+          offers = suggestOffers({
+            askedIds,
+            upcomingIds,
+            history,
+            catalog,
+            pairings,
+            today: todayISO(tz),
+            customerFirstName: selected.customerName?.trim().split(/\s+/)[0] ?? null,
+          }).map((s) => ({
+            procedureName: s.procedure.name,
+            price: s.procedure.price,
+            reason: s.reason,
+            why: s.why,
+            message: s.message,
+          }));
         }
         panel = {
           customerId: selected.customerId,
@@ -215,6 +281,7 @@ export default async function WhatsAppPage({
         selected,
         thread,
         panel,
+        offers,
         tz,
       };
     },
@@ -447,6 +514,8 @@ export default async function WhatsAppPage({
               </p>
             </div>
           </div>
+
+          <OfferPanel offers={data.offers} />
 
           <div className="mt-5 flex flex-col gap-2 border-t border-stone-100 pt-4">
             <Link

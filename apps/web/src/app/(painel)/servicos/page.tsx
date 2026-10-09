@@ -23,13 +23,16 @@ export default async function ServicosPage({
   const canManage = can(auth.role, "catalog.manage");
   const tab: Tab = (await searchParams).tab === "pacotes" ? "pacotes" : "procedimentos";
 
-  const { procedures, packages } = await withTenant(
+  const { procedures, packages, pairings } = await withTenant(
     auth.clinicId,
     async (tx) => {
       const procedures = await tx
         .select()
         .from(schema.procedures)
         .orderBy(schema.procedures.name);
+      const pairings = await tx
+        .select({ procedureId: schema.procedurePairings.procedureId, relatedId: schema.procedurePairings.relatedId })
+        .from(schema.procedurePairings);
       const packagesRaw = await tx
         .select()
         .from(schema.packages)
@@ -50,7 +53,7 @@ export default async function ServicosPage({
         ...p,
         items: items.filter((i) => i.packageId === p.id),
       }));
-      return { procedures, packages };
+      return { procedures, packages, pairings };
     },
     auth.userId,
   );
@@ -68,7 +71,7 @@ export default async function ServicosPage({
         </div>
         {canManage ? (
           tab === "procedimentos" ? (
-            <ProcedureFormButton />
+            <ProcedureFormButton others={procedures.filter((o) => o.active).map((o) => ({ id: o.id, name: o.name }))} />
           ) : (
             <PackageFormButton
               procedures={activeProcedures.map((p) => ({ id: p.id, name: p.name }))}
@@ -103,7 +106,7 @@ export default async function ServicosPage({
           procedures.length === 0 ? (
             <EmptyState
               title="Cadastre seu primeiro procedimento para agendar em segundos — a duração e o preço já entram sozinhos na agenda. O prazo de retorno alimenta as reativações automáticas."
-              action={canManage ? <ProcedureFormButton /> : undefined}
+              action={canManage ? <ProcedureFormButton others={procedures.filter((o) => o.active).map((o) => ({ id: o.id, name: o.name }))} /> : undefined}
             />
           ) : (
             <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
@@ -168,7 +171,12 @@ export default async function ServicosPage({
                                 commissionDefaultPct: p.commissionDefaultPct
                                   ? Number(p.commissionDefaultPct).toString()
                                   : "",
+                                offerNote: p.offerNote ?? "",
+                                promoText: p.promoText ?? "",
+                                promoUntil: p.promoUntil ?? "",
+                                combinesWith: pairings.filter((x) => x.procedureId === p.id).map((x) => x.relatedId),
                               }}
+                              others={procedures.filter((o) => o.id !== p.id && o.active).map((o) => ({ id: o.id, name: o.name }))}
                             />
                             <ToggleActiveButton kind="procedure" id={p.id} active={p.active} />
                           </div>

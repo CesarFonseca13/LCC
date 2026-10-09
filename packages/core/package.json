@@ -16,7 +16,8 @@
     "./documents": "./src/documents.ts",
     "./terms-of-use": "./src/terms-of-use.ts",
     "./spend": "./src/spend.ts",
-    "./plans": "./src/plans.ts"
+    "./plans": "./src/plans.ts",
+    "./offers": "./src/offers.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { schema } from "@clinicaos/db";
@@ -55,6 +55,20 @@ const procedureSchema = z.object({
     }
     return n.toFixed(2);
   }),
+  offerNote: z.string().trim().max(200).transform((v) => v || null),
+  promoText: z.string().trim().max(120).transform((v) => v || null),
+  promoUntil: z
+    .string()
+    .trim()
+    .transform((v, ctx) => {
+      if (!v) return null;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Data da promoção inválida" });
+        return z.NEVER;
+      }
+      return v;
+    }),
+  combinesWith: z.array(z.string().uuid()).max(30).default([]),
 });
 
 export const saveProcedure = authAction({
@@ -72,16 +86,39 @@ export const saveProcedure = authAction({
       preCare: input.preCare,
       postCare: input.postCare,
       commissionDefaultPct: input.commissionDefaultPct,
+      offerNote: input.offerNote,
+      promoText: input.promoText,
+      promoUntil: input.promoUntil,
     };
+    if (input.promoText && !input.promoUntil) {
+      return { ok: false, error: "Informe até quando a promoção vale." };
+    }
 
     try {
-      if (input.id) {
+      let procedureId = input.id;
+      if (procedureId) {
         await tx
           .update(schema.procedures)
           .set(values)
-          .where(eq(schema.procedures.id, input.id));
+          .where(eq(schema.procedures.id, procedureId));
       } else {
-        await tx.insert(schema.procedures).values(values);
+        procedureId = (
+          await tx.insert(schema.procedures).values(values).returning({ id: schema.procedures.id })
+        )[0]!.id;
+      }
+      // "Combina com": substitui a lista inteira; só serviços da própria clínica e nunca ele mesmo
+      await tx.delete(schema.procedurePairings).where(eq(schema.procedurePairings.procedureId, procedureId));
+      const wanted = [...new Set(input.combinesWith)].filter((id) => id !== procedureId);
+      if (wanted.length > 0) {
+        const valid = await tx
+          .select({ id: schema.procedures.id })
+          .from(schema.procedures)
+          .where(and(eq(schema.procedures.clinicId, auth.clinicId!), inArray(schema.procedures.id, wanted)));
+        if (valid.length > 0) {
+          await tx.insert(schema.procedurePairings).values(
+            valid.map((v) => ({ clinicId: auth.clinicId!, procedureId: procedureId!, relatedId: v.id })),
+          );
+        }
       }
     } catch (err) {
       if (String(err).includes("procedures_clinic_name_uq")) {

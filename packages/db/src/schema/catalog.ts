@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  date,
   index,
   integer,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -40,6 +42,11 @@ export const procedures = pgTable(
     postCare: text("post_care"),
     postSaleCadenceDays: integer("post_sale_cadence_days").array(),
     commissionDefaultPct: numeric("commission_default_pct", { precision: 5, scale: 2 }),
+    /** Como a clínica quer que este serviço seja oferecido junto com outro (frase curta). */
+    offerNote: text("offer_note"),
+    /** Promoção vigente — só é sugerida até promoUntil. */
+    promoText: text("promo_text"),
+    promoUntil: date("promo_until"),
     active: boolean("active").notNull().default(true),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -95,4 +102,20 @@ export const professionalProcedures = pgTable(
     unique("professional_procedures_pk").on(t.professionalId, t.procedureId),
     index("professional_procedures_clinic_idx2").on(t.clinicId),
   ],
+);
+
+/** Quais serviços PODEM ser oferecidos junto com cada serviço — definido pela clínica, direcional. */
+export const procedurePairings = pgTable(
+  "procedure_pairings",
+  {
+    clinicId: clinicId(),
+    procedureId: uuid("procedure_id")
+      .notNull()
+      .references(() => procedures.id, { onDelete: "cascade" }),
+    relatedId: uuid("related_id")
+      .notNull()
+      .references(() => procedures.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.procedureId, t.relatedId] }), index("procedure_pairings_clinic_idx").on(t.clinicId, t.procedureId)],
 );

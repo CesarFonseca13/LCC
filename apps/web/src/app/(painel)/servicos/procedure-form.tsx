@@ -16,6 +16,10 @@ export interface ProcedureInitial {
   preCare: string;
   postCare: string;
   commissionDefaultPct: string;
+  offerNote: string;
+  promoText: string;
+  promoUntil: string;
+  combinesWith: string[];
 }
 
 const EMPTY: ProcedureInitial = {
@@ -28,9 +32,20 @@ const EMPTY: ProcedureInitial = {
   preCare: "",
   postCare: "",
   commissionDefaultPct: "",
+  offerNote: "",
+  promoText: "",
+  promoUntil: "",
+  combinesWith: [],
 };
 
-export function ProcedureFormButton({ initial }: { initial?: ProcedureInitial }) {
+export function ProcedureFormButton({
+  initial,
+  others,
+}: {
+  initial?: ProcedureInitial;
+  /** Outros serviços ativos da clínica — opções de "combina com". */
+  others: { id: string; name: string }[];
+}) {
   const isEdit = Boolean(initial?.id);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string>();
@@ -52,6 +67,10 @@ export function ProcedureFormButton({ initial }: { initial?: ProcedureInitial })
           preCare: String(formData.get("preCare") ?? ""),
           postCare: String(formData.get("postCare") ?? ""),
           commissionDefaultPct: String(formData.get("commissionDefaultPct") ?? ""),
+          offerNote: String(formData.get("offerNote") ?? ""),
+          promoText: String(formData.get("promoText") ?? ""),
+          promoUntil: String(formData.get("promoUntil") ?? ""),
+          combinesWith: formData.getAll("combinesWith").map(String),
         });
         if (result.ok) {
           setOpen(false);
@@ -193,6 +212,63 @@ export function ProcedureFormButton({ initial }: { initial?: ProcedureInitial })
               placeholder="Enviado após o atendimento. Ex.: Evite sol nas próximas 24h."
             />
           </div>
+
+          <fieldset className="rounded-lg border border-stone-200 p-3">
+            <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-stone-500">
+              Oferecer junto (venda complementar)
+            </legend>
+            <p className="text-[11px] text-stone-400">
+              Quando uma cliente pedir <strong>este</strong> serviço, a atendente verá a sugestão de oferecer os
+              marcados abaixo. O sistema nunca sugere nada fora desta lista.
+            </p>
+            {others.length === 0 ? (
+              <p className="mt-2 text-xs text-stone-400">Cadastre outros serviços para poder combinar.</p>
+            ) : (
+              <div className="mt-2 grid max-h-40 grid-cols-1 gap-1 overflow-y-auto sm:grid-cols-2">
+                {others.map((o) => (
+                  <label key={o.id} className="flex items-center gap-2 text-sm text-stone-700">
+                    <input
+                      type="checkbox"
+                      name="combinesWith"
+                      value={o.id}
+                      defaultChecked={v.combinesWith.includes(o.id)}
+                      className="h-4 w-4 rounded border-stone-300 text-teal-600 focus:ring-teal-500"
+                    />
+                    {o.name}
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="mt-3">
+              <Label htmlFor="p-offernote" hint="opcional">Como oferecer este serviço</Label>
+              <Input
+                id="p-offernote"
+                name="offerNote"
+                defaultValue={v.offerNote}
+                maxLength={200}
+                placeholder="Ex.: Potencializa o resultado e pode ser feito na mesma sessão."
+              />
+              <p className="mt-1 text-[11px] text-stone-400">
+                Entra na frase pronta quando este serviço for sugerido junto com outro.
+              </p>
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_140px]">
+              <div>
+                <Label htmlFor="p-promo" hint="opcional">Promoção vigente</Label>
+                <Input
+                  id="p-promo"
+                  name="promoText"
+                  defaultValue={v.promoText}
+                  maxLength={120}
+                  placeholder="Ex.: 2ª sessão com 20% de desconto"
+                />
+              </div>
+              <div>
+                <Label htmlFor="p-promo-until" hint="até">Válida até</Label>
+                <Input id="p-promo-until" name="promoUntil" type="date" defaultValue={v.promoUntil} />
+              </div>
+            </div>
+          </fieldset>
 
           <FieldError message={error} />
 
