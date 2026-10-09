@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/migrate.ts",
     "seed:demo": "tsx src/seed-demo.ts",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "seed:showcase": "tsx src/seed-showcase.ts"
   },
   "dependencies": {
     "@clinicaos/config": "workspace:*",
