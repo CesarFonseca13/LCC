@@ -31,6 +31,8 @@ services:
     environment:
       # Montadas AQUI (env_file não interpola ${...})
       DATABASE_URL: postgres://clinicaos_app:${DB_APP_PASSWORD:?}@postgres:5432/clinicaos
+      # Painel /admin (superadmin): enxerga todas as clínicas — mesmo papel do worker
+      DATABASE_URL_ADMIN: postgres://clinicaos_worker:${DB_WORKER_PASSWORD:?}@postgres:5432/clinicaos
     expose:
       - "3000"
     depends_on:

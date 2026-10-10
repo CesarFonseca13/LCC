@@ -123,3 +123,26 @@ export async function closeDb(): Promise<void> {
   pool = undefined;
   database = undefined;
 }
+
+// ── Acesso de ADMINISTRAÇÃO DA PLATAFORMA (cross-tenant) ─────────────
+let adminPool: Pool | undefined;
+let adminDatabase: NodePgDatabase<typeof schema> | undefined;
+
+/**
+ * Conexão que ENXERGA todas as clínicas (papel com BYPASSRLS), exclusiva do
+ * painel /admin. Só é aberta se DATABASE_URL_ADMIN existir; nunca importe em
+ * código de feature. Quem chama é responsável por checar `isSuperadmin`.
+ */
+export function adminDb(): Db {
+  if (!adminDatabase) {
+    const connectionString = process.env.DATABASE_URL_ADMIN;
+    if (!connectionString) throw new Error("DATABASE_URL_ADMIN não definida — painel de administração indisponível.");
+    adminPool = new Pool({ connectionString, max: 4 });
+    adminDatabase = drizzle(adminPool, { schema });
+  }
+  return adminDatabase;
+}
+
+export function hasAdminDb(): boolean {
+  return Boolean(process.env.DATABASE_URL_ADMIN);
+}

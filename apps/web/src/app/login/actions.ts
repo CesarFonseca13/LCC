@@ -1,6 +1,6 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import argon2 from "argon2";
@@ -87,6 +87,15 @@ export async function loginAction(
     userAgent: headerStore.get("user-agent") ?? undefined,
   });
 
+  // Administrador da plataforma sem clínica ativa cai direto no painel de administração
+  if (user.isSuperadmin) {
+    const membership = await unsafeGlobalDb()
+      .select({ clinicId: schema.clinicMembers.clinicId })
+      .from(schema.clinicMembers)
+      .where(and(eq(schema.clinicMembers.userId, user.id), eq(schema.clinicMembers.active, true)))
+      .limit(1);
+    if (membership.length === 0) redirect("/admin");
+  }
   redirect("/inicio");
 }
 

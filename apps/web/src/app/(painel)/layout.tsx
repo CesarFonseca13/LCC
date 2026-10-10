@@ -14,6 +14,33 @@ export default async function PainelLayout({
   // Primeiro acesso (ou Termos novos): nada do painel abre antes do aceite
   await requireTermsAccepted(auth.userId);
 
+  // Clínica suspensa pela plataforma (inadimplência etc.): ninguém entra, só a mensagem
+  if (auth.clinicId && !auth.isSuperadmin) {
+    const { withTenant: wt, schema: sch } = await import("@clinicaos/db");
+    const { eq: eqOp } = await import("drizzle-orm");
+    const clinicId = auth.clinicId;
+    const row = await wt(clinicId, async (tx) =>
+      (await tx.select({ status: sch.clinics.status }).from(sch.clinics).where(eqOp(sch.clinics.id, clinicId)).limit(1))[0],
+    );
+    if (row && row.status !== "active") {
+      const { logoutAction } = await import("@/app/login/actions");
+      return (
+        <div className="flex h-screen items-center justify-center bg-stone-50 p-8">
+          <div className="max-w-md rounded-xl border border-stone-200 bg-white p-8 text-center shadow-sm">
+            <p className="text-3xl">⏸️</p>
+            <h1 className="mt-3 text-lg font-semibold text-stone-800">Acesso da clínica temporariamente suspenso</h1>
+            <p className="mt-2 text-sm text-stone-500">
+              Fale com o suporte da plataforma para regularizar. Seus dados continuam guardados.
+            </p>
+            <form action={logoutAction} className="mt-6">
+              <button type="submit" className="rounded-lg border border-stone-300 px-4 py-2 text-sm text-stone-700 hover:bg-stone-50">Sair</button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+  }
+
   // Sem clínica vinculada: tela orientando o próximo passo (nunca painel em branco)
   if (!auth.clinicId) {
     const { logoutAction } = await import("@/app/login/actions");
@@ -101,6 +128,7 @@ export default async function PainelLayout({
         userName={auth.userName ?? null}
         approvalsCount={approvalsCount}
         whatsapp={whatsapp}
+        isSuperadmin={auth.isSuperadmin}
       />
       {whatsapp.tone === "off" ? (
         <div className="flex items-center justify-center gap-3 bg-red-600 px-4 py-2 text-sm font-medium text-white">

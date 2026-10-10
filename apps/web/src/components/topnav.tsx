@@ -92,9 +92,12 @@ export function TopNav({
   userName,
   approvalsCount = 0,
   whatsapp,
+  isSuperadmin = false,
 }: {
   clinicName: string | null;
   userName: string | null;
+  /** Mostra o atalho para o painel de administração da plataforma. */
+  isSuperadmin?: boolean;
   approvalsCount?: number;
   /** Ponto de status no ícone do WhatsApp + texto do tooltip. */
   whatsapp: { tone: "ok" | "warn" | "off" | "none"; text: string };
@@ -202,6 +205,15 @@ export function TopNav({
 
         {/* Usuária + sair */}
         <div className="flex shrink-0 items-center gap-2">
+          {isSuperadmin ? (
+            <Link
+              href="/admin"
+              title="Administração da plataforma"
+              className={`${baseItem} ${idle} !text-amber-300 hover:!bg-amber-500/15`}
+            >
+              Admin
+            </Link>
+          ) : null}
           {userName ? (
             <span className="hidden max-w-[120px] truncate text-xs text-teal-100/60 lg:block">
               {userName}

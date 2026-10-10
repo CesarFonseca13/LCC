@@ -68,3 +68,14 @@ export const emailLog = pgTable("email_log", {
   sentAt: timestamp("sent_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Trilha do painel de administração da plataforma (superadmin). Global, sem RLS. */
+export const platformAuditLog = pgTable("platform_audit_log", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  adminUserId: uuid("admin_user_id").references(() => users.id),
+  action: text("action").notNull(),
+  clinicId: uuid("clinic_id"),
+  target: text("target"),
+  details: jsonb("details"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
