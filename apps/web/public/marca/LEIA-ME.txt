@@ -1,0 +1,3 @@
+Imagens da marca usadas na pagina /vendas:
+- logo.png  (logo horizontal, fundo transparente)
+- ana.png   (a Ana, personagem do logo, fundo transparente, ~800px de altura)

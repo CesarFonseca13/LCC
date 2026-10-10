@@ -16,7 +16,7 @@ export function StickyCta({ href, label }: { href: string; label: string }) {
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 border-t border-white/10 bg-teal-950/95 px-4 py-3 backdrop-blur sm:rounded-t-2xl">
         <p className="hidden text-sm text-teal-100/80 sm:block">{label}</p>
         <a href={href} target="_blank" rel="noreferrer" className="w-full rounded-xl bg-emerald-400 px-6 py-3 text-center text-sm font-semibold text-teal-950 hover:bg-emerald-300 sm:w-auto">
-          Falar no WhatsApp
+          Quero na minha clínica
         </a>
       </div>
     </div>
