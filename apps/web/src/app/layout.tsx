@@ -5,9 +5,13 @@ import "./globals.css";
 const inter = Inter({
   variable: "--font-inter",
   subsets: ["latin"],
+  // Não pré-carrega: a página de vendas usa outras fontes e não deve disputar banda com elas
+  preload: false,
 });
 
 export const metadata: Metadata = {
+  // Fixo no código: o build do Docker roda sem .env e as URLs de og:image precisam ser absolutas
+  metadataBase: new URL("https://vesaliusx.com.br"),
   title: {
     default: "VesaliusX",
     template: "%s — VesaliusX",

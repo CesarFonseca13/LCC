@@ -116,11 +116,18 @@ export function parseClinicPlan(settings: unknown): Plan | null {
   return typeof raw === "string" ? planById(raw) : null;
 }
 
+/** Parcela mensal com desconto, arredondada para baixo (a soma sempre fecha: 12 × parcela = total). */
+export function annualUpfrontMonthly(plan: Plan): number {
+  return Math.floor(plan.monthlyBrl * (1 - COMMERCIAL_RULES.annualUpfrontDiscount));
+}
+export function semiannualUpfrontMonthly(plan: Plan): number {
+  return Math.floor(plan.monthlyBrl * (1 - COMMERCIAL_RULES.semiannualUpfrontDiscount));
+}
 export function annualUpfrontTotal(plan: Plan): number {
-  return Math.round(plan.monthlyBrl * 12 * (1 - COMMERCIAL_RULES.annualUpfrontDiscount));
+  return annualUpfrontMonthly(plan) * 12;
 }
 export function semiannualUpfrontTotal(plan: Plan): number {
-  return Math.round(plan.monthlyBrl * 6 * (1 - COMMERCIAL_RULES.semiannualUpfrontDiscount));
+  return semiannualUpfrontMonthly(plan) * 6;
 }
 export function annualMonthlyPrice(plan: Plan): number {
   return Math.round(plan.monthlyBrl * (1 - COMMERCIAL_RULES.annualMonthlyDiscount));
