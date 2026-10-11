@@ -229,7 +229,7 @@ export default function VendasPage() {
         <section className="bg-[#F3F0E8] pb-8 pt-10 sm:pb-10 sm:pt-14">
           <div className={`${NARROW} md:text-center`}>
             <h2 className={`${T} text-[52px] font-black leading-[0.98] tracking-[-0.02em] text-[#062B30] sm:text-[80px]`}>
-              Sábado, 10h.
+              Sexta, 10h.
               <br />
               Agenda cheia.
             </h2>
@@ -249,7 +249,7 @@ export default function VendasPage() {
               A cliente que fica sem resposta não reclama. Ela só não volta.
             </p>
             <p className={`${T} mt-7 max-w-[22ch] text-[34px] font-black leading-[1.02] tracking-[-0.02em] text-[#0E6E6A] sm:text-[44px] md:mx-auto md:max-w-[26ch]`}>
-              Agora imagine o mesmo sábado, com a Ana respondendo por você. <span aria-hidden>↓</span>
+              Agora imagine a mesma sexta, com a Ana respondendo por você. <span aria-hidden>↓</span>
             </p>
           </div>
         </section>
@@ -259,7 +259,7 @@ export default function VendasPage() {
           <div className={`${WIDE} grid items-start gap-10 lg:grid-cols-[480px_minmax(0,1fr)] lg:gap-12`}>
             <Phone clinic="Clínica Bella">
               <Pin>Só oferece horário que está livre de verdade.</Pin>
-              <Scene>Sábado · 10h02 · Conversa de exemplo</Scene>
+              <Scene>Sexta · 10h02 · Conversa de exemplo</Scene>
               <Out time="10:02">oi! vocês fazem limpeza de pele? quanto fica?</Out>
               <In time="10:02">
                 Oi, Carla! Tudo bem? 😊 Fazemos sim! A limpeza de pele é a partir de <strong>R$ 180</strong> e leva uns 60 minutos. Quer que eu veja um horário pra você?
@@ -591,7 +591,7 @@ export default function VendasPage() {
           <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_60%_at_85%_90%,rgba(0,0,0,0.18),transparent_70%)]" />
           <div className={`${NARROW} relative grid items-end gap-6 lg:grid-cols-[1.2fr_0.8fr]`}>
             <div className="pb-8 sm:pb-20">
-              <p className="text-[12.5px] font-bold uppercase tracking-[0.16em] text-white">Todo sábado, 10h</p>
+              <p className="text-[12.5px] font-bold uppercase tracking-[0.16em] text-white">Toda sexta, 10h</p>
               <h2 className={`${T} mt-2 text-[36px] font-black leading-[1] tracking-[-0.02em] sm:text-[56px]`}>
                 O WhatsApp da clínica vai apitar de qualquer jeito. A diferença é quem vai responder.
               </h2>
