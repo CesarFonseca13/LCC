@@ -200,11 +200,10 @@ function FacebookConnect({
         config_id: metaSetup.configId,
         response_type: "code",
         override_default_response_type: true,
-        extras: {
-          setup: {},
-          ...(coexistence ? { featureType: "whatsapp_business_app_onboarding" } : {}),
-          sessionInfoVersion: "3",
-        },
+        // Embedded Signup v4: a versão vem da configuração do Login for Business
+        // (produtos selecionados); o extras fica vazio, só com o tipo de fluxo
+        // quando é coexistência. v2/v3 (setup/sessionInfoVersion) saíram em out/2026.
+        extras: coexistence ? { featureType: "whatsapp_business_app_onboarding" } : {},
       },
     );
   }
@@ -226,9 +225,9 @@ function FacebookConnect({
               <span>
                 <strong>API oficial + WhatsApp Business no celular (coexistência)</strong>
                 <span className="block text-xs text-stone-500">
-                  O número continua no app do celular; contatos e até 6 meses de conversas são trazidos. O que a
-                  equipe responder pelo app aparece no painel e pausa a assistente naquela conversa. Precisa do app
-                  WhatsApp Business atualizado no aparelho.
+                  O número continua no app do celular. A partir da conexão, o que chega e o que a equipe responder
+                  pelo app aparecem no painel, e a resposta pelo app pausa a assistente naquela conversa. Precisa do
+                  app WhatsApp Business atualizado no aparelho.
                 </span>
               </span>
             </label>
