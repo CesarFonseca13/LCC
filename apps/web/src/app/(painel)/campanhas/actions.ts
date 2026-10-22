@@ -37,12 +37,17 @@ const storedSegmentSchema = z.object({
 
 const ALLOWED_VARS = new Set(["nome", "clinica"]);
 
-/** Só base cadastrada e contatável — cold list não existe aqui por design. */
+/** Só base cadastrada e contatável — cold list não existe aqui por design.
+ *  A agenda importada do app do celular (fornecedor, família, quem nunca falou
+ *  com a clínica) só entra depois que a pessoa escreveu alguma vez. */
 function segmentWhere(segment: Segment) {
   return sql`
     customers.deleted_at IS NULL AND customers.merged_into_id IS NULL
     AND NOT customers.automations_blocked AND customers.opted_out_at IS NULL
     AND customers.whatsapp_valid IS DISTINCT FROM false
+    AND NOT (customers.source = 'whatsapp_import' AND NOT EXISTS (
+      SELECT 1 FROM conversations c JOIN messages m ON m.conversation_id = c.id
+      WHERE c.customer_id = customers.id AND m.direction = 'inbound'))
     ${segment.status === "todas" ? sql`` : sql`AND customers.status = ${segment.status}`}
     ${
       segment.procedureId

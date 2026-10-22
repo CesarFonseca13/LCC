@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { decryptSensitive } from "@clinicaos/core/crypto";
@@ -36,15 +36,22 @@ function validSignature(raw: string, header: string | null, secret: string): boo
 interface MetaChangeValue {
   metadata?: { phone_number_id?: string; display_phone_number?: string };
   contacts?: { wa_id?: string; profile?: { name?: string } }[];
-  messages?: { id?: string; from?: string }[];
+  messages?: { id?: string; from?: string; to?: string }[];
   statuses?: { id?: string; status?: string }[];
   /** Coexistência: mensagens enviadas pela clínica no app do celular. */
   message_echoes?: { id?: string; to?: string }[];
+  /** Coexistência: agenda de contatos do app (importação inicial e mudanças depois). */
+  state_sync?: unknown[];
+  /** Coexistência: lotes do histórico de conversas (até 6 meses), em fases. */
+  history?: { metadata?: { phase?: number; chunk_order?: number } }[];
+  /** Erro da sincronização (ex.: 2593109 = clínica não compartilhou o histórico). */
+  errors?: unknown;
 }
 
-/** Campos que gravamos; history (sincronização de histórico), smb_app_state_sync
- *  (contatos) e account_update só precisam do 200. */
-const HANDLED_FIELDS = new Set(["messages", "smb_message_echoes"]);
+/** Campos que gravamos como evento para o worker; account_update só precisa do 200. */
+const HANDLED_FIELDS = new Set(["messages", "smb_message_echoes", "smb_app_state_sync", "history"]);
+
+const digest = (value: unknown) => createHash("sha1").update(JSON.stringify(value)).digest("hex").slice(0, 20);
 
 export async function POST(request: NextRequest) {
   const raw = await request.text();
@@ -98,7 +105,10 @@ export async function POST(request: NextRequest) {
 
           await adoptClinic(tx, instance.clinicId);
           const contacts = value.contacts ?? [];
-          for (const message of value.messages ?? []) {
+          // Só o campo "messages" traz mensagem ao vivo — o campo "history" também
+          // usa value.messages (complemento de mídia), e esse NÃO pode virar mensagem nova
+          const liveMessages = change.field === "messages" ? (value.messages ?? []) : [];
+          for (const message of liveMessages) {
             if (!message.id) continue;
             const contact = contacts.find((c) => c.wa_id === message.from) ?? contacts[0] ?? null;
             await tx.execute(sql`
@@ -108,7 +118,8 @@ export async function POST(request: NextRequest) {
               ON CONFLICT DO NOTHING
             `);
           }
-          for (const echo of value.message_echoes ?? []) {
+          const echoes = change.field === "smb_message_echoes" ? (value.message_echoes ?? []) : [];
+          for (const echo of echoes) {
             if (!echo.id) continue;
             await tx.execute(sql`
               INSERT INTO whatsapp_events (instance_id, clinic_id, event_type, wa_message_id, payload, processed)
@@ -116,6 +127,38 @@ export async function POST(request: NextRequest) {
                       ${JSON.stringify({ echo, metadata: value.metadata ?? null })}::jsonb, false)
               ON CONFLICT DO NOTHING
             `);
+          }
+          // Importação da coexistência: cada lote vira UM evento (dedupe pelo
+          // conteúdo — a Meta reenvia o webhook se demoramos a responder)
+          if (change.field === "smb_app_state_sync" && Array.isArray(value.state_sync) && value.state_sync.length > 0) {
+            await tx.execute(sql`
+              INSERT INTO whatsapp_events (instance_id, clinic_id, event_type, wa_message_id, payload, processed)
+              VALUES (${instance.id}, ${instance.clinicId}, 'META_CONTACTS', ${`contacts:${digest(value.state_sync)}`},
+                      ${JSON.stringify({ state_sync: value.state_sync, metadata: value.metadata ?? null })}::jsonb, false)
+              ON CONFLICT DO NOTHING
+            `);
+          }
+          if (change.field === "history") {
+            const items: unknown[] = Array.isArray(value.history) ? [...value.history] : [];
+            if (items.length === 0 && value.errors) items.push({ errors: value.errors });
+            // Complemento de mídia (media_placeholder): a Meta manda o conteúdo em
+            // value.messages, sem value.history — vira um lote de uma mensagem só
+            for (const m of value.messages ?? []) {
+              if (!m.id) continue;
+              const threadId = m.to ?? m.from; // "to" só existe quando foi a clínica que enviou
+              if (!threadId) continue;
+              items.push({ threads: [{ id: threadId, messages: [m] }], mediaFollowUp: true });
+            }
+            for (const item of items) {
+              const meta = (item as { metadata?: { phase?: number; chunk_order?: number } }).metadata;
+              const key = `history:${meta?.phase ?? "x"}:${meta?.chunk_order ?? "x"}:${digest(item)}`;
+              await tx.execute(sql`
+                INSERT INTO whatsapp_events (instance_id, clinic_id, event_type, wa_message_id, payload, processed)
+                VALUES (${instance.id}, ${instance.clinicId}, 'META_HISTORY', ${key},
+                        ${JSON.stringify({ item, metadata: value.metadata ?? null })}::jsonb, false)
+                ON CONFLICT DO NOTHING
+              `);
+            }
           }
           for (const status of value.statuses ?? []) {
             const st = String(status.status ?? "").toUpperCase();

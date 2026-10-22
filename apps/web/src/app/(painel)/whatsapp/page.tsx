@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import Link from "next/link";
+import { Fragment } from "react";
 import { can } from "@clinicaos/core/permissions";
 import { formatPhoneBR } from "@clinicaos/core/phone";
 import { appendSlotsToMessage, findMentionedProcedures, suggestOffers } from "@clinicaos/core/offers";
@@ -9,6 +10,17 @@ import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
 import { Composer, ModeBanner, OfferPanel, type OfferView, ReadOnOpen, AutoRefresh } from "./inbox-client";
+
+/** Balão sem texto (mídia, figurinha, histórico importado do app): o que mostrar no lugar. */
+const MEDIA_LABEL: Record<string, string> = {
+  image: "📷 Foto",
+  audio: "🎤 Áudio",
+  video: "🎬 Vídeo",
+  document: "📎 Documento",
+  sticker: "Figurinha",
+  location: "📍 Localização",
+  other: "Mídia ou anexo",
+};
 
 export const metadata = { title: "WhatsApp" };
 
@@ -118,10 +130,14 @@ export default async function WhatsAppPage({
         id: string;
         direction: string;
         author: string;
+        type: string;
         body: string | null;
         status: string;
         error: string | null;
         time: string;
+        /** Dia da mensagem (ISO) e rótulo "Hoje" / "Ontem" / dd/mm/aaaa — histórico importado tem meses. */
+        date: string;
+        dateLabel: string;
         automationId: string | null;
       }[] = [];
       let panel: {
@@ -145,16 +161,25 @@ export default async function WhatsAppPage({
           .orderBy(desc(schema.messages.createdAt))
           .limit(200);
         messages.reverse();
-        thread = messages.map((m) => ({
-          id: m.id,
-          direction: m.direction,
-          author: m.author,
-          body: m.body,
-          status: m.status,
-          error: m.error ?? null,
-          time: utcToZoned(new Date(m.createdAt), tz).timeHHMM,
-          automationId: m.automationId,
-        }));
+        const todayKey = utcToZoned(new Date(), tz).dateISO;
+        const yesterdayKey = utcToZoned(new Date(Date.now() - 86_400_000), tz).dateISO;
+        thread = messages.map((m) => {
+          const z = utcToZoned(new Date(m.createdAt), tz);
+          return {
+            id: m.id,
+            direction: m.direction,
+            author: m.author,
+            type: m.type,
+            body: m.body,
+            status: m.status,
+            error: m.error ?? null,
+            time: z.timeHHMM,
+            date: z.dateISO,
+            dateLabel:
+              z.dateISO === todayKey ? "Hoje" : z.dateISO === yesterdayKey ? "Ontem" : z.dateISO.split("-").reverse().join("/"),
+            automationId: m.automationId,
+          };
+        });
 
         const phone = selected.remoteJid.replace(/@.*$/, "");
         let nextAppointment: string | null = null;
@@ -463,10 +488,14 @@ export default async function WhatsAppPage({
             {/* col-reverse: o navegador ancora o scroll no FIM nativamente —
                 conversa abre na última mensagem, como todo app de mensagem */}
             <div className="flex flex-1 flex-col-reverse gap-2 overflow-y-auto p-6">
-              {[...data.thread].reverse().map((m) => {
+              {[...data.thread].reverse().map((m, i, arr) => {
                 const mine = m.direction === "outbound";
+                // col-reverse: o item SEGUINTE no array é o anterior no tempo —
+                // troca de dia ganha um separador acima do balão
+                const newDay = i === arr.length - 1 || arr[i + 1]!.date !== m.date;
                 return (
-                  <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                  <Fragment key={m.id}>
+                    <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
                     <div
                       className={`max-w-[70%] rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
                         mine
@@ -479,7 +508,9 @@ export default async function WhatsAppPage({
                           ✨ automação
                         </p>
                       ) : null}
-                      <p className="whitespace-pre-wrap">{m.body ?? `[${m.status}]`}</p>
+                      <p className={`whitespace-pre-wrap ${m.body ? "" : "italic opacity-80"}`}>
+                        {m.body ?? MEDIA_LABEL[m.type] ?? "Mensagem sem texto"}
+                      </p>
                       <p
                         className={`mt-1 text-right text-[10px] ${
                           mine ? "text-teal-100" : "text-stone-400"
@@ -504,7 +535,15 @@ export default async function WhatsAppPage({
                         </p>
                       ) : null}
                     </div>
-                  </div>
+                    </div>
+                    {newDay ? (
+                      <p className="my-1 text-center">
+                        <span className="rounded-full bg-stone-200/80 px-2.5 py-0.5 text-[11px] font-medium text-stone-600">
+                          {m.dateLabel}
+                        </span>
+                      </p>
+                    ) : null}
+                  </Fragment>
                 );
               })}
             </div>

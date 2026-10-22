@@ -20,6 +20,28 @@ const clinicId = () =>
     .notNull()
     .references(() => clinics.id);
 
+/** Importação da coexistência (contatos + histórico do app WhatsApp Business). */
+export interface MetaSyncState {
+  /** Quando os pedidos foram feitos à Meta (ISO). */
+  requestedAt?: string;
+  contactsRequestId?: string | null;
+  historyRequestId?: string | null;
+  contactsError?: string | null;
+  historyError?: string | null;
+  /** Fichas criadas ou renomeadas a partir da agenda do app. */
+  contacts?: number;
+  /** Conversas e mensagens gravadas a partir do histórico. */
+  threads?: number;
+  messages?: number;
+  /** Progresso informado pela Meta (0–100) e fase (0: hoje, 1: 90 dias, 2: 180 dias). */
+  progress?: number;
+  phase?: number;
+  lastEventAt?: string;
+  /** false = a clínica optou por não compartilhar o histórico no app. */
+  historyShared?: boolean | null;
+  doneAt?: string | null;
+}
+
 export const whatsappInstances = pgTable(
   "whatsapp_instances",
   {
@@ -41,6 +63,10 @@ export const whatsappInstances = pgTable(
     metaCoexistence: boolean("meta_coexistence").notNull().default(false),
     /** PIN de verificação em duas etapas (registro do número pela API), cifrado. */
     metaPinEnc: text("meta_pin_enc"),
+    /** Coexistência: quando pedimos à Meta os contatos e o histórico do app (janela única de 24 h). */
+    metaSyncRequestedAt: timestamp("meta_sync_requested_at", { withTimezone: true }),
+    /** Andamento da importação (pedidos, contadores, progresso). */
+    metaSync: jsonb("meta_sync").$type<MetaSyncState>(),
     label: text("label"),
     phoneE164: text("phone_e164"),
     isPrimary: boolean("is_primary").notNull().default(false),
@@ -75,6 +101,8 @@ export const whatsappEvents = pgTable(
     processed: boolean("processed").notNull().default(false),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     error: text("error"),
+    /** Tentativas de processamento (lotes da importação são retentados). */
+    attempts: integer("attempts").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );

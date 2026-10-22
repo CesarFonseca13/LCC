@@ -154,7 +154,7 @@ function normalizeMetaEvent(eventType: string, data: unknown): NormalizedEvent {
     return {
       kind: "message",
       waMessageId,
-      remoteJid: `${to.replace(/D/g, "")}@s.whatsapp.net`,
+      remoteJid: `${to.replace(/\D/g, "")}@s.whatsapp.net`,
       fromMe: true,
       messageType: (known as readonly string[]).includes(type) ? (type as NormalizedInbound["messageType"]) : "other",
       body,
@@ -282,9 +282,41 @@ export function normalizeEvent(eventType: string, data: unknown): NormalizedEven
   }
 }
 
-/** remoteJid → telefone E.164 (+5511... ). */
-export function jidToPhone(remoteJid: string): string | null {
-  const digits = remoteJid.replace(/@.*$/, "").replace(/\D/g, "");
+/**
+ * Dígitos de um wa_id/telefone → E.164 (+5511999998888).
+ * Celular brasileiro sem o nono dígito (a Meta ainda entrega 55 + DDD + 8 dígitos
+ * para números antigos da agenda) ganha o 9 — fixo (começa em 2–5) fica como está.
+ */
+export function waDigitsToE164(raw: string): string | null {
+  const digits = raw.replace(/\D/g, "");
   if (digits.length < 10) return null;
+  if (digits.startsWith("55") && digits.length === 12 && /^[6-9]/.test(digits.slice(4))) {
+    return `+55${digits.slice(2, 4)}9${digits.slice(4)}`;
+  }
   return `+${digits}`;
+}
+
+/** Formas equivalentes de um número BR (com e sem o nono dígito), para casar
+ *  fichas antigas: +5561984409779 ↔ +556184409779. Outros países: só o próprio. */
+export function brPhoneVariants(e164: string): string[] {
+  const m = e164.match(/^\+55(\d{2})(\d{8,9})$/);
+  if (!m) return [e164];
+  const [, ddd, local] = m;
+  if (local!.length === 9 && local!.startsWith("9") && /^[6-9]/.test(local!.slice(1))) {
+    return [e164, `+55${ddd}${local!.slice(1)}`];
+  }
+  if (local!.length === 8 && /^[6-9]/.test(local!)) return [`+55${ddd}9${local}`, e164];
+  return [e164];
+}
+
+/** JIDs equivalentes de um telefone (com e sem o nono dígito BR): a conversa é
+ *  achada por qualquer um deles, mas o remote_jid gravado é sempre o que a Meta
+ *  ou a Evolution mandou (é nele que o envio funciona). Primeiro = forma canônica. */
+export function phoneToJids(e164: string): string[] {
+  return brPhoneVariants(e164).map((p) => `${p.replace("+", "")}@s.whatsapp.net`);
+}
+
+/** remoteJid → telefone E.164 (+5511... ), já com o nono dígito do celular BR. */
+export function jidToPhone(remoteJid: string): string | null {
+  return waDigitsToE164(remoteJid.replace(/@.*$/, ""));
 }

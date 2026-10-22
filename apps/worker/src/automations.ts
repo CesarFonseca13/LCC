@@ -1,4 +1,5 @@
 import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
+import { jidToPhone, phoneToJids } from "@clinicaos/whatsapp";
 import type { Logger } from "pino";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
@@ -837,6 +838,10 @@ async function ensureConversationForAutomation(
   remoteJid: string,
   customerId: string,
 ): Promise<string> {
+  // Conversa aberta pela cliente pode estar com o jid sem o nono dígito (Meta):
+  // reaproveita qualquer forma equivalente em vez de abrir uma segunda conversa
+  const jids = phoneToJids(jidToPhone(remoteJid) ?? "");
+  if (!jids.includes(remoteJid)) jids.push(remoteJid);
   const db = unsafeGlobalDb();
   const existing = await db
     .select({ id: schema.conversations.id })
@@ -844,8 +849,12 @@ async function ensureConversationForAutomation(
     .where(
       and(
         eq(schema.conversations.instanceId, instanceId),
-        eq(schema.conversations.remoteJid, remoteJid),
+        inArray(schema.conversations.remoteJid, jids),
       ),
+    )
+    .orderBy(
+      sql`(${schema.conversations.remoteJid} = ${remoteJid}) DESC`,
+      sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`,
     )
     .limit(1);
   if (existing[0]) return existing[0].id;

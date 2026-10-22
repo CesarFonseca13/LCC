@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { Button, FieldError, Input, Label } from "@/components/ui";
 import {
@@ -10,6 +11,7 @@ import {
   makePrimaryWhatsApp,
   pollWhatsApp,
   renameWhatsApp,
+  requestMetaImport,
   setupWhatsApp,
   syncMetaTemplates,
 } from "./actions";
@@ -27,6 +29,23 @@ declare global {
   }
 }
 
+/** Coexistência: andamento da importação de contatos e histórico do app (espelho de MetaSyncState). */
+export interface SyncView {
+  requestedAt?: string;
+  contactsRequestId?: string | null;
+  historyRequestId?: string | null;
+  contactsError?: string | null;
+  historyError?: string | null;
+  contacts?: number;
+  threads?: number;
+  messages?: number;
+  progress?: number;
+  phase?: number;
+  lastEventAt?: string;
+  historyShared?: boolean | null;
+  doneAt?: string | null;
+}
+
 export interface InstanceView {
   id: string;
   label: string;
@@ -42,6 +61,7 @@ export interface InstanceView {
     tokenHint: string | null;
     verifiedName: string | null;
     coexistence?: boolean;
+    sync?: SyncView | null;
     templates: { approved: number; pending: number; rejected: number; total: number };
   } | null;
 }
@@ -126,6 +146,15 @@ function FacebookConnect({
         codeRef.current = null;
         return;
       }
+      // Coexistência: com o número já gravado, pede a importação de contatos e
+      // histórico do app (janela de 24 h; pedido único — por isso só depois de salvar)
+      let sync: SyncView | null = null;
+      if (coexistence && r.instanceId) {
+        setStatus("Número conectado — pedindo à Meta os contatos e o histórico do app...");
+        const s = await requestMetaImport({ instanceId: r.instanceId });
+        sync = s.ok ? (s.sync ?? null) : null;
+        if (!s.ok || s.warning) setError(s.error ?? s.warning);
+      }
       onDone({
         id: r.instanceId ?? "",
         label: label || "Principal",
@@ -139,6 +168,8 @@ function FacebookConnect({
           wabaId: session.wabaId,
           tokenHint: null,
           verifiedName: null,
+          coexistence,
+          sync,
           templates: r.templates ?? { approved: 0, pending: 0, rejected: 0, total: 0 },
         },
       });
@@ -561,6 +592,8 @@ function InstanceRow({
   canRemoveConnect: boolean;
 }) {
   const [error, setError] = useState<string>();
+  /** Aviso sem ser erro (ex.: pedido de importação feito). */
+  const [notice, setNotice] = useState<string>();
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState(instance.label);
   const [reconnecting, setReconnecting] = useState(false);
@@ -797,6 +830,26 @@ function InstanceRow({
         </div>
       ) : null}
 
+      {provider === "meta" && instance.meta?.coexistence && instance.status === "connected" ? (
+        <ImportStatus
+          sync={instance.meta.sync ?? null}
+          pending={pending}
+          notice={notice}
+          onRequest={() => {
+            setNotice(undefined);
+            run(() =>
+              requestMetaImport({ instanceId: instance.id }).then((r) => {
+                if (r.ok && instance.meta) {
+                  onChange({ ...instance, meta: { ...instance.meta, sync: r.sync ?? instance.meta.sync ?? null } });
+                  setNotice(r.warning ?? "Pedido feito — a Meta envia os dados aos poucos; use \"atualizar\" para acompanhar.");
+                }
+                return r;
+              }),
+            );
+          }}
+        />
+      ) : null}
+
       {reconnecting ? (
         <div className="mt-4">
           <MetaConnectForm
@@ -812,6 +865,70 @@ function InstanceRow({
       ) : null}
 
       <FieldError message={error} />
+    </div>
+  );
+}
+
+/** Coexistência: o que já veio do app do celular (contatos e conversas) e o botão
+ *  para pedir de novo quando a Meta recusou o pedido. */
+function ImportStatus({
+  sync,
+  pending,
+  notice,
+  onRequest,
+}: {
+  sync: SyncView | null;
+  pending: boolean;
+  notice?: string;
+  onRequest: () => void;
+}) {
+  const router = useRouter();
+  const requested = Boolean(sync?.contactsRequestId || sync?.historyRequestId);
+  const complete = Boolean(sync?.contactsRequestId && sync?.historyRequestId);
+  const done = Boolean(sync?.doneAt);
+  const n = (v: number | undefined) => (v ?? 0).toLocaleString("pt-BR");
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-stone-50 px-3 py-2 text-xs text-stone-600">
+      <span className="font-medium text-stone-700">Importação do app do celular:</span>
+      {!requested ? (
+        <span>não pedida</span>
+      ) : (
+        <span>
+          {done ? "concluída" : sync?.historyShared === false ? "só contatos" : "em andamento"} · {n(sync?.contacts)} contatos ·{" "}
+          {n(sync?.threads)} conversas · {n(sync?.messages)} mensagens
+          {!done && sync?.progress ? ` · ${sync.progress}%` : ""}
+        </span>
+      )}
+      {sync?.historyShared === false ? (
+        <span className="text-amber-700">(a clínica não compartilhou o histórico na tela do app)</span>
+      ) : null}
+      {sync?.contactsError ? <span className="text-red-600">contatos: {sync.contactsError}</span> : null}
+      {sync?.historyError ? <span className="text-red-600">histórico: {sync.historyError}</span> : null}
+      {notice ? <span className="w-full text-teal-800">{notice}</span> : null}
+      {!complete ? (
+        <button
+          type="button"
+          className="text-teal-700 underline-offset-2 hover:underline disabled:opacity-50"
+          disabled={pending}
+          onClick={onRequest}
+        >
+          Pedir importação
+        </button>
+      ) : !done ? (
+        <button
+          type="button"
+          className="text-teal-700 underline-offset-2 hover:underline"
+          onClick={() => router.refresh()}
+        >
+          atualizar
+        </button>
+      ) : null}
+      {!complete ? (
+        <span className="w-full text-stone-400">
+          A Meta só aceita o pedido nas 24 h seguintes à conexão; contatos viram fichas e as conversas dos últimos 6 meses
+          aparecem em Conversas (fotos e áudios antigos não vêm).
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -900,8 +1017,12 @@ export function WhatsAppCard({
   // O vigia muda o status no servidor e a página se recarrega sozinha — o
   // card precisa ACEITAR o estado novo (useState ignora props novas). Sem
   // isso, um número que caiu continuava "Conectado" na tela até dar F5.
+  // (inclui o andamento da importação: o "atualizar" do card depende disso)
   const serverKey = initialInstances
-    .map((i) => `${i.id}:${i.status}:${i.phone}:${i.isPrimary}:${i.meta?.templates.approved ?? "-"}`)
+    .map(
+      (i) =>
+        `${i.id}:${i.status}:${i.phone}:${i.isPrimary}:${i.meta?.templates.approved ?? "-"}:${JSON.stringify(i.meta?.sync ?? null)}`,
+    )
     .join("|");
   const lastServerKey = useRef(serverKey);
   useEffect(() => {

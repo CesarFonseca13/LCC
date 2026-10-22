@@ -65,14 +65,24 @@ export class MetaCloudClient {
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${this.base}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${this.config.accessToken}`,
-        "content-type": "application/json",
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.base}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${this.config.accessToken}`,
+          "content-type": "application/json",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        // A Meta travada não pode segurar uma transação do painel para sempre
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new MetaApiError(`Meta ${method} ${path} → sem resposta em 30 s`, 0, null);
+      }
+      throw err;
+    }
     const text = await res.text();
     let json: unknown;
     try {
@@ -139,6 +149,17 @@ export class MetaCloudClient {
   async subscribeApp(): Promise<void> {
     if (!this.config.wabaId) return;
     await this.request("POST", `/${this.config.wabaId}/subscribed_apps`);
+  }
+
+  /** Coexistência: pede à Meta os contatos da agenda do app (smb_app_state_sync) ou
+   *  o histórico de conversas (history). Vale só nas 24 h após a conexão e uma vez
+   *  cada; a resposta chega pelos webhooks de mesmo nome. */
+  async requestSmbAppData(syncType: "smb_app_state_sync" | "history"): Promise<{ requestId: string | null }> {
+    const r = await this.request<{ request_id?: string }>("POST", `/${this.config.phoneNumberId}/smb_app_data`, {
+      messaging_product: "whatsapp",
+      sync_type: syncType,
+    });
+    return { requestId: r.request_id ?? null };
   }
 
   async sendText(to: string, text: string): Promise<{ waMessageId?: string }> {

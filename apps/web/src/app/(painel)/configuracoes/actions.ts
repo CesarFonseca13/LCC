@@ -38,9 +38,75 @@ export interface WhatsAppState {
   phone?: string | null;
   instanceId?: string;
   templates?: { approved: number; pending: number; rejected: number; total: number };
+  /** Coexistência: andamento da importação de contatos e histórico do app. */
+  sync?: schema.MetaSyncState | null;
 }
 
 const emptySchema = z.object({});
+
+/**
+ * Coexistência: pede à Meta a agenda de contatos e o histórico do app WhatsApp
+ * Business. Cada pedido vale UMA vez e só nas 24 h após a conexão; por isso só
+ * repete o que ainda não foi aceito (ex.: falhou na primeira tentativa).
+ */
+async function requestCoexistenceImport(
+  tx: Tx,
+  instanceId: string,
+  client: MetaCloudClient,
+  previous: schema.MetaSyncState | null | undefined,
+): Promise<{ state: schema.MetaSyncState; warning?: string }> {
+  // Só o que este pedido muda — o worker já pode estar somando contadores no
+  // mesmo jsonb, então mescla no banco em vez de gravar a foto antiga por cima
+  const patch: schema.MetaSyncState = {};
+  if (!previous?.requestedAt) patch.requestedAt = new Date().toISOString();
+  const problems: string[] = [];
+  if (!previous?.contactsRequestId) {
+    try {
+      patch.contactsRequestId = (await client.requestSmbAppData("smb_app_state_sync")).requestId ?? "ok";
+      patch.contactsError = null;
+    } catch (err) {
+      console.warn("[coexistência] pedido de contatos recusado", { instanceId, err: String(err) });
+      patch.contactsError = smbAppDataErrorFriendly(err);
+      problems.push("contatos");
+    }
+  }
+  if (!previous?.historyRequestId) {
+    try {
+      patch.historyRequestId = (await client.requestSmbAppData("history")).requestId ?? "ok";
+      patch.historyError = null;
+    } catch (err) {
+      console.warn("[coexistência] pedido de histórico recusado", { instanceId, err: String(err) });
+      patch.historyError = smbAppDataErrorFriendly(err);
+      problems.push("histórico");
+    }
+  }
+  const updated = await tx.execute(sql`
+    UPDATE whatsapp_instances
+    SET meta_sync = COALESCE(meta_sync, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
+        meta_sync_requested_at = COALESCE(meta_sync_requested_at, now()),
+        updated_at = now()
+    WHERE id = ${instanceId}
+    RETURNING meta_sync
+  `);
+  const state = ((updated.rows[0] as { meta_sync?: schema.MetaSyncState } | undefined)?.meta_sync ?? patch) as schema.MetaSyncState;
+  return {
+    state,
+    warning:
+      problems.length > 0
+        ? `A Meta não aceitou o pedido de importação de ${problems.join(" e ")} — tente de novo pelo botão "Pedir importação" (vale por 24 h após a conexão).`
+        : undefined,
+  };
+}
+
+/** Erro da Meta no pedido de importação, em português e sem ids técnicos. */
+function smbAppDataErrorFriendly(err: unknown): string {
+  if (err instanceof MetaApiError) {
+    if (err.code === 190 || err.status === 401) return "token recusado pela Meta — reconecte o número.";
+    if (err.status === 0) return "a Meta não respondeu a tempo.";
+    return `a Meta recusou o pedido (código ${err.code ?? err.status}).`;
+  }
+  return "não consegui falar com a Meta agora.";
+}
 const instanceIdSchema = z.object({ instanceId: z.string().uuid().optional() });
 
 /** Cria (ou retoma) UMA instância e pede o QR. Sem instanceId = número NOVO. */
@@ -949,6 +1015,9 @@ export const finishEmbeddedSignup = authAction({
         )
         .limit(1)
     )[0];
+    // A importação de contatos/histórico (coexistência) é pedida pelo cliente
+    // logo DEPOIS desta transação fechar (requestMetaImport): o pedido à Meta
+    // vale uma vez só, e os webhooks de resposta precisam achar o número gravado
     return saveMetaInstance(tx, auth.clinicId, client, {
       existing,
       phoneNumberId,
@@ -962,6 +1031,54 @@ export const finishEmbeddedSignup = authAction({
       warning,
       key,
     });
+  },
+});
+
+/** Pede à Meta a importação de contatos e histórico do app (coexistência).
+ *  Chamado logo após a conexão e pelo botão "Pedir importação"; repete só o
+ *  pedido que a Meta ainda não aceitou. */
+export const requestMetaImport = authAction({
+  permission: "settings.manage",
+  schema: z.object({ instanceId: z.string().uuid() }),
+  handler: async (input, { auth, tx }): Promise<WhatsAppState> => {
+    const instance = (
+      await tx
+        .select()
+        .from(schema.whatsappInstances)
+        .where(
+          and(
+            eq(schema.whatsappInstances.id, input.instanceId),
+            eq(schema.whatsappInstances.clinicId, auth.clinicId),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!instance || instance.provider !== "meta" || !instance.metaAccessTokenEnc || !instance.metaPhoneNumberId) {
+      return { ok: false, error: "Número não encontrado." };
+    }
+    if (!instance.metaCoexistence) {
+      return { ok: false, error: "A importação só existe para números que continuam no app do celular (coexistência)." };
+    }
+    if (instance.metaSync?.contactsRequestId && instance.metaSync?.historyRequestId) {
+      return { ok: true, sync: instance.metaSync, warning: "A importação já foi pedida; a Meta envia os dados aos poucos." };
+    }
+    const key = process.env.SENSITIVE_DATA_KEY;
+    if (!key) return { ok: false, error: "Servidor sem SENSITIVE_DATA_KEY." };
+    let token: string;
+    try {
+      token = decryptSensitive(instance.metaAccessTokenEnc, key);
+    } catch {
+      return { ok: false, error: "Token ilegível — reconecte o número." };
+    }
+    const client = new MetaCloudClient({
+      accessToken: token,
+      phoneNumberId: instance.metaPhoneNumberId,
+      wabaId: instance.metaWabaId,
+      graphVersion: process.env.META_GRAPH_VERSION,
+    });
+    const sync = await requestCoexistenceImport(tx, instance.id, client, instance.metaSync);
+    revalidatePath("/configuracoes");
+    return { ok: true, sync: sync.state, warning: sync.warning };
   },
 });
 

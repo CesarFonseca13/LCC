@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { phoneToJids } from "@clinicaos/whatsapp";
 import type { Logger } from "pino";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
 import { pickInstanceForCustomer } from "./whatsapp";
@@ -155,7 +156,7 @@ async function generatePdf(
   // Multi-número: a cópia sai pelo número que já conversa com a cliente
   const instance = await pickInstanceForCustomer(doc.clinicId, doc.customerId);
   if (customer && instance) {
-    const remoteJid = `${customer.phoneE164.replace("+", "")}@s.whatsapp.net`;
+    // Conversa pode estar gravada com o jid sem o nono dígito (Meta): aceita as duas formas
     const conversation = (
       await db
         .select({ id: schema.conversations.id })
@@ -163,9 +164,10 @@ async function generatePdf(
         .where(
           and(
             eq(schema.conversations.instanceId, instance.id),
-            eq(schema.conversations.remoteJid, remoteJid),
+            inArray(schema.conversations.remoteJid, phoneToJids(customer.phoneE164)),
           ),
         )
+        .orderBy(sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`)
         .limit(1)
     )[0];
     if (conversation) {

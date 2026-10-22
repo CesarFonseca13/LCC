@@ -1,7 +1,8 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { phoneToJids } from "@clinicaos/whatsapp";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { addDaysISO, todayISO } from "@clinicaos/core/timezone";
@@ -48,7 +49,9 @@ async function queueWhatsAppText(
       .where(eq(schema.clinics.id, clinicId))
       .limit(1)
   )[0];
-  const remoteJid = `${customerPhone.replace("+", "")}@s.whatsapp.net`;
+  // Conversa aberta pela cliente pode estar com o jid sem o nono dígito (Meta): aceita as duas formas
+  const jids = phoneToJids(customerPhone);
+  const remoteJid = jids[0]!;
   let conversation = (
     await tx
       .select({ id: schema.conversations.id })
@@ -56,9 +59,10 @@ async function queueWhatsAppText(
       .where(
         and(
           eq(schema.conversations.instanceId, instance.id),
-          eq(schema.conversations.remoteJid, remoteJid),
+          inArray(schema.conversations.remoteJid, jids),
         ),
       )
+      .orderBy(sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`)
       .limit(1)
   )[0];
   if (!conversation) {

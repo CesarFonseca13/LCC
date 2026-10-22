@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { phoneToJids } from "@clinicaos/whatsapp";
 import type { Logger } from "pino";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { utcToZoned } from "@clinicaos/core/timezone";
@@ -235,14 +236,25 @@ async function sendNext(campaign: CampaignRow, logger: Logger): Promise<void> {
       { html: false },
     );
 
-    const remoteJid = `${target.phone_e164.replace("+", "")}@s.whatsapp.net`;
-    const conversation = await tx.execute(sql`
-      INSERT INTO conversations (clinic_id, instance_id, remote_jid, customer_id)
-      VALUES (${campaign.clinic_id}, ${chosen.id}, ${remoteJid}, ${target.customer_id})
-      ON CONFLICT (instance_id, remote_jid) DO UPDATE SET customer_id = EXCLUDED.customer_id
-      RETURNING id
+    // Conversa já aberta pela cliente pode estar com o jid sem o nono dígito (Meta):
+    // reaproveita qualquer forma equivalente antes de criar
+    const jids = phoneToJids(target.phone_e164);
+    const remoteJid = jids[0]!;
+    const found = await tx.execute(sql`
+      SELECT id FROM conversations
+      WHERE instance_id = ${chosen.id} AND remote_jid IN ${jids}
+      ORDER BY last_message_at DESC NULLS LAST LIMIT 1
     `);
-    const conversationId = (conversation.rows[0] as { id: string }).id;
+    let conversationId = (found.rows[0] as { id: string } | undefined)?.id;
+    if (!conversationId) {
+      const conversation = await tx.execute(sql`
+        INSERT INTO conversations (clinic_id, instance_id, remote_jid, customer_id)
+        VALUES (${campaign.clinic_id}, ${chosen.id}, ${remoteJid}, ${target.customer_id})
+        ON CONFLICT (instance_id, remote_jid) DO UPDATE SET customer_id = EXCLUDED.customer_id
+        RETURNING id
+      `);
+      conversationId = (conversation.rows[0] as { id: string }).id;
+    }
 
     const message = await tx.execute(sql`
       INSERT INTO messages (clinic_id, conversation_id, direction, author, body, status,

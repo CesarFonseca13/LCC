@@ -1,6 +1,7 @@
 "use server";
 
 import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { phoneToJids } from "@clinicaos/whatsapp";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import {
@@ -163,7 +164,9 @@ export const prepareOutreach = authAction({
       packageName: metrics.packageName,
     });
 
-    const remoteJid = `${customer.phoneE164.replace("+", "")}@s.whatsapp.net`;
+    // Conversa aberta pela cliente pode estar com o jid sem o nono dígito (Meta): aceita as duas formas
+    const jids = phoneToJids(customer.phoneE164);
+    const remoteJid = jids[0]!;
     let conversation = (
       await tx
         .select({ id: schema.conversations.id })
@@ -171,9 +174,10 @@ export const prepareOutreach = authAction({
         .where(
           and(
             eq(schema.conversations.instanceId, instance.id),
-            eq(schema.conversations.remoteJid, remoteJid),
+            inArray(schema.conversations.remoteJid, jids),
           ),
         )
+        .orderBy(sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`)
         .limit(1)
     )[0];
     if (!conversation) {

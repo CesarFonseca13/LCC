@@ -52,6 +52,7 @@ export default async function ConfiguracoesPage() {
           metaTokenHint: schema.whatsappInstances.metaTokenHint,
           metaVerifiedName: schema.whatsappInstances.metaVerifiedName,
           metaCoexistence: schema.whatsappInstances.metaCoexistence,
+          metaSync: schema.whatsappInstances.metaSync,
         })
         .from(schema.whatsappInstances)
         .where(eq(schema.whatsappInstances.clinicId, auth.clinicId!))
@@ -213,6 +214,7 @@ export default async function ConfiguracoesPage() {
                       tokenHint: inst.metaTokenHint,
                       verifiedName: inst.metaVerifiedName,
                       coexistence: inst.metaCoexistence,
+                      sync: inst.metaSync ?? null,
                       templates: counts,
                     }
                   : null,

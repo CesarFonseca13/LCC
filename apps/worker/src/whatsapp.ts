@@ -1,17 +1,20 @@
 import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import {
+  brPhoneVariants,
   jidToPhone,
   MetaApiError,
+  phoneToJids,
   metaErrorToPortuguese,
   normalizeEvent,
   templatePurposeFor,
   type EvolutionClient,
 } from "@clinicaos/whatsapp";
 import { SPEND_BLOCKED_MESSAGE } from "@clinicaos/core/spend";
-import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { schema, unsafeGlobalDb, type Tx } from "@clinicaos/db";
 import { clinicHasAiEnabled, scheduleAiTurn } from "./ai-agent";
 import { classifyInbound } from "./classify-inbound";
+import { handleCoexistenceEvent } from "./coexistence";
 import { metaClientFor } from "./meta-client";
 import { getSpendStatus, notifySpendThresholds, recordMetaUsage } from "./spend";
 import { pauseReactivationOnReply } from "./reactivation";
@@ -35,7 +38,13 @@ export async function processEvents(logger: Logger): Promise<number> {
   const events = await db
     .select()
     .from(schema.whatsappEvents)
-    .where(eq(schema.whatsappEvents.processed, false))
+    .where(
+      and(
+        eq(schema.whatsappEvents.processed, false),
+        // Evento que falhou e vai ser retentado espera 1 min (processed_at marca a tentativa)
+        or(isNull(schema.whatsappEvents.processedAt), sql`${schema.whatsappEvents.processedAt} < now() - interval '1 minute'`),
+      ),
+    )
     .orderBy(asc(schema.whatsappEvents.id))
     .limit(50);
 
@@ -48,20 +57,29 @@ export async function processEvents(logger: Logger): Promise<number> {
         .where(eq(schema.whatsappEvents.id, event.id));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error({ eventId: event.id, err: message }, "falha ao processar evento");
+      // Lotes da importação (coexistência) chegam uma vez só: retenta antes de enterrar
+      const retryable = RETRYABLE_EVENTS.has(event.eventType);
+      const attempts = (event.attempts ?? 0) + 1;
+      const giveUp = !retryable || attempts >= MAX_EVENT_ATTEMPTS;
+      logger.error({ eventId: event.id, err: message, attempts, giveUp }, "falha ao processar evento");
       await db
         .update(schema.whatsappEvents)
-        .set({ processed: true, processedAt: new Date(), error: message })
+        .set({ processed: giveUp, processedAt: new Date(), error: message, attempts })
         .where(eq(schema.whatsappEvents.id, event.id));
     }
   }
   return events.length;
 }
 
+const RETRYABLE_EVENTS = new Set(["META_HISTORY", "META_CONTACTS"]);
+const MAX_EVENT_ATTEMPTS = 10;
+
 type WhatsappEventRow = typeof schema.whatsappEvents.$inferSelect;
 
 async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<void> {
   const db = unsafeGlobalDb();
+  // Importação da coexistência (contatos/histórico do app): módulo próprio
+  if (await handleCoexistenceEvent(event, logger)) return;
   const normalized = normalizeEvent(event.eventType, event.payload);
 
   switch (normalized.kind) {
@@ -135,6 +153,8 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
               SELECT 1 FROM messages m
               JOIN conversations c2 ON c2.id = m.conversation_id
               WHERE c2.customer_id = d.customer_id AND m.direction = 'outbound'
+                -- resposta DEPOIS de abrir a negociação (histórico importado do app não conta)
+                AND m.created_at > d.created_at
             )
         `);
       }
@@ -319,7 +339,7 @@ export async function pickInstanceForCustomer(
  * espaços duplicados. Sobrou nada utilizável → ficha nasce com o telefone
  * (a IA pergunta o nome completo na hora de marcar e completa o campo).
  */
-function cleanPushName(pushName: string | null): string | null {
+export function cleanPushName(pushName: string | null): string | null {
   if (!pushName) return null;
   const cleaned = pushName
     .replace(/[^\p{L}\p{M}\s.'-]/gu, " ")
@@ -334,6 +354,8 @@ async function ensureCustomer(
   pushName: string | null,
 ): Promise<string> {
   const db = unsafeGlobalDb();
+  // Celular BR: a Meta pode mandar o wa_id sem o nono dígito — casa as duas formas
+  const forms = brPhoneVariants(phone);
   const existing = await db
     .select({ id: schema.customers.id, status: schema.customers.status })
     .from(schema.customers)
@@ -342,10 +364,10 @@ async function ensureCustomer(
         eq(schema.customers.clinicId, clinicId),
         isNull(schema.customers.deletedAt),
         or(
-          eq(schema.customers.phoneE164, phone),
+          inArray(schema.customers.phoneE164, forms),
           sql`EXISTS (SELECT 1 FROM customer_phones cp
                       WHERE cp.customer_id = ${schema.customers.id}
-                        AND cp.phone_e164 = ${phone})`,
+                        AND cp.phone_e164 IN ${forms})`,
         ),
       ),
     )
@@ -410,21 +432,33 @@ async function ensureCustomer(
   return retry[0].id;
 }
 
-async function ensureConversation(
+/** Conexão do worker ou transação em andamento (lotes da importação são atômicos). */
+export type Conn = ReturnType<typeof unsafeGlobalDb> | Tx;
+
+export async function ensureConversation(
   clinicId: string,
   instanceId: string,
   remoteJid: string,
   customerId: string | null,
+  db: Conn = unsafeGlobalDb(),
 ): Promise<string> {
-  const db = unsafeGlobalDb();
+  // A mesma pessoa pode aparecer com e sem o nono dígito (Meta × ficha × Evolution):
+  // acha a conversa por qualquer forma, preferindo a exata e a mais recente
+  const phone = jidToPhone(remoteJid);
+  const jids = phone ? phoneToJids(phone) : [remoteJid];
+  if (!jids.includes(remoteJid)) jids.push(remoteJid);
   const existing = await db
     .select({ id: schema.conversations.id, customerId: schema.conversations.customerId })
     .from(schema.conversations)
     .where(
       and(
         eq(schema.conversations.instanceId, instanceId),
-        eq(schema.conversations.remoteJid, remoteJid),
+        inArray(schema.conversations.remoteJid, jids),
       ),
+    )
+    .orderBy(
+      sql`(${schema.conversations.remoteJid} = ${remoteJid}) DESC`,
+      sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`,
     )
     .limit(1);
   if (existing[0]) {
