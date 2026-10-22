@@ -3,6 +3,7 @@ import {
   bigserial,
   index,
   inet,
+  integer,
   jsonb,
   pgTable,
   text,
@@ -68,6 +69,27 @@ export const emailLog = pgTable("email_log", {
   sentAt: timestamp("sent_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Formulário de implantação respondido pela clínica nova (página pública /form). Global, sem RLS. */
+export const onboardingForms = pgTable(
+  "onboarding_forms",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    clinicName: text("clinic_name").notNull(),
+    contactName: text("contact_name"),
+    contactEmail: text("contact_email"),
+    contactPhone: text("contact_phone"),
+    answers: jsonb("answers").notNull(),
+    formVersion: integer("form_version").notNull().default(1),
+    status: text("status", { enum: ["new", "done"] }).notNull().default("new"),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    handledAt: timestamp("handled_at", { withTimezone: true }),
+    handledBy: uuid("handled_by").references(() => users.id),
+  },
+  (t) => [index("onboarding_forms_created_idx").on(t.status, t.createdAt)],
+);
 
 /** Trilha do painel de administração da plataforma (superadmin). Global, sem RLS. */
 export const platformAuditLog = pgTable("platform_audit_log", {

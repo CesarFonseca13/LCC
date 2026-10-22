@@ -35,6 +35,14 @@ export default async function AdminHome() {
     })
     .from(schema.whatsappInstances);
 
+  const newForms =
+    (
+      await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.onboardingForms)
+        .where(sql`${schema.onboardingForms.status} = 'new'`)
+    )[0]?.n ?? 0;
+
   const byClinic = new Map(lines.map((l) => [l.clinicId, l]));
   const billable = lines.filter((l) => !l.isDemo && l.status === "active");
   const mrr = billable.reduce((a, l) => a + l.monthlyBrl, 0);
@@ -51,6 +59,12 @@ export default async function AdminHome() {
         <Stat label="Gasto de API no mês" value={formatBrl(apiSpend)} hint="IA + Meta, todas as clínicas" />
         <Stat label="Excedente a cobrar" value={formatBrl(overage)} hint="já com 20%" />
       </div>
+
+      {newForms > 0 ? (
+        <Link href="/admin/formularios" className="block rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 hover:bg-amber-100">
+          <span className="font-semibold">{newForms === 1 ? "1 formulário de implantação novo" : `${newForms} formulários de implantação novos`}</span> aguardando configuração. Abrir a lista →
+        </Link>
+      ) : null}
 
       {/* Demonstração */}
       <section className="rounded-xl border border-amber-200 bg-amber-50 p-5">
