@@ -232,7 +232,7 @@ export async function bookOnline(rawInput: unknown): Promise<BookResult> {
       // Valor da negociação nasce do agendamento (só se ninguém preencheu antes)
       await tx.execute(sql`
         UPDATE deals d SET stage_id = s.id, updated_at = now(),
-          value = COALESCE(d.value, (SELECT a.price FROM appointments a WHERE a.id = ${created.id})),
+          value = COALESCE(d.value, (SELECT NULLIF(a.price, 0) FROM appointments a WHERE a.id = ${created.id})),
           notes = COALESCE(NULLIF(d.notes, ''),
             (SELECT 'Agendou: ' || p.name FROM appointments a
              JOIN procedures p ON p.id = a.procedure_id WHERE a.id = ${created.id}))

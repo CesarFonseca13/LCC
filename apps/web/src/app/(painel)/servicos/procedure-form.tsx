@@ -138,15 +138,18 @@ export function ProcedureFormButton({
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label htmlFor="p-price">Preço (R$)</Label>
+              <Label htmlFor="p-price" hint="opcional">Preço (R$)</Label>
               <Input
                 id="p-price"
                 name="price"
                 inputMode="decimal"
                 defaultValue={v.price}
-                placeholder="180,00"
-                required
+                placeholder="Sob avaliação"
               />
+              <p className="mt-1 text-xs text-stone-400">
+                Em branco = valor sob avaliação: a atendente explica que varia de caso a caso e convida para
+                marcar uma avaliação. Digite 0 se for gratuito.
+              </p>
             </div>
             <div>
               <Label htmlFor="p-commission" hint="opcional">Comissão padrão (%)</Label>

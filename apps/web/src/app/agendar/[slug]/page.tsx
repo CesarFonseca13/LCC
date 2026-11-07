@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { customerPriceLabel } from "@clinicaos/core/procedure-price";
 import { adoptClinic, schema, withContext } from "@clinicaos/db";
 import { BookingFlow } from "./booking-flow";
 
@@ -28,6 +29,7 @@ export default async function AgendarPage({
         name: schema.procedures.name,
         durationMinutes: schema.procedures.durationMinutes,
         price: schema.procedures.price,
+        priceOnRequest: schema.procedures.priceOnRequest,
       })
       .from(schema.procedures)
       .where(and(eq(schema.procedures.clinicId, clinic.id), eq(schema.procedures.active, true)))
@@ -62,10 +64,8 @@ export default async function AgendarPage({
               id: p.id,
               name: p.name,
               durationMinutes: p.durationMinutes,
-              priceLabel: Number(p.price).toLocaleString("pt-BR", {
-                style: "currency",
-                currency: "BRL",
-              }),
+              // "a partir de R$ 180,00" | "valor definido na avaliação" | "gratuito"
+              priceLabel: customerPriceLabel(p),
             }))}
           />
         </div>

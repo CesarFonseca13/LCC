@@ -12,6 +12,7 @@ import { todayISO, zonedToUtc } from "@clinicaos/core/timezone";
 import { schema, type Tx } from "@clinicaos/db";
 import { materializeConfirmationRuns } from "@/lib/appointment-runs";
 import { authAction } from "@/lib/auth-action";
+import { parseBRLDecimal } from "@/lib/format";
 
 export interface AgendaResult {
   ok: boolean;
@@ -274,10 +275,11 @@ async function applyShowedEffects(
   await applyCommission(tx, clinicId, appointment);
 
   // Funil corre sozinho: compareceu → negociação aberta fecha como GANHA
-  // (valor herda o do atendimento se a dona não preencheu) e lead vira cliente
+  // (valor herda o do atendimento se a dona não preencheu; atendimento sem valor,
+  // como serviço sob avaliação, deixa a negociação sem valor, nunca R$ 0) e lead vira cliente
   await tx.execute(sql`
     UPDATE deals SET status = 'won', won_at = now(), updated_at = now(),
-                     value = COALESCE(value, ${appointment.price})
+                     value = COALESCE(value, NULLIF(${appointment.price}::numeric, 0))
     WHERE customer_id = ${appointment.customerId} AND status = 'open'
   `);
   await tx
@@ -637,7 +639,7 @@ export const createAppointment = authAction({
         // Valor da negociação nasce do agendamento (só se ninguém preencheu antes)
         await tx.execute(sql`
           UPDATE deals d SET stage_id = s.id, updated_at = now(),
-            value = COALESCE(d.value, (SELECT a.price FROM appointments a WHERE a.id = ${created.id})),
+            value = COALESCE(d.value, (SELECT NULLIF(a.price, 0) FROM appointments a WHERE a.id = ${created.id})),
             notes = COALESCE(NULLIF(d.notes, ''),
               (SELECT 'Agendou: ' || p.name FROM appointments a
                JOIN procedures p ON p.id = a.procedure_id WHERE a.id = ${created.id}))
@@ -673,6 +675,20 @@ const statusSchema = z.object({
   id: z.string().uuid(),
   to: z.enum(["confirmed", "showed", "no_show", "cancelled"]),
   reason: z.string().trim().optional(),
+  // Compareceu em serviço sob avaliação: valor cobrado (combinado na avaliação).
+  // Em branco = sem cobrança neste atendimento.
+  chargedPrice: z
+    .string()
+    .optional()
+    .transform((v, ctx) => {
+      if (!v?.trim()) return null;
+      const parsed = parseBRLDecimal(v);
+      if (parsed === null || Number(parsed) <= 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Valor cobrado inválido (ex.: 350,00)" });
+        return z.NEVER;
+      }
+      return parsed;
+    }),
 });
 
 export const changeAppointmentStatus = authAction({
@@ -725,6 +741,22 @@ export const changeAppointmentStatus = authAction({
       await stopConfirmationRuns(tx, input.id, "goal_reached", "cliente confirmou");
     } else {
       await stopConfirmationRuns(tx, input.id, "cancelled", `status ${input.to}`);
+    }
+
+    // Serviço sob avaliação: o valor cobrado entra no atendimento ANTES dos efeitos
+    // (conta a receber, comissão e negociação passam a usar esse valor). Só preenche
+    // atendimento sem valor e fora de pacote — nunca troca um preço fixo.
+    if (input.to === "showed" && input.chargedPrice) {
+      await tx
+        .update(schema.appointments)
+        .set({ price: input.chargedPrice })
+        .where(
+          and(
+            eq(schema.appointments.id, input.id),
+            isNull(schema.appointments.customerPackageId),
+            sql`COALESCE(${schema.appointments.price}, 0) = 0`,
+          ),
+        );
     }
 
     // Efeitos financeiros/pacote (com correções simétricas showed ↔ no_show)

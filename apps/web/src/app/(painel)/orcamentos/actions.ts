@@ -97,7 +97,12 @@ const itemSchema = z.object({
   unitPrice: z.string().transform((v, ctx) => {
     const parsed = parseBRLDecimal(v);
     if (parsed === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Preço inválido" });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: v.trim()
+          ? "Valor inválido em um item, use números (ex.: 180,00)"
+          : "Informe o valor de todos os itens (serviço sob avaliação não tem preço sugerido)",
+      });
       return z.NEVER;
     }
     return parsed;

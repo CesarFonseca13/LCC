@@ -95,6 +95,8 @@ export default async function InicioPage() {
           customerId: schema.appointments.customerId,
           professionalId: schema.appointments.professionalId,
           procedureId: schema.appointments.procedureId,
+          price: schema.appointments.price,
+          customerPackageId: schema.appointments.customerPackageId,
         })
         .from(schema.appointments)
         .innerJoin(
@@ -119,7 +121,7 @@ export default async function InicioPage() {
         .select({ id: schema.professionals.id, name: schema.professionals.name })
         .from(schema.professionals);
       const procedures = await tx
-        .select({ id: schema.procedures.id, name: schema.procedures.name })
+        .select({ id: schema.procedures.id, name: schema.procedures.name, priceOnRequest: schema.procedures.priceOnRequest })
         .from(schema.procedures);
 
       // "O que as automações fizeram hoje" — números HONESTOS:
@@ -206,6 +208,11 @@ export default async function InicioPage() {
         professionalName:
           professionals.find((p) => p.id === r.professionalId)?.name ?? "—",
         procedureName: procedures.find((p) => p.id === r.procedureId)?.name ?? "—",
+        // Serviço sob avaliação sem valor: o Compareceu pergunta o valor cobrado
+        needsPrice:
+          Boolean(procedures.find((p) => p.id === r.procedureId)?.priceOnRequest) &&
+          !r.customerPackageId &&
+          !(Number(r.price ?? 0) > 0),
       }));
 
       const horaLocal = utcToZoned(now, tz).minutesOfDay / 60;
@@ -383,7 +390,7 @@ export default async function InicioPage() {
                     >
                       {chip.label}
                     </span>
-                    <QuickStatusButtons appointmentId={a.id} status={a.status} />
+                    <QuickStatusButtons appointmentId={a.id} status={a.status} needsPrice={a.needsPrice} />
                   </div>
                 </li>
               );

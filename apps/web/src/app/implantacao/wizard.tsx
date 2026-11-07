@@ -134,6 +134,9 @@ export function Wizard({ initial }: { initial: WizardInitial }) {
         preCare: "",
         postCare: "",
         commissionDefaultPct: "",
+        offerNote: "",
+        promoText: "",
+        promoUntil: "",
       });
       if (result.ok) setProcedures((p) => [...p, s.name]);
       else setError(result.error);

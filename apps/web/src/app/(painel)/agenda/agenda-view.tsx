@@ -22,6 +22,8 @@ export interface AgendaAppointment {
   customerName: string;
   professionalId: string;
   procedureName: string | null;
+  /** Serviço sob avaliação sem valor: o Compareceu pergunta o valor cobrado (opcional). */
+  needsPrice?: boolean;
   dateISO: string;
   startMin: number;
   endMin: number;
@@ -743,6 +745,8 @@ function DetailsModal({
   const [rescheduling, setRescheduling] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [conflict, setConflict] = useState(false);
+  /** Valor cobrado no Compareceu de serviço sob avaliação (opcional). */
+  const [charged, setCharged] = useState("");
   const lastResched = useRef<{ dateISO: string; timeHHMM: string } | null>(null);
 
   function close() {
@@ -751,12 +755,18 @@ function DetailsModal({
     setRescheduling(false);
     setCancelling(false);
     setConflict(false);
+    setCharged("");
   }
 
   function changeStatus(to: "confirmed" | "showed" | "no_show" | "cancelled", reason?: string) {
     setError(undefined);
     startTransition(async () => {
-      const result = await changeAppointmentStatus({ id: appointment!.id, to, reason });
+      const result = await changeAppointmentStatus({
+        id: appointment!.id,
+        to,
+        reason,
+        chargedPrice: to === "showed" && appointment!.needsPrice ? charged : undefined,
+      });
       if (result.ok) {
         close();
         router.refresh();
@@ -807,6 +817,25 @@ function DetailsModal({
             <span className="block text-stone-500">Obs.: {appointment.notes}</span>
           ) : null}
         </p>
+
+        {!rescheduling && !cancelling && appointment.needsPrice && (s === "scheduled" || s === "confirmed" || s === "no_show") ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+            <label htmlFor="ap-charged" className="block text-sm font-medium text-stone-700">
+              Valor cobrado (R$) <span className="font-normal text-stone-500">— serviço sob avaliação</span>
+            </label>
+            <Input
+              id="ap-charged"
+              inputMode="decimal"
+              value={charged}
+              onChange={(e) => setCharged(e.target.value)}
+              placeholder="Em branco se não houve cobrança"
+              className="mt-1"
+            />
+            <p className="mt-1 text-xs text-stone-500">
+              Preencha ao marcar Compareceu para o valor entrar no Financeiro e na comissão.
+            </p>
+          </div>
+        ) : null}
 
         {!rescheduling && !cancelling ? (
           <div className="flex flex-wrap gap-2">

@@ -469,7 +469,7 @@ export default async function ClientePage({
                           {h.procedureName ?? "—"}
                         </td>
                         <td className="px-4 py-3 text-stone-600">
-                          {h.amount ? formatBRL(h.amount) : "—"}
+                          {Number(h.amount) > 0 ? formatBRL(h.amount) : "—"}
                         </td>
                         <td className="px-4 py-3 text-stone-500">{h.notes ?? "—"}</td>
                       </tr>

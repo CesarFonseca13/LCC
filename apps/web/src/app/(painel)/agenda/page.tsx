@@ -120,6 +120,9 @@ export default async function AgendaPage({
           customerName: schema.customers.fullName,
           professionalId: schema.appointments.professionalId,
           procedureName: sql<string | null>`(SELECT p2.name FROM procedures p2 WHERE p2.id = appointments.procedure_id)`,
+          // Serviço sob avaliação ainda sem valor (e fora de pacote): pede o valor cobrado no Compareceu
+          needsPrice: sql<boolean>`(COALESCE(appointments.price, 0) = 0 AND appointments.customer_package_id IS NULL
+            AND EXISTS (SELECT 1 FROM procedures p3 WHERE p3.id = appointments.procedure_id AND p3.price_on_request))`,
           startsAt: schema.appointments.startsAt,
           endsAt: schema.appointments.endsAt,
           status: schema.appointments.status,
@@ -149,6 +152,7 @@ export default async function AgendaPage({
           customerName: r.customerName,
           professionalId: r.professionalId,
           procedureName: r.procedureName,
+          needsPrice: Boolean(r.needsPrice),
           dateISO: start.dateISO,
           startMin: start.minutesOfDay,
           endMin: end.minutesOfDay > start.minutesOfDay ? end.minutesOfDay : 24 * 60,

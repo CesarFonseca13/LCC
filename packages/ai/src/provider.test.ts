@@ -128,7 +128,7 @@ describe("provedor OpenAI-compatível", () => {
           address: null,
           phone: null,
           businessHoursLabel: "seg-sex 9h-18h",
-          catalog: [{ name: "Botox", price: "800,00", durationMinutes: 30 }],
+          catalog: [{ name: "Botox", price: "800,00", priceMode: "fixed", durationMinutes: 30 }],
           facts: null,
           offersEnabled: false,
         },

@@ -15,6 +15,8 @@ export function parseBRLDecimal(raw: string): string | null {
     .replace(/\s|R\$/g, "")
     .replace(/\.(?=\d{3}(\D|$))/g, "") // separador de milhar
     .replace(",", ".");
+  // Sem nenhum dígito ("R$", "Infinity") não é valor: Number("") daria 0 (= gratuito no serviço)
+  if (!/\d/.test(normalized)) return null;
   const n = Number(normalized);
   if (Number.isNaN(n) || n < 0) return null;
   return n.toFixed(2);

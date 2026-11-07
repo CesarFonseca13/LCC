@@ -91,6 +91,9 @@ export const toggleTemplateActive = authAction({
 // ── Gerar e enviar ───────────────────────────────────────────────────
 
 const valorSchema = z.string().transform((v, ctx) => {
+  // Em branco (ex.: serviço sob avaliação): se o modelo usar {{valor}}, a checagem
+  // "faltando" do envio barra com "Preencha antes de enviar: Valor (R$)"
+  if (!v.trim()) return null;
   const parsed = parseBRLDecimal(v);
   if (parsed === null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Valor inválido" });

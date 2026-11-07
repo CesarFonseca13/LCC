@@ -374,7 +374,7 @@ export function GenerateTermButton({
             ? "Escolha o modelo"
             : !procedureId
               ? "Escolha o procedimento"
-              : valorDecimal === null
+              : valor.trim() !== "" && valorDecimal === null
                 ? "Informe um valor válido no campo Valor (R$), ex.: 1500,00"
                 : loadingVars
                   ? "Preenchendo pela ficha..."
@@ -573,7 +573,7 @@ export function GenerateTermButton({
                   value={valor}
                   onChange={(e) => setValor(e.target.value)}
                   invalid={valor.trim() !== "" && valorDecimal === null}
-                  placeholder="1500,00"
+                  placeholder="Valor combinado"
                 />
                 {valor.trim() !== "" && valorDecimal === null ? (
                   <p className="mt-1 text-xs text-amber-700">Use números, ex.: 1500,00</p>

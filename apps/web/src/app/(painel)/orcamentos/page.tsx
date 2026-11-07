@@ -1,5 +1,6 @@
 import { desc, eq } from "drizzle-orm";
 import { can } from "@clinicaos/core/permissions";
+import { suggestedPriceInput } from "@clinicaos/core/procedure-price";
 import { todayISO } from "@clinicaos/core/timezone";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
@@ -53,6 +54,7 @@ export default async function OrcamentosPage() {
           id: schema.procedures.id,
           name: schema.procedures.name,
           price: schema.procedures.price,
+          priceOnRequest: schema.procedures.priceOnRequest,
         })
         .from(schema.procedures)
         .where(eq(schema.procedures.active, true))
@@ -95,7 +97,7 @@ export default async function OrcamentosPage() {
           procedures={procedures.map((p) => ({
             id: p.id,
             name: p.name,
-            price: Number(p.price).toFixed(2).replace(".", ","),
+            price: suggestedPriceInput(p),
           }))}
           packages={packages.map((p) => ({
             id: p.id,
@@ -114,7 +116,7 @@ export default async function OrcamentosPage() {
                 procedures={procedures.map((p) => ({
                   id: p.id,
                   name: p.name,
-                  price: Number(p.price).toFixed(2).replace(".", ","),
+                  price: suggestedPriceInput(p),
                 }))}
                 packages={packages.map((p) => ({
                   id: p.id,

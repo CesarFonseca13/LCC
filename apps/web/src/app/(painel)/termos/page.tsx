@@ -1,6 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import Link from "next/link";
 import { can } from "@clinicaos/core/permissions";
+import { suggestedPriceInput } from "@clinicaos/core/procedure-price";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
@@ -71,6 +72,7 @@ export default async function TermosPage({
           id: schema.procedures.id,
           name: schema.procedures.name,
           price: schema.procedures.price,
+          priceOnRequest: schema.procedures.priceOnRequest,
         })
         .from(schema.procedures)
         .where(eq(schema.procedures.active, true))
@@ -103,7 +105,8 @@ export default async function TermosPage({
             procedures={procedures.map((p) => ({
               id: p.id,
               name: p.name,
-              price: Number(p.price).toFixed(2).replace(".", ","),
+              // Sob avaliação: o valor do termo é o combinado com a cliente (a equipe digita)
+              price: suggestedPriceInput(p),
             }))}
           />
         </div>

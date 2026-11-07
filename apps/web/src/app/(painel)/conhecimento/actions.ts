@@ -4,6 +4,7 @@ import { and, eq, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createLlmClient, parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
+import { staffPriceLabel } from "@clinicaos/core/procedure-price";
 import { recordAiUsageTx } from "@/lib/ai-usage";
 import { schema, type Tx } from "@clinicaos/db";
 import { authAction } from "@/lib/auth-action";
@@ -87,6 +88,7 @@ async function checagemMecanica(
     .select({
       name: schema.procedures.name,
       price: schema.procedures.price,
+      priceOnRequest: schema.procedures.priceOnRequest,
       durationMinutes: schema.procedures.durationMinutes,
     })
     .from(schema.procedures)
@@ -100,7 +102,11 @@ async function checagemMecanica(
   for (const p of procedures) {
     if (!textoNorm.includes(semAcento(p.name))) continue;
     const precoCatalogo = Number(p.price);
-    if (
+    if (p.priceOnRequest && precosNoTexto.length > 0) {
+      warnings.push(
+        `O card cita valor para ${p.name}, mas em Serviços ele está como "sob avaliação" (a atendente não cita valor e convida para uma avaliação). Tire o valor do card ou cadastre o preço em Serviços.`,
+      );
+    } else if (
       precosNoTexto.length > 0 &&
       !precosNoTexto.some((v) => Math.abs(v - precoCatalogo) < 0.01)
     ) {
@@ -164,6 +170,7 @@ async function checagemSemantica(
     .select({
       name: schema.procedures.name,
       price: schema.procedures.price,
+      priceOnRequest: schema.procedures.priceOnRequest,
       durationMinutes: schema.procedures.durationMinutes,
     })
     .from(schema.procedures)
@@ -183,7 +190,8 @@ async function checagemSemantica(
   const fontes = [
     "CATÁLOGO OFICIAL (Serviços):",
     ...procedures.map(
-      (p) => `- ${p.name}: R$ ${Number(p.price).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}, ${p.durationMinutes} min`,
+      (p) =>
+        `- ${p.name}: ${p.priceOnRequest ? "valor sob avaliação (não pode ser citado)" : staffPriceLabel(p)}, ${p.durationMinutes} min`,
     ),
     "",
     "CARDS JÁ EXISTENTES:",

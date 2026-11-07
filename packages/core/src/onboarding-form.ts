@@ -185,7 +185,7 @@ export const ONBOARDING_SECTIONS: OnbSection[] = [
           { k: "nome", t: "text", l: "Nome do serviço", req: true, h: "Exatamente como as clientes chamam. A atendente reconhece o serviço por esse nome." },
           { k: "categoria", t: "text", l: "Categoria", half: true, h: "Facial, Corporal, Injetáveis..." },
           { k: "duracao", t: "number", l: "Duração (minutos)", half: true },
-          { k: "preco", t: "text", l: "Preço (R$)", half: true, h: "A atendente informa como \"a partir de\"." },
+          { k: "preco", t: "text", l: "Preço (R$)", half: true, h: "A atendente informa como \"a partir de\". Deixe em branco se o valor depende de avaliação." },
           { k: "retorno", t: "number", l: "Prazo de retorno (dias)", half: true, h: "De quantos em quantos dias a cliente deve voltar. Ex.: limpeza 45, botox 120." },
           { k: "descricao", t: "textarea", l: "O que é e para que serve (2 a 4 linhas)", h: "Como a atendente deve explicar para a cliente." },
           { k: "contra", t: "textarea", l: "Contraindicações", h: "Gestantes, lactantes, uso de ácido, doenças de pele..." },

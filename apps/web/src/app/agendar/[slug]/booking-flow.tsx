@@ -106,7 +106,7 @@ export function BookingFlow({
             >
               <p className="text-sm font-semibold text-stone-800">{p.name}</p>
               <p className="text-xs text-stone-500">
-                {p.durationMinutes} min · a partir de {p.priceLabel}
+                {p.durationMinutes} min · {p.priceLabel}
               </p>
             </button>
           ))}

@@ -24,6 +24,19 @@ const moneySchema = z
     return parsed;
   });
 
+/** Preço do serviço: em branco = valor sob avaliação (não divulgado); "0" = gratuito. */
+const optionalMoneySchema = z
+  .string()
+  .transform((v, ctx) => {
+    if (!v.trim()) return null;
+    const parsed = parseBRLDecimal(v);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Valor inválido (ex.: 180,00). Deixe em branco se o valor depende de avaliação." });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
 const optionalPositiveInt = z
   .string()
   .transform((v, ctx) => {
@@ -41,7 +54,7 @@ const procedureSchema = z.object({
   name: z.string().trim().min(2, "Informe o nome do procedimento"),
   category: z.string().trim().transform((v) => v || null),
   durationMinutes: z.coerce.number().int().min(5, "Mínimo 5 min").max(600, "Máximo 600 min"),
-  price: moneySchema,
+  price: optionalMoneySchema,
   returnDays: optionalPositiveInt,
   touchupDays: optionalPositiveInt,
   preCare: z.string().trim().transform((v) => v || null),
@@ -80,7 +93,9 @@ export const saveProcedure = authAction({
       name: input.name,
       category: input.category,
       durationMinutes: input.durationMinutes,
-      price: input.price,
+      // Em branco = valor sob avaliação: a atendente nunca cita valor e convida para avaliar
+      price: input.price ?? "0",
+      priceOnRequest: input.price === null,
       returnDays: input.returnDays,
       touchupDays: input.touchupDays,
       preCare: input.preCare,

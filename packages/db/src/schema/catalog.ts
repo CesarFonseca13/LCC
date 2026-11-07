@@ -32,6 +32,9 @@ export const procedures = pgTable(
     category: text("category"),
     durationMinutes: integer("duration_minutes").notNull().default(60),
     price: numeric("price", { precision: 12, scale: 2 }).notNull().default("0"),
+    /** Valor sob avaliação: não divulgado (varia por caso, definido na avaliação). price fica 0.
+     *  Sem esta marca, price 0 = gratuito. */
+    priceOnRequest: boolean("price_on_request").notNull().default(false),
     cost: numeric("cost", { precision: 12, scale: 2 }),
     /** Prazo de retorno em dias — motor da reativação inteligente. */
     returnDays: integer("return_days"),

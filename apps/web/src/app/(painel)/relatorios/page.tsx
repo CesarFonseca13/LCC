@@ -115,9 +115,10 @@ export default async function RelatoriosPage({
             cancelled: sql<number>`count(*) FILTER (WHERE status = 'cancelled')::int`,
             upcoming: sql<number>`count(*) FILTER (WHERE status IN ('scheduled','confirmed'))::int`,
             // Sessão de pacote não gera cobrança: o preço avulso dela NÃO entra
-            // no ticket (o dinheiro do pacote entrou quando foi vendido)
+            // no ticket (o dinheiro do pacote entrou quando foi vendido). Atendimento
+            // sem valor (sob avaliação sem valor lançado, gratuito) também não: R$ 0 derrubaria a média
             showedValue: sql<string | null>`sum(price) FILTER (WHERE status = 'showed' AND customer_package_id IS NULL)`,
-            showedBillable: sql<number>`count(*) FILTER (WHERE status = 'showed' AND customer_package_id IS NULL)::int`,
+            showedBillable: sql<number>`count(*) FILTER (WHERE status = 'showed' AND customer_package_id IS NULL AND price > 0)::int`,
           })
           .from(schema.appointments)
           .where(
@@ -298,7 +299,7 @@ export default async function RelatoriosPage({
         <Card
           label="Ticket médio"
           value={ticket === null ? "—" : formatBRL(ticket)}
-          hint="por atendimento avulso (sessões de pacote fora)"
+          hint="por atendimento avulso com valor (pacote e sem valor fora)"
         />
         {data.hasStock ? (
           <Card
@@ -358,7 +359,7 @@ export default async function RelatoriosPage({
                   <div className="flex items-baseline justify-between text-sm">
                     <span className="text-stone-700">{p.name}</span>
                     <span className="text-xs text-stone-500">
-                      {p.count}× · {formatBRL(p.total ?? "0")}
+                      {p.count}× · {Number(p.total ?? 0) > 0 ? formatBRL(p.total) : "—"}
                     </span>
                   </div>
                   <div className="mt-1 h-2 rounded-full bg-stone-100">

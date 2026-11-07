@@ -8,6 +8,7 @@ import {
 } from "@clinicaos/ai/agent";
 import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { activePromo, suggestOffers } from "@clinicaos/core/offers";
+import { customerPriceLabel, formatPriceNumber, priceMode } from "@clinicaos/core/procedure-price";
 import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
 import { eligibleProfessionalIds, findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
 import { getSpendStatus, notifySpendThresholds, recordAiUsage } from "./spend";
@@ -317,10 +318,12 @@ async function runTurn(
       id: schema.procedures.id,
       name: schema.procedures.name,
       price: schema.procedures.price,
+      priceOnRequest: schema.procedures.priceOnRequest,
       durationMinutes: schema.procedures.durationMinutes,
     })
     .from(schema.procedures)
     .where(and(eq(schema.procedures.clinicId, clinic.id), eq(schema.procedures.active, true)));
+  const procedurePriceOnRequest = new Map(procedures.map((p) => [p.id, p.priceOnRequest]));
 
   const upcoming = (
     await db
@@ -549,12 +552,14 @@ async function runTurn(
         WHERE NOT EXISTS (SELECT 1 FROM pipeline_stages
                           WHERE clinic_id = ${clinic.id} AND name = 'Agendou avaliação')
       `);
-      // Valor da negociação = soma da visita (só se ninguém preencheu antes)
-      const totalPrice = procs.reduce((acc, p) => acc + Number(p.price), 0).toFixed(2);
+      // Valor da negociação = soma da visita (só se ninguém preencheu antes). Serviço sob
+      // avaliação não tem valor ainda: nesse caso a negociação fica sem valor, nunca R$ 0
+      const anyOnRequest = procs.some((p) => procedurePriceOnRequest.get(p.id));
+      const totalPrice = anyOnRequest ? null : procs.reduce((acc, p) => acc + Number(p.price), 0).toFixed(2);
       const nomes = procs.map((p) => p.name).join(" + ");
       await db.execute(sql`
         UPDATE deals d SET stage_id = s.id, updated_at = now(),
-          value = COALESCE(d.value, ${totalPrice}::numeric),
+          value = COALESCE(d.value, NULLIF(${totalPrice}::numeric, 0)),
           notes = COALESCE(NULLIF(d.notes, ''), ${"Agendou: " + nomes})
         FROM pipeline_stages s
         WHERE d.clinic_id = ${clinic.id} AND d.customer_id = ${customer.id}
@@ -952,6 +957,7 @@ async function runTurn(
           id: schema.procedures.id,
           name: schema.procedures.name,
           price: schema.procedures.price,
+          priceOnRequest: schema.procedures.priceOnRequest,
           active: schema.procedures.active,
           returnDays: schema.procedures.returnDays,
           offerNote: schema.procedures.offerNote,
@@ -1002,6 +1008,7 @@ async function runTurn(
       });
       if (suggestions.length === 0) return "nenhuma";
       const durationOf = new Map(catalogRows.map((p) => [p.id, p.durationMinutes]));
+      const priceRowOf = new Map(catalogRows.map((p) => [p.id, p]));
       const linhas: string[] = [];
       for (const s of suggestions) {
         const comboIds = s.pairedWithId ? [s.pairedWithId, s.procedure.id] : [s.procedure.id];
@@ -1024,7 +1031,9 @@ async function runTurn(
         const promo = activePromo(s.procedure, todayISO(tz));
         linhas.push(
           [
-            `- ${s.procedure.name} (a partir de R$ ${Number(s.procedure.price).toLocaleString("pt-BR", { minimumFractionDigits: 2 })})`,
+            `- ${s.procedure.name} (${customerPriceLabel(priceRowOf.get(s.procedure.id) ?? { price: s.procedure.price, priceOnRequest: false })}${
+              priceRowOf.get(s.procedure.id)?.priceOnRequest ? " — não cite valor; o profissional define na avaliação" : ""
+            })`,
             `  motivo: ${s.why}`,
             s.procedure.offerNote ? `  como a clínica quer oferecer: "${s.procedure.offerNote}"` : null,
             promo ? `  promoção vigente: ${promo}` : null,
@@ -1057,7 +1066,8 @@ async function runTurn(
         businessHoursLabel,
         catalog: procedures.map((p) => ({
           name: p.name,
-          price: Number(p.price).toLocaleString("pt-BR", { minimumFractionDigits: 2 }),
+          price: formatPriceNumber(p.price),
+          priceMode: priceMode(p),
           durationMinutes: p.durationMinutes,
         })),
         facts: knowledgeFactsText(clinic.settings),

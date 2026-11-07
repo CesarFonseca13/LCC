@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import Link from "next/link";
 import { can } from "@clinicaos/core/permissions";
+import { staffPriceLabel, suggestedPriceInput } from "@clinicaos/core/procedure-price";
 import { schema, withTenant } from "@clinicaos/db";
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
@@ -136,7 +137,15 @@ export default async function ServicosPage({
                       <td className="px-4 py-3 text-stone-600">
                         {formatDurationMin(p.durationMinutes)}
                       </td>
-                      <td className="px-4 py-3 text-stone-600">{formatBRL(p.price)}</td>
+                      <td className="px-4 py-3 text-stone-600">
+                        {p.priceOnRequest ? (
+                          <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800" title="A atendente não cita valor: explica que varia e convida para uma avaliação">
+                            Sob avaliação
+                          </span>
+                        ) : (
+                          staffPriceLabel(p)
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-stone-600">
                         {p.returnDays ? `${p.returnDays} dias` : "—"}
                       </td>
@@ -163,7 +172,7 @@ export default async function ServicosPage({
                                 name: p.name,
                                 category: p.category ?? "",
                                 durationMinutes: p.durationMinutes,
-                                price: Number(p.price).toFixed(2).replace(".", ","),
+                                price: suggestedPriceInput(p),
                                 returnDays: p.returnDays?.toString() ?? "",
                                 touchupDays: p.touchupDays?.toString() ?? "",
                                 preCare: p.preCare ?? "",

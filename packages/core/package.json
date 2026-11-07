@@ -18,7 +18,8 @@
     "./spend": "./src/spend.ts",
     "./plans": "./src/plans.ts",
     "./offers": "./src/offers.ts",
-    "./onboarding-form": "./src/onboarding-form.ts"
+    "./onboarding-form": "./src/onboarding-form.ts",
+    "./procedure-price": "./src/procedure-price.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

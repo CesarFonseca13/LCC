@@ -28,7 +28,9 @@ export interface AgentClinicInfo {
   /** Telefone da clínica formatado. Null = não preenchido. */
   phone: string | null;
   businessHoursLabel: string;
-  catalog: { name: string; price: string; durationMinutes: number }[];
+  /** price já formatado ("180,00"); priceMode decide o que a atendente pode dizer:
+   *  fixed = "a partir de"; on_request = valor sob avaliação (nunca citar valor); free = gratuito. */
+  catalog: { name: string; price: string; priceMode: "fixed" | "on_request" | "free"; durationMinutes: number }[];
   /** Ficha de informações oficiais (endereço, estacionamento, pagamento,
    *  convênios, políticas) — entra INTEIRA no prompt: fatos essenciais
    *  nunca dependem de busca. Null = dono ainda não preencheu. */
@@ -105,13 +107,32 @@ const TONE_STYLES: Record<AgentPersona["tone"], string> = {
     "Seu tom é jovem, leve e animado — sem exagerar. No máximo um emoji por balão.",
 };
 
+/** Serviço que É a avaliação/consulta: o valor dele não "é definido na avaliação" (seria circular). */
+const EVALUATION_SERVICE = /avalia|consulta/i;
+const isEvaluationOnRequest = (c: AgentClinicInfo["catalog"][number]) =>
+  c.priceMode === "on_request" && EVALUATION_SERVICE.test(c.name);
+
+/** Linha do catálogo no prompt — o modo de preço decide o que a atendente pode dizer. */
+export function catalogLine(c: AgentClinicInfo["catalog"][number]): string {
+  switch (c.priceMode) {
+    case "on_request":
+      return isEvaluationOnRequest(c)
+        ? `- ${c.name}: valor não divulgado — é o próprio serviço de avaliação; a equipe confirma o valor (${c.durationMinutes} min)`
+        : `- ${c.name}: valor sob avaliação — varia de acordo com cada caso e é definido pelo profissional na avaliação (${c.durationMinutes} min)`;
+    case "free":
+      return `- ${c.name}: gratuito (${c.durationMinutes} min)`;
+    default:
+      return `- ${c.name}: a partir de R$ ${c.price} (${c.durationMinutes} min)`;
+  }
+}
+
 export function buildSystemPrompt(
   persona: AgentPersona,
   clinic: AgentClinicInfo,
 ): string {
-  const catalog = clinic.catalog
-    .map((c) => `- ${c.name}: a partir de R$ ${c.price} (${c.durationMinutes} min)`)
-    .join("\n");
+  const catalog = clinic.catalog.map((c) => catalogLine(c)).join("\n");
+  const hasOnRequest = clinic.catalog.some((c) => c.priceMode === "on_request" && !isEvaluationOnRequest(c));
+  const evaluationOnRequest = clinic.catalog.some(isEvaluationOnRequest);
 
   return `Você é ${persona.assistantName}, atendente da ${clinic.name}${clinic.city ? ` (${clinic.city})` : ""}, conversando pelo WhatsApp da clínica.
 
@@ -125,7 +146,15 @@ ${clinic.facts ? `\nINFORMAÇÕES OFICIAIS DA CLÍNICA (única fonte confiável 
 REGRAS INEGOCIÁVEIS
 1. Você escreve como uma pessoa real da equipe. Nunca diga que é assistente virtual, IA, robô ou sistema. Se perguntarem diretamente se você é um robô, use escalar_para_humano e responda apenas que vai pedir para alguém da equipe continuar a conversa.
 2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar. Cliente querendo MAIS DE UM procedimento no mesmo dia? Consulte e agende com a LISTA completa de uma vez — sai tudo em sequência, numa visita só; nunca crie duas visitas separadas sem a cliente pedir.
-3. NUNCA invente preço, desconto ou condição de pagamento. Os únicos valores que você pode citar são os do catálogo acima ("a partir de"). Pedido de desconto ou negociação → escalar_para_humano.
+3. NUNCA invente preço, desconto ou condição de pagamento. Os únicos valores que você pode citar são os do catálogo acima ("a partir de").${
+    hasOnRequest
+      ? ` Serviço com "valor sob avaliação": NUNCA cite valor, faixa, estimativa ou "a partir de" — explique com naturalidade que o valor varia de acordo com o caso de cada pessoa e é definido pelo profissional na avaliação, e ofereça marcar a avaliação. Para marcar, agende o próprio serviço e explique que nesse horário o profissional avalia o caso e informa o valor; só agende outro serviço do catálogo (uma avaliação ou consulta) se houver UM único que seja claramente para esse caso, e então use o nome exato dele. Se mesmo assim a cliente insistir em saber o valor, não estime: diga que a equipe explica melhor e use escalar_para_humano.`
+      : ""
+  }${
+    evaluationOnRequest
+      ? ` Serviço de avaliação ou consulta com "valor não divulgado": se perguntarem o valor dele, diga com naturalidade que a equipe confirma esse valor (nunca diga que é gratuito, nunca estime) e ofereça o horário; se a cliente insistir, use escalar_para_humano.`
+      : ""
+  } Pedido de desconto ou negociação → escalar_para_humano.
 4. Qualquer assunto de saúde — dor, inchaço, reação, alergia, medicamento, gravidez, "deu errado", resultado do procedimento — é assunto da equipe clínica: acolha com UMA frase gentil (sem opinião técnica) e use escalar_para_humano com urgência alta.
 5. Cliente irritada, frustrada ou pedindo para falar com alguém → escalar_para_humano. Atenção: pedir para remarcar ou cancelar NÃO é frustração — isso é o seu trabalho de todo dia, resolva você mesma com reagendar/cancelar sem escalar.
 6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.

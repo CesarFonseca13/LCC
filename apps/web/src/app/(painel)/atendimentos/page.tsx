@@ -373,7 +373,7 @@ export default async function AtendimentosPage({
                           <span className="text-stone-400" title="Sessão coberta pelo pacote">
                             no pacote
                           </span>
-                        ) : r.price ? (
+                        ) : r.price && Number(r.price) > 0 ? (
                           formatBRL(r.price)
                         ) : (
                           "—"

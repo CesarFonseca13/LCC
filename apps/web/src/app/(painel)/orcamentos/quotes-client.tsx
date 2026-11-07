@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState, useTransition } from "react";
 import { searchCustomers } from "@/app/(painel)/agenda/actions";
 import { Button, FieldError, Input, Label, Modal, Select } from "@/components/ui";
+import { parseBRLDecimal } from "@/lib/format";
 import { convertQuote, createAndSendQuote, setQuoteStatus } from "./actions";
 
 interface CatalogItem {
@@ -101,9 +102,22 @@ export function CreateQuoteButton({
     [rows],
   );
   const total = Math.max(subtotal - parsePrice(discount), 0);
+  // Serviço sob avaliação chega sem valor sugerido: a equipe digita o valor combinado com a cliente
+  const semValor = [
+    ...new Set(
+      rows
+        .filter((r) => parseBRLDecimal(r.unitPrice) === null)
+        .map((r) => (r.kind === "procedure" ? procedures : packages).find((i) => i.id === r.refId)?.name ?? "item"),
+    ),
+  ];
+  const motivo = semValor.length > 0 ? `Informe o valor de: ${semValor.join(", ")}` : null;
 
   function submit(fd: FormData) {
     setError(undefined);
+    if (motivo) {
+      setError(motivo);
+      return;
+    }
     startTransition(async () => {
       const result = await createAndSendQuote({
         customerId: customer?.id ?? "",
@@ -262,6 +276,8 @@ export function CreateQuoteButton({
                         value={row.unitPrice}
                         onChange={(e) => updateRow(row.key, { unitPrice: e.target.value })}
                         aria-label="Preço unitário"
+                        placeholder="Valor"
+                        invalid={parseBRLDecimal(row.unitPrice) === null}
                       />
                       <button
                         type="button"
@@ -306,11 +322,12 @@ export function CreateQuoteButton({
             </div>
 
             <FieldError message={error} />
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+              {motivo && !pending ? <span className="text-xs text-stone-500">{motivo}</span> : null}
               <Button type="button" variant="secondary" onClick={close}>
                 Cancelar
               </Button>
-              <Button type="submit" disabled={pending || !customer || rows.length === 0}>
+              <Button type="submit" disabled={pending || !customer || rows.length === 0 || motivo !== null}>
                 {pending ? "Enviando..." : "Criar e enviar"}
               </Button>
             </div>
