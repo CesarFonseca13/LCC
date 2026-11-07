@@ -3,7 +3,7 @@
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { normalizePhoneBR } from "@clinicaos/core/phone";
-import { todayISO } from "@clinicaos/core/timezone";
+import { addDaysISO, todayISO, utcToZoned } from "@clinicaos/core/timezone";
 import {
   adoptClinic,
   eligibleProfessionalIds,
@@ -17,18 +17,39 @@ import { materializeConfirmationRuns } from "@/lib/appointment-runs";
 
 /** Agendamento online público — autenticado pelo slug da clínica (RLS booking_resolve). */
 
+/** Até quantos dias à frente a página pública oferece horários. */
+const BOOKING_DAYS = 21;
+const WEEKDAYS_BR = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+export interface BookingDay {
+  dateISO: string;
+  /** "seg" */
+  weekday: string;
+  /** "09/11" */
+  dayMonth: string;
+}
+
 export interface BookingSlotsResult {
   ok: boolean;
   error?: string;
+  /** Horários do dia escolhido. */
   slots?: FreeSlot[];
+  /** Dias com pelo menos um horário livre nas próximas 3 semanas (seletor de dia). */
+  days?: BookingDay[];
+  /** Dia mostrado em slots. */
+  dateISO?: string | null;
 }
 
 export async function getBookingSlots(
   slug: string,
   procedureId: string,
+  dateISO?: string | null,
 ): Promise<BookingSlotsResult> {
   if (typeof slug !== "string" || typeof procedureId !== "string") {
     return { ok: false, error: "Dados inválidos." };
+  }
+  if (dateISO !== undefined && dateISO !== null && (typeof dateISO !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateISO))) {
+    return { ok: false, error: "Dia inválido." };
   }
   return withContext({ bookingSlug: slug }, async (tx) => {
     const clinic = (
@@ -52,8 +73,27 @@ export async function getBookingSlots(
 
     // Só profissionais que realizam o procedimento escolhido
     const aptas = await eligibleProfessionalIds(tx, clinic.id, [procedureId]);
-    const slots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 9, aptas);
-    return { ok: true, slots };
+    // Dias com vaga: o primeiro horário livre de cada dia (perDay 1) nas próximas 3 semanas
+    const firstOfDay = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, BOOKING_DAYS, aptas, {
+      perDay: 1,
+      days: BOOKING_DAYS,
+    });
+    const days: BookingDay[] = firstOfDay.map((s) => {
+      const [, m, d] = s.dateISO.split("-");
+      const weekday = WEEKDAYS_BR[new Date(`${s.dateISO}T12:00:00Z`).getUTCDay()] ?? "";
+      return { dateISO: s.dateISO, weekday, dayMonth: `${d}/${m}` };
+    });
+    // Dia pedido que lotou (ou saiu da janela): devolve o próprio dia, vazio — a
+    // tela avisa "esse dia acabou de lotar". Nunca troca de dia em silêncio.
+    const chosen = dateISO ?? days[0]?.dateISO ?? null;
+    const slots =
+      chosen && days.some((d) => d.dateISO === chosen)
+        ? await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 48, aptas, {
+            fromDate: chosen,
+            onlyThatDay: true,
+          })
+        : [];
+    return { ok: true, slots, days, dateISO: chosen };
   });
 }
 
@@ -132,7 +172,15 @@ export async function bookOnline(rawInput: unknown): Promise<BookResult> {
       return { ok: false, error: "Esse horário não está mais disponível.", conflict: true };
     }
     const aptas = await eligibleProfessionalIds(tx, clinic.id, [input.procedureId]);
-    const validSlots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 60, aptas);
+    // Confere o horário no PRÓPRIO dia dele (a página oferece até 3 semanas à frente)
+    const slotDate = utcToZoned(startsAt, clinic.timezone).dateISO;
+    if (slotDate > addDaysISO(todayISO(clinic.timezone), BOOKING_DAYS)) {
+      return { ok: false, error: "Esse horário não está mais disponível.", conflict: true };
+    }
+    const validSlots = await findSlots(tx, clinic.id, clinic.timezone, procedure.durationMinutes, 200, aptas, {
+      fromDate: slotDate,
+      onlyThatDay: true,
+    });
     if (!validSlots.some((s) => s.slotId === input.slotId)) {
       return { ok: false, error: "Esse horário acabou de ser preenchido 😅", conflict: true };
     }

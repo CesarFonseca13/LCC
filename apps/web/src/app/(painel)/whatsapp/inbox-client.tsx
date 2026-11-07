@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { Button, FieldError } from "@/components/ui";
+import { ALERTS_BROKEN_EVENT, desktopAlertsSupported } from "@/lib/desktop-alerts";
 import { markConversationRead, sendManualMessage, setConversationMode } from "./actions";
 
 export { AutoRefresh } from "@/components/auto-refresh";
@@ -26,12 +27,68 @@ export function ReadOnOpen({
   return null;
 }
 
+/** Conversa escolhida automaticamente: grava na URL (sem empilhar histórico),
+ *  para o auto-refresh manter a MESMA conversa aberta. */
+export function PinSelection({ href }: { href: string }) {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace(href, { scroll: false });
+  }, [href, router]);
+  return null;
+}
+
+/** Liga os alertas do navegador (conversa nova em "precisa de você" avisa mesmo
+ *  com o painel em segundo plano). O pedido de permissão precisa de um clique.
+ *  No celular não aparece: lá o aviso é o próprio WhatsApp. */
+export function AlertToggle() {
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported" | null>(null);
+  useEffect(() => {
+    setPermission(desktopAlertsSupported() ? Notification.permission : "unsupported");
+    // O alerta falhou de verdade neste aparelho (tablet): some o "Alertas ligados"
+    const onBroken = () => setPermission("unsupported");
+    window.addEventListener(ALERTS_BROKEN_EVENT, onBroken);
+    return () => window.removeEventListener(ALERTS_BROKEN_EVENT, onBroken);
+  }, []);
+  if (permission === null || permission === "unsupported") return null;
+  if (permission === "granted") {
+    return (
+      <span className="text-[11px] text-stone-400" title="Conversa nova em “precisa de você” avisa no computador">
+        🔔 Alertas ligados
+      </span>
+    );
+  }
+  if (permission === "denied") {
+    return (
+      <span
+        className="text-[11px] text-stone-400"
+        title="Para receber alertas, libere as notificações deste site no cadeado da barra de endereço"
+      >
+        🔕 Alertas bloqueados
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void Notification.requestPermission().then(setPermission);
+      }}
+      className="rounded-full border border-teal-200 bg-teal-50 px-2.5 py-1 text-[11px] font-medium text-teal-800 hover:bg-teal-100"
+    >
+      🔔 Ativar alertas
+    </button>
+  );
+}
+
 export function ModeBanner({
   conversationId,
   mode,
+  reason = null,
 }: {
   conversationId: string;
   mode: string;
+  /** Por que a conversa está esperando a equipe (aviso mais recente dela). */
+  reason?: { text: string; urgent: boolean; when: string } | null;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -45,20 +102,39 @@ export function ModeBanner({
 
   const styles =
     mode === "waiting_human"
-      ? "bg-red-50 text-red-800"
+      ? reason?.urgent
+        ? "bg-red-100 text-red-900"
+        : "bg-red-50 text-red-800"
       : mode === "human"
         ? "bg-sky-50 text-sky-800"
         : "bg-teal-50 text-teal-800";
 
   return (
     <div className={`flex items-center justify-between gap-3 border-b border-stone-200 px-6 py-2.5 text-sm ${styles}`}>
-      <span>
-        {mode === "waiting_human"
-          ? "🔴 Esta cliente precisa de você — as automações estão aguardando."
-          : mode === "human"
-            ? "Você está no controle. Nenhuma resposta automática será enviada."
-            : "✨ Atendimento automático ativo nesta conversa."}
-      </span>
+      {mode === "waiting_human" && reason ? (
+        <div className="min-w-0">
+          <p>
+            🔴{" "}
+            {reason.urgent ? (
+              <span className="mr-1 rounded bg-red-600 px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-wide text-white">
+                Urgente
+              </span>
+            ) : null}
+            <span className="font-medium">Precisa de você:</span> {reason.text}
+          </p>
+          <p className="mt-0.5 text-xs opacity-75">
+            Último aviso: {reason.when} · a atendente e as automações estão aguardando a equipe.
+          </p>
+        </div>
+      ) : (
+        <span>
+          {mode === "waiting_human"
+            ? "🔴 Esta conversa precisa de você — as automações estão aguardando."
+            : mode === "human"
+              ? "Você está no controle. Nenhuma resposta automática será enviada."
+              : "✨ Atendimento automático ativo nesta conversa."}
+        </span>
+      )}
       {mode === "ai" ? (
         <Button variant="secondary" onClick={() => setMode("human")} disabled={pending}>
           Assumir conversa

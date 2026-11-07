@@ -9,7 +9,17 @@ import { eligibleProfessionalIds, findSlots, schema, withTenant } from "@clinica
 import { EmptyState } from "@/components/ui";
 import { requireAuth } from "@/lib/auth-action";
 import { formatBRL } from "@/lib/format";
-import { Composer, ModeBanner, OfferPanel, type OfferView, ReadOnOpen, AutoRefresh } from "./inbox-client";
+import { NEEDS_HUMAN_TYPES } from "@/lib/needs-human";
+import {
+  AlertToggle,
+  AutoRefresh,
+  Composer,
+  ModeBanner,
+  OfferPanel,
+  type OfferView,
+  PinSelection,
+  ReadOnOpen,
+} from "./inbox-client";
 
 /** Balão sem texto (mídia, figurinha, histórico importado do app): o que mostrar no lugar. */
 const MEDIA_LABEL: Record<string, string> = {
@@ -21,6 +31,18 @@ const MEDIA_LABEL: Record<string, string> = {
   location: "📍 Localização",
   other: "Mídia ou anexo",
 };
+/** Tipos de anexo de verdade: com legenda, o balão mostra o tipo acima do texto. */
+const ATTACHMENT_TYPES = new Set(["image", "audio", "video", "document", "sticker", "location"]);
+const MEDIA_PREFIX = "§media:";
+
+function listPreview(lastBody: string | null): string {
+  if (!lastBody) return "—";
+  if (lastBody.startsWith(MEDIA_PREFIX)) {
+    const type = lastBody.slice(MEDIA_PREFIX.length);
+    return type === "text" ? "Mensagem sem texto" : (MEDIA_LABEL[type] ?? "Mídia ou anexo");
+  }
+  return lastBody;
+}
 
 export const metadata = { title: "WhatsApp" };
 
@@ -91,8 +113,9 @@ export default async function WhatsAppPage({
           instanceId: schema.conversations.instanceId,
           customerName: schema.customers.fullName,
           customerStatus: schema.customers.status,
+          // Anexo sem legenda vem como "§media:<tipo>" (a lista mostra "🎤 Áudio" em vez de "—")
           lastBody: sql<string | null>`(
-            SELECT m.body FROM messages m
+            SELECT COALESCE(m.body, ${MEDIA_PREFIX}::text || m.type) FROM messages m
             WHERE m.conversation_id = conversations.id
             ORDER BY m.created_at DESC LIMIT 1
           )`,
@@ -102,6 +125,45 @@ export default async function WhatsAppPage({
         // conversa sem mensagem entregue ainda (só aprovação pendente) não
         // pode furar a fila: NULL iria pro topo no DESC padrão do Postgres
         .orderBy(sql`${schema.conversations.lastMessageAt} DESC NULLS LAST`);
+
+      // Por que cada conversa está esperando a equipe: o aviso mais recente dela
+      // (motivo da atendente, anexo, limite de gastos...) e se é urgente
+      const waitingIds = conversations.filter((c) => c.mode === "waiting_human").map((c) => c.id);
+      const reasons = new Map<string, { text: string; urgent: boolean; when: string }>();
+      if (waitingIds.length > 0) {
+        const todayKey = utcToZoned(new Date(), tz).dateISO;
+        const rows = await tx
+          .selectDistinctOn([schema.notifications.refId], {
+            refId: schema.notifications.refId,
+            type: schema.notifications.type,
+            title: schema.notifications.title,
+            body: schema.notifications.body,
+            createdAt: schema.notifications.createdAt,
+          })
+          .from(schema.notifications)
+          .where(
+            and(
+              eq(schema.notifications.refTable, "conversations"),
+              inArray(schema.notifications.refId, waitingIds),
+              inArray(schema.notifications.type, [...NEEDS_HUMAN_TYPES]),
+            ),
+          )
+          .orderBy(schema.notifications.refId, desc(schema.notifications.createdAt));
+        for (const r of rows) {
+          if (!r.refId) continue;
+          const z = utcToZoned(new Date(r.createdAt), tz);
+          const [, mm, dd] = z.dateISO.split("-");
+          // Título genérico ("Fulana precisa de você no WhatsApp") não diz nada: vale o
+          // corpo. Título com causa (feedback negativo, limite) entra junto do corpo
+          const body = r.body?.trim() ?? "";
+          const genericTitle = /precisa de você no WhatsApp/.test(r.title);
+          reasons.set(r.refId, {
+            text: genericTitle ? body || r.title : body ? `${r.title} — ${body}` : r.title,
+            urgent: r.type === "conversation_urgent",
+            when: z.dateISO === todayKey ? `hoje às ${z.timeHHMM}` : `${dd}/${mm} às ${z.timeHHMM}`,
+          });
+        }
+      }
 
       // Aba de número primeiro; badge "precisa de você" conta POR ABA
       const byInstance = activeInstanceId
@@ -114,12 +176,18 @@ export default async function WhatsAppPage({
         }
       }
 
-      const filtered = byInstance.filter((c) => {
-        if (filter === "precisam") return c.mode === "waiting_human";
-        if (filter === "humano") return c.mode === "human";
-        if (filter === "auto") return c.mode === "ai";
-        return true;
-      });
+      const filtered = byInstance
+        .filter((c) => {
+          if (filter === "precisam") return c.mode === "waiting_human";
+          if (filter === "humano") return c.mode === "human";
+          if (filter === "auto") return c.mode === "ai";
+          return true;
+        })
+        .map((c) => ({ ...c, reason: reasons.get(c.id) ?? null }));
+      // "Precisam de você": urgentes primeiro (sort estável mantém a ordem por recência)
+      if (filter === "precisam") {
+        filtered.sort((a, b) => Number(b.reason?.urgent ?? false) - Number(a.reason?.urgent ?? false));
+      }
 
       const selectedId =
         sp.c && byInstance.some((c) => c.id === sp.c)
@@ -333,6 +401,7 @@ export default async function WhatsAppPage({
         needByInstance: Object.fromEntries(needByInstance),
         selectedId,
         selected,
+        selectedReason: selected ? (reasons.get(selected.id) ?? null) : null,
         thread,
         panel,
         offers,
@@ -404,7 +473,10 @@ export default async function WhatsAppPage({
       {/* Coluna 1: conversas */}
       <div className="flex w-80 shrink-0 flex-col border-r border-stone-200 bg-white">
         <div className="border-b border-stone-100 p-4">
-          <h1 className="text-base font-semibold text-stone-800">WhatsApp</h1>
+          <div className="flex items-center justify-between gap-2">
+            <h1 className="text-base font-semibold text-stone-800">WhatsApp</h1>
+            <AlertToggle />
+          </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {FILTERS.map(([key, label]) => (
               <Link
@@ -453,14 +525,25 @@ export default async function WhatsAppPage({
                     ) : null}
                   </div>
                   <p className="mt-0.5 truncate text-xs text-stone-500">
-                    {c.lastBody ?? "—"}
+                    {listPreview(c.lastBody)}
                   </p>
+                  {c.mode === "waiting_human" && c.reason ? (
+                    <p className={`mt-0.5 truncate text-xs ${c.reason.urgent ? "font-semibold text-red-700" : "text-red-600/90"}`}>
+                      {c.reason.text}
+                    </p>
+                  ) : null}
                   <p className="mt-0.5 text-[10px] uppercase tracking-wide text-stone-400">
-                    {c.mode === "waiting_human"
-                      ? "precisa de você"
-                      : c.mode === "human"
-                        ? "com atendente"
-                        : "automático"}
+                    {c.mode === "waiting_human" ? (
+                      c.reason?.urgent ? (
+                        <span className="font-bold text-red-600">urgente · precisa de você</span>
+                      ) : (
+                        "precisa de você"
+                      )
+                    ) : c.mode === "human" ? (
+                      "com atendente"
+                    ) : (
+                      "automático"
+                    )}
                     {instances.length > 1 && !activeInstanceId
                       ? ` · ${instanceLabel(c.instanceId)}`
                       : ""}
@@ -481,9 +564,16 @@ export default async function WhatsAppPage({
         ) : (
           <>
             <ReadOnOpen conversationId={data.selected.id} unread={data.selected.unreadCount} />
+            {/* Conversa escolhida sozinha (sem &c na URL): fixa na URL, para o
+                auto-refresh nunca trocar de paciente com um rascunho no meio */}
+            {!sp.c || sp.c !== data.selected.id ? (
+              <PinSelection href={`/whatsapp?f=${filter}${nParam}&c=${data.selected.id}`} />
+            ) : null}
             <ModeBanner
+              key={`mode-${data.selected.id}`}
               conversationId={data.selected.id}
               mode={data.selected.mode}
+              reason={data.selected.mode === "waiting_human" ? data.selectedReason : null}
             />
             {/* col-reverse: o navegador ancora o scroll no FIM nativamente —
                 conversa abre na última mensagem, como todo app de mensagem */}
@@ -507,6 +597,9 @@ export default async function WhatsAppPage({
                         <p className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-teal-100">
                           ✨ automação
                         </p>
+                      ) : null}
+                      {m.body && ATTACHMENT_TYPES.has(m.type) ? (
+                        <p className="text-[11px] font-medium italic opacity-80">{MEDIA_LABEL[m.type]}</p>
                       ) : null}
                       <p className={`whitespace-pre-wrap ${m.body ? "" : "italic opacity-80"}`}>
                         {m.body ?? MEDIA_LABEL[m.type] ?? "Mensagem sem texto"}
@@ -547,7 +640,8 @@ export default async function WhatsAppPage({
                 );
               })}
             </div>
-            <Composer conversationId={data.selected.id} />
+            {/* key: rascunho é de UMA conversa — trocou de conversa, o campo começa vazio */}
+            <Composer key={`composer-${data.selected.id}`} conversationId={data.selected.id} />
           </>
         )}
       </div>

@@ -5,6 +5,7 @@ import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/prov
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
+import { flagUrgentIfHealth } from "./media-escalation";
 import { getSpendStatus, recordAiUsage } from "./spend";
 
 /**
@@ -29,8 +30,15 @@ export async function classifyInbound(
       .where(eq(schema.conversations.id, conversationId))
       .limit(1)
   )[0];
-  // Só classifica quando o atendimento automático está no controle
-  if (!conversation || conversation.mode !== "ai") return;
+  if (!conversation) return;
+  // Só classifica quando o atendimento automático está no controle. Conversa já
+  // esperando a equipe: queixa de saúde que chegar agora vira URGENTE no painel
+  if (conversation.mode !== "ai") {
+    if (conversation.mode === "waiting_human") {
+      await flagUrgentIfHealth(clinicId, conversationId, customerId, logger);
+    }
+    return;
+  }
 
   // ── Resposta à coleta de feedback (nota 0–10) ────────────────────
   const handled = await maybeHandleFeedbackRating(clinicId, conversation, customerId, text, logger);

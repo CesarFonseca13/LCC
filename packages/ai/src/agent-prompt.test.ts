@@ -37,6 +37,19 @@ describe("preço no prompt da atendente", () => {
     expect(p).not.toContain("Para marcar, agende o próprio serviço");
   });
 
+  it("anexos e mensagem indisponível: nunca fingir, resolver o texto, passar para a equipe", () => {
+    const persona = { assistantName: "Ana", tone: "elegante" as const };
+    const p = buildSystemPrompt(persona, { ...clinic([{ name: "Limpeza", price: "180,00", priceMode: "fixed", durationMinutes: 60 }]), offersEnabled: true });
+    expect(p).toContain("14. Mensagens entre colchetes");
+    expect(p).toContain("[mensagem indisponível]");
+    expect(p).toContain("Nunca finja que viu, ouviu ou entendeu");
+    expect(p).toContain("primeiro resolva o que ela escreveu em texto junto");
+    expect(p).toContain("urgência alta se envolver saúde");
+    expect(p).toContain("15. VENDA COMPLEMENTAR");
+    // Reconsulta para pegar o slot_id usa o MESMO dia e turno
+    expect(p).toContain("com a MESMA data e o MESMO turno do horário escolhido");
+  });
+
   it("regra de valor sob avaliação só entra quando há serviço assim", () => {
     const persona = { assistantName: "Ana", tone: "elegante" as const };
     const com = buildSystemPrompt(persona, clinic([{ name: "Harmonização facial", price: "0,00", priceMode: "on_request", durationMinutes: 60 }]));

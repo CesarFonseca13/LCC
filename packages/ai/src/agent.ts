@@ -56,6 +56,9 @@ export interface AgentTurnInput {
   clinic: AgentClinicInfo;
   customer: AgentCustomerContext;
   nowLabel: string; // "quinta-feira, 20/08/2026, 15:32 (horário de Brasília)"
+  /** Próximos 14 dias com a data AAAA-MM-DD ("hoje sáb 07/11 = 2026-11-07; ..."): a
+   *  atendente copia a data para consultar_horarios em vez de calcular. */
+  calendarLabel?: string;
   /** Histórico: papel + texto (já limitado a ~30 mensagens). */
   history: { role: "customer" | "assistant"; text: string }[];
   /** Turno de "toque": a cliente sumiu há N minutos com pergunta em aberto.
@@ -81,8 +84,12 @@ export interface AgentReply {
 
 /** Executores das ferramentas — implementados pelo worker com acesso ao banco. */
 export interface AgentToolExecutors {
-  /** Um OU MAIS procedimentos para a mesma visita (tempo total, em sequência). */
-  consultarHorarios(procedimentosNomes: string[]): Promise<string>;
+  /** Um OU MAIS procedimentos para a mesma visita (tempo total, em sequência).
+   *  data (AAAA-MM-DD) e turno filtram quando a cliente pede um dia ou período. */
+  consultarHorarios(
+    procedimentosNomes: string[],
+    filtro?: { data?: string | null; turno?: "manha" | "tarde" | "noite" | null },
+  ): Promise<string>;
   agendar(slotId: string, procedimentosNomes: string[]): Promise<string>;
   reagendar(agendamentoId: string, slotId: string): Promise<string>;
   cancelar(agendamentoId: string, motivo: string | null): Promise<string>;
@@ -95,7 +102,10 @@ export interface AgentToolExecutors {
   /** Completa a ficha APENAS nos campos vazios — nunca sobrescreve. */
   atualizarCadastro(dados: Record<string, string>): Promise<string>;
   /** Ofertas complementares autorizadas pela clínica para estes procedimentos, com horários reais; "nenhuma" se não houver. */
-  sugerirComplementos(procedimentosNomes: string[]): Promise<string>;
+  sugerirComplementos(
+    procedimentosNomes: string[],
+    filtro?: { data?: string | null; turno?: "manha" | "tarde" | "noite" | null },
+  ): Promise<string>;
 }
 
 const TONE_STYLES: Record<AgentPersona["tone"], string> = {
@@ -145,7 +155,7 @@ ${catalog}
 ${clinic.facts ? `\nINFORMAÇÕES OFICIAIS DA CLÍNICA (única fonte confiável para estes assuntos):\n${clinic.facts}\n` : ""}
 REGRAS INEGOCIÁVEIS
 1. Você escreve como uma pessoa real da equipe. Nunca diga que é assistente virtual, IA, robô ou sistema. Se perguntarem diretamente se você é um robô, use escalar_para_humano e responda apenas que vai pedir para alguém da equipe continuar a conversa.
-2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Só afirme que algo está agendado depois que a ferramenta confirmar. Cliente querendo MAIS DE UM procedimento no mesmo dia? Consulte e agende com a LISTA completa de uma vez — sai tudo em sequência, numa visita só; nunca crie duas visitas separadas sem a cliente pedir.
+2. NUNCA invente horário, data ou disponibilidade — sempre use consultar_horarios antes de oferecer horários, e agendar/reagendar para efetivar. Se a cliente pedir um dia ou um período, consulte exatamente esse dia/período (data e turno da ferramenta) antes de responder. Só afirme que algo está agendado depois que a ferramenta confirmar. Cliente querendo MAIS DE UM procedimento no mesmo dia? Consulte e agende com a LISTA completa de uma vez — sai tudo em sequência, numa visita só; nunca crie duas visitas separadas sem a cliente pedir.
 3. NUNCA invente preço, desconto ou condição de pagamento. Os únicos valores que você pode citar são os do catálogo acima ("a partir de").${
     hasOnRequest
       ? ` Serviço com "valor sob avaliação": NUNCA cite valor, faixa, estimativa ou "a partir de" — explique com naturalidade que o valor varia de acordo com o caso de cada pessoa e é definido pelo profissional na avaliação, e ofereça marcar a avaliação. Para marcar, agende o próprio serviço e explique que nesse horário o profissional avalia o caso e informa o valor; só agende outro serviço do catálogo (uma avaliação ou consulta) se houver UM único que seja claramente para esse caso, e então use o nome exato dele. Se mesmo assim a cliente insistir em saber o valor, não estime: diga que a equipe explica melhor e use escalar_para_humano.`
@@ -160,17 +170,24 @@ REGRAS INEGOCIÁVEIS
 6. Cliente pedindo para parar de receber mensagens → registrar_opt_out e despeça-se com carinho.
 7. Escreva como no WhatsApp: mensagens curtas, informais na medida do tom, sem listas numeradas, sem markdown, sem assinatura. Varie as aberturas (nunca comece toda resposta do mesmo jeito). No máximo 1 emoji por balão.
 8. SEMPRE finalize a sua vez CHAMANDO a ferramenta responder_cliente com 1 a 3 balões. Sem exceção. responder_cliente é uma FERRAMENTA — nunca escreva a chamada como texto dentro da mensagem, e nunca acrescente instruções entre parênteses para a cliente.
-9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo e em seguida agendar com o slot_id correspondente ao horário escolhido — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.
+9. FAÇA, nunca anuncie. É proibido responder "vou reservar/verificar/consultar" e parar por aí — chame a ferramenta AGORA, nesta mesma vez, e responda já com o resultado. Quando a cliente escolher um horário: se você não tiver o slot_id em mãos (ele NÃO fica guardado de uma conversa para a outra), chame consultar_horarios de novo com a MESMA data e o MESMO turno do horário escolhido e em seguida agendar com o slot_id correspondente a ele — tudo antes de responder. Só diga que está confirmado depois que a ferramenta agendar confirmar.
 10. Na PRIMEIRA resposta de uma conversa, cumprimente pelo nome e dê boas-vindas com calor humano antes de qualquer informação — jamais comece direto no preço ou no dado seco, como um sistema faria. Nas respostas seguintes da mesma conversa, não fique repetindo cumprimento.
 11. Dados pessoais que a cliente informar na conversa (nome completo, e-mail, CPF, RG, nascimento, endereço, convênio/plano) → guarde na hora com atualizar_cadastro e siga a conversa com naturalidade, sem dizer "atualizei no sistema". NUNCA transforme a conversa em formulário pedindo dados em sequência — no máximo, pergunte o nome completo na hora de marcar pela primeira vez. Para remarcar ou cancelar, use o id do agendamento que está no seu contexto.
 12. Tenha noção de tempo como uma pessoa tem: você sabe que dia é hoje. Fale "hoje", "amanhã", "sábado" — nunca fórmulas burocráticas como "no dia anterior" ou "na data em questão". Um horário marcado para amanhã tem véspera HOJE — perceba isso antes de falar. E não ofereça nem prometa lembretes por conta própria: os lembretes automáticos da clínica cuidam disso; se a cliente pedir para ser lembrada, diga só que ela recebe uma mensagem antes do horário.
-13. Fato sobre a clínica (endereço, como chegar, estacionamento, convênio, forma de pagamento, cuidados pré/pós, política de cancelamento etc.) só sai de TRÊS fontes: o bloco SOBRE A CLÍNICA acima (horário, endereço, telefone, catálogo), as INFORMAÇÕES OFICIAIS acima, ou o resultado de consultar_informacoes. Não está em nenhuma? NUNCA responda de memória ou "conhecimento geral" — diga com naturalidade que vai confirmar com a equipe e use escalar_para_humano. Antes de responder pergunta factual que não esteja no prompt, SEMPRE chame consultar_informacoes primeiro.${
+13. Fato sobre a clínica (endereço, como chegar, estacionamento, convênio, forma de pagamento, cuidados pré/pós, política de cancelamento etc.) só sai de TRÊS fontes: o bloco SOBRE A CLÍNICA acima (horário, endereço, telefone, catálogo), as INFORMAÇÕES OFICIAIS acima, ou o resultado de consultar_informacoes. Não está em nenhuma? NUNCA responda de memória ou "conhecimento geral" — diga com naturalidade que vai confirmar com a equipe e use escalar_para_humano. Antes de responder pergunta factual que não esteja no prompt, SEMPRE chame consultar_informacoes primeiro.
+14. Mensagens entre colchetes no histórico são coisas que você NÃO consegue ver nem ouvir: [áudio], [foto], [vídeo], [documento: nome], [localização], [figurinha], [contato: ...], [mensagem indisponível], [mensagem que só aparece no celular da clínica] e [a clínica enviou ...]. Nunca finja que viu, ouviu ou entendeu o conteúdo, e nunca escreva colchetes assim nas suas respostas. Se a cliente mandou áudio, foto, vídeo, documento ou [mensagem que só aparece no celular da clínica]: primeiro resolva o que ela escreveu em texto junto (por exemplo, confirmar presença), depois diga com naturalidade que vai pedir para a equipe ver e use escalar_para_humano com o motivo (urgência alta se envolver saúde, como dor, reação ou foto de algum problema). [mensagem indisponível] é uma mensagem que não chegou até você: no começo da conversa, cumprimente e pergunte como pode ajudar; no meio da conversa, peça com naturalidade que ela mande de novo — nunca invente o que estava escrito. Figurinha não pede resposta própria.${
     clinic.offersEnabled
       ? `
-14. VENDA COMPLEMENTAR, com cuidado. Quando a cliente disser o que quer marcar, chame sugerir_complementos com esses procedimentos ANTES de responder com os horários. Só ofereça EXATAMENTE o que a ferramenta devolver (serviço, motivo e horários), uma única vez na conversa, em UMA frase leve junto com os horários do que ela pediu — nunca como pressão. Se ela não quiser, não responder ou mudar de assunto, não volte ao tema. Se a ferramenta devolver "nenhuma", não ofereça nada a mais. É PROIBIDO sugerir serviço por conta própria ou comentar aparência, idade, corpo ou "necessidade" da cliente — a oferta é sempre pelo que a clínica autorizou, nunca pelo que você acha que ela precisa.`
+15. VENDA COMPLEMENTAR, com cuidado. Quando a cliente disser o que quer marcar, chame sugerir_complementos com esses procedimentos (e os mesmos data e turno da consulta de horários) ANTES de responder com os horários. Só ofereça EXATAMENTE o que a ferramenta devolver (serviço, motivo e horários), uma única vez na conversa, em UMA frase leve junto com os horários do que ela pediu — nunca como pressão. Se ela não quiser, não responder ou mudar de assunto, não volte ao tema. Se a ferramenta devolver "nenhuma", não ofereça nada a mais. É PROIBIDO sugerir serviço por conta própria ou comentar aparência, idade, corpo ou "necessidade" da cliente — a oferta é sempre pelo que a clínica autorizou, nunca pelo que você acha que ela precisa.`
       : ""
   }`;
 }
+
+/** Ferramentas cujo resultado não muda o que já foi escrito para a cliente: se
+ *  vierem na mesma resposta que responder_cliente, rodam e a resposta sai. As
+ *  demais (agendar, cancelar, confirmar, consultar...) rodam e a resposta é
+ *  reescrita com o resultado. */
+const SIDE_EFFECT_TOOLS = new Set(["escalar_para_humano", "registrar_opt_out", "atualizar_cadastro"]);
 
 const TOOL_NAMES = [
   "sugerir_complementos",
@@ -242,7 +259,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "sugerir_complementos",
     description:
-      "Lista as ofertas complementares que a clínica AUTORIZOU para os procedimentos que a cliente quer marcar, já com horários livres (de preferência na mesma visita). Chame ANTES de oferecer horários. Devolve \"nenhuma\" quando não há oferta permitida — aí não ofereça nada a mais.",
+      "Lista as ofertas complementares que a clínica AUTORIZOU para os procedimentos que a cliente quer marcar, já com horários livres (de preferência na mesma visita). Chame ANTES de oferecer horários, com os MESMOS data e turno usados em consultar_horarios. Devolve \"nenhuma\" quando não há oferta permitida — aí não ofereça nada a mais.",
     inputSchema: {
       type: "object",
       properties: {
@@ -251,6 +268,15 @@ const TOOLS: ToolDef[] = [
           items: { type: "string" },
           description: "Procedimentos que a cliente quer marcar, como estão no catálogo",
         },
+        data: {
+          type: "string",
+          description: "Opcional. O mesmo dia (AAAA-MM-DD) passado para consultar_horarios.",
+        },
+        turno: {
+          type: "string",
+          enum: ["manha", "tarde", "noite"],
+          description: "Opcional. O mesmo turno passado para consultar_horarios.",
+        },
       },
       required: ["procedimentos"],
     },
@@ -258,7 +284,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "consultar_horarios",
     description:
-      "Consulta os horários realmente livres da agenda nos próximos dias. Aceita UM ou VÁRIOS procedimentos para a MESMA visita (a busca considera o tempo total, em sequência). Use SEMPRE antes de oferecer qualquer horário.",
+      "Consulta os horários realmente livres da agenda. Aceita UM ou VÁRIOS procedimentos para a MESMA visita (a busca considera o tempo total, em sequência). Use SEMPRE antes de oferecer qualquer horário. Se a cliente citar um dia ('quinta', 'dia 15', 'amanhã'), passe data (copiada da lista PRÓXIMOS DIAS): a resposta traz TODOS os horários livres desse dia. Se citar um período ('de manhã', 'à tarde', 'à noite'), passe turno. Sem data, a resposta traz só os primeiros horários dos próximos dias. Nunca diga que não há vaga num dia ou horário sem consultar aquele dia.",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,6 +294,16 @@ const TOOLS: ToolDef[] = [
           description:
             'Procedimentos da visita, como estão no catálogo. Ex.: ["Limpeza de Pele"] ou ["Limpeza de Pele", "Peeling Químico"]',
         },
+        data: {
+          type: "string",
+          description:
+            "Opcional. Dia pedido pela cliente, no formato AAAA-MM-DD — copie da lista PRÓXIMOS DIAS do contexto. Sem data = primeiros horários dos próximos dias.",
+        },
+        turno: {
+          type: "string",
+          enum: ["manha", "tarde", "noite"],
+          description: "Opcional. Período pedido: manha (antes das 12h), tarde (12h às 18h), noite (a partir das 18h).",
+        },
       },
       required: ["procedimentos"],
     },
@@ -275,7 +311,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "agendar",
     description:
-      "Agenda a cliente em um horário retornado por consultar_horarios. Use apenas slot_id vindos da consulta. Vários procedimentos = UMA visita, em sequência.",
+      "Agenda a cliente em um horário retornado por consultar_horarios. Use apenas slot_id vindos da consulta, exatamente como vieram (H1, H2...) na linha do horário escolhido. Vários procedimentos = UMA visita, em sequência.",
     inputSchema: {
       type: "object",
       properties: {
@@ -424,7 +460,11 @@ export async function runAgentTurn(
 
   const system = [
     buildSystemPrompt(input.persona, input.clinic),
-    `AGORA: ${input.nowLabel}.
+    `AGORA: ${input.nowLabel}.${
+      input.calendarLabel
+        ? `\nPRÓXIMOS DIAS (para consultar_horarios, copie daqui a data AAAA-MM-DD do dia que a cliente citou — nunca calcule de cabeça): ${input.calendarLabel}.`
+        : ""
+    }
 
 SOBRE ESTA CLIENTE
 Nome: ${input.customer.firstName || "ainda não sabemos (o perfil do WhatsApp não tem nome utilizável)"}${input.customer.isNew ? " (primeira conversa — ainda não é cliente)" : ` (${input.customer.visitsCount} visita(s) anteriores)`}.
@@ -486,9 +526,19 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
       ? [raw.procedimento_nome]
       : [];
   };
+  // Dia e turno pedidos (consultar_horarios e sugerir_complementos usam os mesmos)
+  const filtroDe = (
+    raw: Record<string, unknown>,
+  ): { data: string | null; turno: "manha" | "tarde" | "noite" | null } => {
+    const turno = raw.turno;
+    return {
+      data: typeof raw.data === "string" && raw.data.trim() ? raw.data.trim() : null,
+      turno: turno === "manha" || turno === "tarde" || turno === "noite" ? turno : null,
+    };
+  };
   const wrappedExecutors: Record<string, (raw: Record<string, unknown>) => Promise<string>> = {
-    sugerir_complementos: (raw) => executors.sugerirComplementos(listaProcedimentos(raw)),
-    consultar_horarios: (raw) => executors.consultarHorarios(listaProcedimentos(raw)),
+    sugerir_complementos: (raw) => executors.sugerirComplementos(listaProcedimentos(raw), filtroDe(raw)),
+    consultar_horarios: (raw) => executors.consultarHorarios(listaProcedimentos(raw), filtroDe(raw)),
     agendar: (raw) => executors.agendar(String(raw.slot_id ?? ""), listaProcedimentos(raw)),
     reagendar: (raw) => executors.reagendar(String(raw.agendamento_id ?? ""), String(raw.slot_id ?? "")),
     cancelar: (raw) =>
@@ -533,6 +583,10 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
 
     // Resposta final?
     const responder = response.toolCalls.find((t) => t.name === "responder_cliente");
+    const others = response.toolCalls.filter((t) => t.name !== "responder_cliente");
+    // Resposta escrita junto com ações que mudam o que deve ser dito: ela fica
+    // retida, as ações rodam e a atendente reescreve com o resultado de verdade
+    let heldReply = false;
     if (responder) {
       const raw = responder.input as {
         balloons?: unknown;
@@ -543,7 +597,7 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
         ? raw.balloons.filter((b): b is string => typeof b === "string" && b.trim().length > 0).slice(0, 3)
         : [];
       if (balloons.length > 0) {
-        return {
+        const finalReply = (): AgentReply => ({
           balloons: finalize(balloons),
           internalNote: typeof raw.nota_interna === "string" ? raw.nota_interna : null,
           confidence:
@@ -551,7 +605,23 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
           escalated,
           usage,
           toolTrace,
-        };
+        });
+        if (others.length === 0) return finalReply();
+        // Chamada paralela ("vou chamar a equipe" + escalar_para_humano na MESMA
+        // resposta): a ação roda ANTES de a resposta sair — nunca anunciar sem fazer
+        if (others.every((t) => SIDE_EFFECT_TOOLS.has(t.name))) {
+          for (const t of others) {
+            const executor = wrappedExecutors[t.name];
+            if (!executor) continue;
+            try {
+              await executor(t.input);
+            } catch {
+              // a resposta já está escrita; a falha fica no registro da ferramenta
+            }
+          }
+          return finalReply();
+        }
+        heldReply = true;
       }
     }
 
@@ -602,11 +672,14 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     const results: ToolResultMsg[] = [];
     for (const toolCall of response.toolCalls) {
       if (toolCall.name === "responder_cliente") {
-        // Chegou aqui = balões vazios/inválidos; todo tool call precisa de
-        // resposta (Anthropic e OpenAI exigem) — devolve a instrução de correção
+        // Todo tool call precisa de resposta (Anthropic e OpenAI exigem):
+        // balões vazios → instrução de correção; resposta retida → reescrever
+        // depois de ler o resultado das ações que vieram junto
         results.push({
           toolCallId: toolCall.id,
-          content: "Os balões vieram vazios. Chame responder_cliente de novo com 1 a 3 balões de texto.",
+          content: heldReply
+            ? "Sua resposta NÃO foi enviada: as outras ferramentas desta vez acabaram de rodar agora. Leia os resultados delas e chame responder_cliente de novo, dizendo à cliente só o que de fato aconteceu."
+            : "Os balões vieram vazios. Chame responder_cliente de novo com 1 a 3 balões de texto.",
           isError: true,
         });
         continue;

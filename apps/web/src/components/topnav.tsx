@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import {
   Banknote,
   BarChart3,
@@ -27,6 +27,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { logoutAction } from "@/app/login/actions";
+import { desktopAlertsSupported, markDesktopAlertsBroken } from "@/lib/desktop-alerts";
 
 type IconType = React.ComponentType<{ className?: string }>;
 
@@ -87,10 +88,114 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+interface Escalation {
+  id: string;
+  conversationId: string;
+  urgent: boolean;
+  at: string;
+}
+
+interface NeedsHuman {
+  count: number;
+  urgent: number;
+  /** Escalação mais recente entre as conversas que ainda esperam a equipe. */
+  latest: Escalation | null;
+  /** Urgente mais recente entre elas. */
+  latestUrgent: Escalation | null;
+}
+
+/** Contador "precisa de você" ao vivo: consulta a cada 30 s (inclusive com a aba
+ *  em segundo plano, que é quando o alerta no computador mais ajuda) e avisa a
+ *  cada escalação NOVA — se a pessoa ativou os alertas. */
+function useNeedsHuman(initial: NeedsHuman | null, clinicId: string | null): NeedsHuman | null {
+  const router = useRouter();
+  const [need, setNeed] = useState(initial);
+  // Cada dado novo do servidor invalida consultas que já estavam no caminho
+  const generation = useRef(0);
+  // Aviso mais novo já visto (undefined = ainda sem leitura: a primeira não alerta)
+  const seenAt = useRef<string | null | undefined>(undefined);
+  const enabled = initial !== null;
+
+  // Página recarregada pelo servidor (navegação, auto-refresh do WhatsApp): vale o dado novo
+  useEffect(() => {
+    generation.current += 1;
+    setNeed(initial);
+  }, [initial]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let stopped = false;
+    const tick = async () => {
+      const startedAt = generation.current;
+      try {
+        const res = await fetch("/api/painel/precisam", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as Partial<NeedsHuman> & { clinicId?: string | null };
+        // Resposta velha (o servidor já trouxe dado mais novo) ou de outra clínica
+        // (superadmin entrou em outra clínica em outra aba): ignora
+        if (stopped || startedAt !== generation.current) return;
+        if (clinicId && data.clinicId !== clinicId) return;
+        if (typeof data.count !== "number") return;
+        setNeed({
+          count: data.count,
+          urgent: Number(data.urgent) || 0,
+          latest: data.latest ?? null,
+          latestUrgent: data.latestUrgent ?? null,
+        });
+      } catch {
+        // rede caiu: tenta de novo no próximo ciclo
+      }
+    };
+    const timer = setInterval(tick, 30_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [enabled, clinicId]);
+
+  useEffect(() => {
+    if (!need) return;
+    const before = seenAt.current;
+    const latest = need.latest;
+    if (before === undefined) {
+      seenAt.current = latest?.at ?? null;
+      return; // primeira leitura: sem alerta
+    }
+    // Só escalação MAIS NOVA que a última vista alerta (conversa resolvida não "volta" o aviso)
+    if (!latest || (before !== null && latest.at <= before)) return;
+    seenAt.current = latest.at;
+    // Urgente nova no mesmo intervalo em que chegou uma comum: o alerta é o da urgente
+    const urgentNew = need.latestUrgent && (before === null || need.latestUrgent.at > before) ? need.latestUrgent : null;
+    const target = urgentNew ?? latest;
+    if (!desktopAlertsSupported() || Notification.permission !== "granted") return;
+    try {
+      // Etiqueta = o aviso: igual em todas as abas (um alerta só) e nova a cada
+      // escalação (toast e som de verdade, nunca substituição muda)
+      const alert = new Notification(
+        target.urgent ? "URGENTE: conversa esperando você" : "Conversa esperando você no WhatsApp",
+        { body: "Abra o WhatsApp do VesaliusX para responder.", tag: `vx-precisam-${target.id}` },
+      );
+      alert.onclick = () => {
+        window.focus();
+        router.push(`/whatsapp?f=precisam&c=${target.conversationId}`);
+        alert.close();
+      };
+    } catch (err) {
+      // No tablet Android (modo computador) o construtor não existe: avisa o botão
+      // de alertas para não mostrar "Alertas ligados" à toa
+      if (err instanceof TypeError) markDesktopAlertsBroken();
+    }
+  }, [need, router]);
+
+  return need;
+}
+
 export function TopNav({
   clinicName,
   userName,
   approvalsCount = 0,
+  needsHuman = null,
+  clinicId = null,
   whatsapp,
   isSuperadmin = false,
 }: {
@@ -99,6 +204,10 @@ export function TopNav({
   /** Mostra o atalho para o painel de administração da plataforma. */
   isSuperadmin?: boolean;
   approvalsCount?: number;
+  /** Conversas em "precisa de você" (null = perfil sem acesso ao WhatsApp). */
+  needsHuman?: NeedsHuman | null;
+  /** Clínica desta página (o contador ao vivo ignora resposta de outra clínica). */
+  clinicId?: string | null;
   /** Ponto de status no ícone do WhatsApp + texto do tooltip. */
   whatsapp: { tone: "ok" | "warn" | "off" | "none"; text: string };
 }) {
@@ -106,6 +215,9 @@ export function TopNav({
   // O painel do dropdown é position:fixed (ancorado na coordenada do botão):
   // o <nav> rola horizontalmente e overflow cortaria um painel absoluto.
   const [open, setOpen] = useState<{ label: string; x: number; y: number } | null>(null);
+  const need = useNeedsHuman(needsHuman, clinicId);
+  const needCount = need?.count ?? 0;
+  const needUrgent = need?.urgent ?? 0;
 
   // Navegou? Fecha qualquer dropdown aberto.
   useEffect(() => setOpen(null), [pathname]);
@@ -149,16 +261,34 @@ export function TopNav({
               return (
                 <Link
                   key={entry.href}
-                  href={entry.href}
-                  title={entry.href === "/whatsapp" ? whatsapp.text : undefined}
+                  // Com conversa esperando, o ícone já abre "Precisam de você" (urgentes no topo)
+                  href={entry.href === "/whatsapp" && needCount > 0 ? "/whatsapp?f=precisam" : entry.href}
+                  title={
+                    entry.href === "/whatsapp"
+                      ? needCount > 0
+                        ? `${whatsapp.text} · ${needCount} conversa${needCount === 1 ? "" : "s"} precisa${needCount === 1 ? "" : "m"} de você${needUrgent > 0 ? ` (${needUrgent} urgente${needUrgent === 1 ? "" : "s"})` : ""}`
+                        : whatsapp.text
+                      : undefined
+                  }
                   className={`${baseItem} ${active ? activeCls : idle}`}
                 >
                   <span className="relative">
                     <Icon className="h-[19px] w-[19px]" />
                     {entry.href === "/whatsapp" && waDot ? (
                       <span
-                        className={`absolute -right-1 -top-0.5 h-2 w-2 rounded-full ring-2 ring-[#0a2e34] ${waDot}`}
+                        className={`absolute -right-1 h-2 w-2 rounded-full ring-2 ring-[#0a2e34] ${waDot} ${
+                          needCount > 0 ? "-bottom-0.5" : "-top-0.5"
+                        }`}
                       />
+                    ) : null}
+                    {entry.href === "/whatsapp" && needCount > 0 ? (
+                      <span
+                        className={`absolute -right-2.5 -top-1.5 rounded-full bg-red-500 px-1 py-0.5 text-[9px] font-bold leading-none text-white ${
+                          needUrgent > 0 ? "animate-pulse ring-2 ring-red-300" : ""
+                        }`}
+                      >
+                        {needCount > 99 ? "99+" : needCount}
+                      </span>
                     ) : null}
                     {entry.href === "/aprovacoes" && approvalsCount > 0 ? (
                       <span className="absolute -right-2.5 -top-1.5 rounded-full bg-red-500 px-1 py-0.5 text-[9px] font-bold leading-none text-white">

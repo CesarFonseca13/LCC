@@ -1,8 +1,10 @@
 import { and, eq, sql } from "drizzle-orm";
 import Link from "next/link";
+import { can } from "@clinicaos/core/permissions";
 import { schema, withTenant } from "@clinicaos/db";
 import { TopNav } from "@/components/topnav";
 import { requireAuth } from "@/lib/auth-action";
+import { countNeedsHuman, type NeedsHumanCounts } from "@/lib/needs-human";
 import { requireTermsAccepted } from "@/lib/terms";
 
 export default async function PainelLayout({
@@ -71,6 +73,9 @@ export default async function PainelLayout({
 
   let whatsappCounts = { connected: 0, total: 0 };
   let approvalsCount = 0;
+  // Contador "precisa de você" no menu (só para quem atende o WhatsApp)
+  const seesInbox = auth.role ? can(auth.role, "inbox.access") : false;
+  let needsHuman: NeedsHumanCounts | null = null;
   if (auth.clinicId) {
     const info = await withTenant(
       auth.clinicId,
@@ -94,12 +99,14 @@ export default async function PainelLayout({
           .select({ count: sql<number>`count(*)::int` })
           .from(schema.approvals)
           .where(eq(schema.approvals.status, "pending"));
-        return { counts, pending: pending[0]?.count ?? 0 };
+        const need = seesInbox ? await countNeedsHuman(tx) : null;
+        return { counts, pending: pending[0]?.count ?? 0, need };
       },
       auth.userId,
     );
     whatsappCounts = info.counts;
     approvalsCount = info.pending;
+    needsHuman = info.need;
   }
 
   const desconectados = whatsappCounts.total - whatsappCounts.connected;
@@ -124,9 +131,14 @@ export default async function PainelLayout({
   return (
     <div className="flex h-screen flex-col bg-stone-50">
       <TopNav
+        // Trocou de clínica (superadmin): o menu recomeça do zero — contador e
+        // "último aviso visto" da clínica anterior não podem disparar alerta aqui
+        key={auth.clinicId ?? "sem-clinica"}
         clinicName={auth.clinicName ?? null}
         userName={auth.userName ?? null}
         approvalsCount={approvalsCount}
+        needsHuman={needsHuman}
+        clinicId={auth.clinicId ?? null}
         whatsapp={whatsapp}
         isSuperadmin={auth.isSuperadmin}
       />

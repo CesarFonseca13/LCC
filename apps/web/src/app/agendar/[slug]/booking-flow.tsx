@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { bookOnline, getBookingSlots } from "./actions";
+import { bookOnline, getBookingSlots, type BookingDay, type BookingSlotsResult } from "./actions";
 import type { FreeSlot } from "@clinicaos/db";
 
 interface ProcedureOption {
@@ -9,6 +9,14 @@ interface ProcedureOption {
   name: string;
   durationMinutes: number;
   priceLabel: string;
+}
+
+const WEEKDAYS = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+/** "qui 12/11" — o dia mostrado fica sempre escrito acima dos horários. */
+function dayLabel(dateISO: string): string {
+  const [, m, d] = dateISO.split("-");
+  return `${WEEKDAYS[new Date(`${dateISO}T12:00:00Z`).getUTCDay()] ?? ""} ${d}/${m}`;
 }
 
 export function BookingFlow({
@@ -20,23 +28,41 @@ export function BookingFlow({
 }) {
   const [step, setStep] = useState<"procedure" | "slot" | "identify" | "done">("procedure");
   const [procedure, setProcedure] = useState<ProcedureOption | null>(null);
+  const [days, setDays] = useState<BookingDay[]>([]);
+  const [day, setDay] = useState<string | null>(null);
   const [slots, setSlots] = useState<FreeSlot[]>([]);
   const [slot, setSlot] = useState<FreeSlot | null>(null);
   const [whenLabel, setWhenLabel] = useState("");
   const [error, setError] = useState<string>();
   const [pending, startTransition] = useTransition();
 
+  function applySlots(result: BookingSlotsResult) {
+    setDays(result.days ?? []);
+    setDay(result.dateISO ?? null);
+    setSlots(result.slots ?? []);
+  }
+
   function chooseProcedure(p: ProcedureOption) {
     setProcedure(p);
     setError(undefined);
     startTransition(async () => {
       const result = await getBookingSlots(slug, p.id);
-      if (result.ok && result.slots) {
-        setSlots(result.slots);
+      if (result.ok) {
+        applySlots(result);
         setStep("slot");
       } else {
         setError(result.error);
       }
+    });
+  }
+
+  function chooseDay(dateISO: string) {
+    if (!procedure || dateISO === day) return;
+    setError(undefined);
+    startTransition(async () => {
+      const result = await getBookingSlots(slug, procedure.id, dateISO);
+      if (result.ok) applySlots(result);
+      else setError(result.error);
     });
   }
 
@@ -55,9 +81,9 @@ export function BookingFlow({
         setStep("done");
       } else if (result.conflict) {
         setError(result.error);
-        // Recarrega os horários e volta um passo
-        const fresh = await getBookingSlots(slug, procedure!.id);
-        if (fresh.ok && fresh.slots) setSlots(fresh.slots);
+        // Recarrega os horários do mesmo dia e volta um passo
+        const fresh = await getBookingSlots(slug, procedure!.id, slot?.dateISO ?? day);
+        if (fresh.ok) applySlots(fresh);
         setSlot(null);
         setStep("slot");
       } else {
@@ -78,6 +104,8 @@ export function BookingFlow({
       </div>
     );
   }
+
+  const severalProfessionals = new Set(slots.map((s) => s.professionalName)).size > 1;
 
   return (
     <div className="space-y-4">
@@ -114,31 +142,74 @@ export function BookingFlow({
       ) : null}
 
       {step === "slot" ? (
-        <div className="space-y-2">
+        <div className="space-y-3">
           <p className="text-sm text-stone-600">
-            <strong>{procedure?.name}</strong> — escolha o melhor horário:
+            <strong>{procedure?.name}</strong> — escolha o dia e o horário:
           </p>
-          {slots.length === 0 ? (
+          {days.length === 0 ? (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              Sem horários livres nos próximos dias — chame a clínica no WhatsApp que a
+              Sem horários livres nas próximas semanas — chame a clínica no WhatsApp que a
               gente dá um jeitinho!
             </p>
           ) : (
-            <div className="grid grid-cols-1 gap-2">
-              {slots.map((s) => (
-                <button
-                  key={s.slotId}
-                  type="button"
-                  onClick={() => {
-                    setSlot(s);
-                    setStep("identify");
-                  }}
-                  className="rounded-xl border border-stone-200 px-4 py-2.5 text-left text-sm text-stone-700 transition hover:border-teal-300 hover:bg-teal-50"
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
+            <>
+              <div className="flex flex-wrap gap-2" role="group" aria-label="Dia">
+                {days.map((d) => {
+                  const active = d.dateISO === day;
+                  return (
+                    <button
+                      key={d.dateISO}
+                      type="button"
+                      disabled={pending}
+                      aria-pressed={active}
+                      onClick={() => chooseDay(d.dateISO)}
+                      className={`w-14 rounded-xl border px-1 py-1.5 text-center transition disabled:opacity-60 ${
+                        active
+                          ? "border-teal-700 bg-teal-700 text-white"
+                          : "border-stone-200 text-stone-700 hover:border-teal-300 hover:bg-teal-50"
+                      }`}
+                    >
+                      <span className="block text-[11px] uppercase leading-tight">{d.weekday}</span>
+                      <span className="block text-sm font-semibold leading-tight">{d.dayMonth}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {day ? (
+                <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
+                  Horários de {dayLabel(day)}
+                </p>
+              ) : null}
+              {pending ? (
+                <p className="text-sm text-stone-400">Carregando horários...</p>
+              ) : slots.length === 0 ? (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  Esse dia acabou de lotar — escolha outro dia acima.
+                </p>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  {slots.map((s) => (
+                    <button
+                      key={s.slotId}
+                      type="button"
+                      onClick={() => {
+                        setSlot(s);
+                        setError(undefined);
+                        setStep("identify");
+                      }}
+                      className="rounded-xl border border-stone-200 px-2 py-2.5 text-center text-sm text-stone-700 transition hover:border-teal-300 hover:bg-teal-50"
+                    >
+                      <span className="block font-semibold">{s.timeHHMM}</span>
+                      {severalProfessionals ? (
+                        <span className="block truncate text-[11px] text-stone-500">
+                          {s.professionalName}
+                        </span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
           )}
           <button
             type="button"

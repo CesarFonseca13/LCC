@@ -9,8 +9,29 @@ import {
 import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { activePromo, suggestOffers } from "@clinicaos/core/offers";
 import { customerPriceLabel, formatPriceNumber, priceMode } from "@clinicaos/core/procedure-price";
-import { todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
-import { eligibleProfessionalIds, findSlots, parseSlotId, schema, unsafeGlobalDb } from "@clinicaos/db";
+import { addDaysISO, todayISO, utcToZoned, zonedToUtc } from "@clinicaos/core/timezone";
+import {
+  clinicServesPeriod,
+  eligibleProfessionalIds,
+  findSlots,
+  isRealDateISO,
+  MAX_SLOT_SEARCH_DAYS,
+  openRangesOn,
+  parseSlotId,
+  rangeHasStart,
+  rangeTouchesPeriod,
+  schema,
+  unsafeGlobalDb,
+  type FreeSlot,
+} from "@clinicaos/db";
+import {
+  escalateToTeam,
+  flagUrgentIfHealth,
+  isCourtesyOnly,
+  looksLikeHealthComplaint,
+  storedHumanOnlyReason,
+  storedMessageTriggersTurn,
+} from "./media-escalation";
 import { getSpendStatus, notifySpendThresholds, recordAiUsage } from "./spend";
 
 /**
@@ -47,12 +68,84 @@ function parseAiSettings(settings: unknown): ClinicAiSettings {
   };
 }
 
+/** Tipo de anexo → marcador no histórico da atendente. */
+const MEDIA_MARKER: Record<string, string> = {
+  image: "foto",
+  audio: "áudio",
+  video: "vídeo",
+  document: "documento",
+  location: "localização",
+  sticker: "figurinha",
+};
+/** Anexo que a CLÍNICA mandou (pelo celular, na coexistência). */
+const OUTBOUND_MEDIA: Record<string, string> = {
+  image: "uma foto",
+  audio: "um áudio",
+  video: "um vídeo",
+  document: "um documento",
+  location: "uma localização",
+  sticker: "uma figurinha",
+};
+/** Anexo da cliente que ainda conta para a rede de segurança (cobre as novas
+ *  tentativas do turno quando o provedor da IA falha por até 30 min). */
+const PENDING_MEDIA_WINDOW_MS = 45 * 60_000;
+const WEEKDAYS_SHORT = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+const WEEKDAYS_LONG = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+
+/** "quinta-feira, 12/11" */
+function dayName(dateISO: string): string {
+  const weekday = new Date(`${dateISO}T12:00:00Z`).getUTCDay();
+  const [, m, d] = dateISO.split("-");
+  return `${WEEKDAYS_LONG[weekday]}, ${d}/${m}`;
+}
+
+/** "na quinta-feira, 12/11" / "no sábado, 14/11" — o dia da semana sempre junto
+ *  da data, para a atendente perceber se pediu o dia errado. */
+function dayPhrase(dateISO: string): string {
+  const weekday = new Date(`${dateISO}T12:00:00Z`).getUTCDay();
+  return `${weekday === 0 || weekday === 6 ? "no" : "na"} ${dayName(dateISO)}`;
+}
+
+/** Minuto do dia (no fuso) daqui a `aheadMs`, arredondado para CIMA (a busca
+ *  compara com segundos). Infinity = já virou o dia. */
+function minuteOfTodayAhead(tz: string, todayISODate: string, aheadMs: number): number {
+  const z = utcToZoned(new Date(Date.now() + aheadMs + 59_999), tz);
+  if (z.dateISO !== todayISODate) return Number.POSITIVE_INFINITY;
+  const [h, m] = z.timeHHMM.split(":").map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+/** Primeiro minuto em que ainda dá para começar uma visita hoje (antecedência de 1h30, igual à busca). */
+function earliestStartMinuteToday(tz: string, todayISODate: string): number {
+  return minuteOfTodayAhead(tz, todayISODate, 90 * 60_000);
+}
+
+/** Calendário dos próximos 14 dias para o prompt: a atendente copia a data em vez de calcular. */
+export function upcomingCalendar(todayISODate: string, days = 14): string {
+  return Array.from({ length: days }, (_, i) => {
+    const date = addDaysISO(todayISODate, i);
+    const [, m, d] = date.split("-");
+    const weekday = WEEKDAYS_SHORT[new Date(`${date}T12:00:00Z`).getUTCDay()];
+    const prefix = i === 0 ? "hoje " : i === 1 ? "amanhã " : "";
+    return `${prefix}${weekday} ${d}/${m} = ${date}`;
+  }).join("; ");
+}
+
+function daysBetweenISO(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / 86_400_000);
+}
+
+/** Anexo sem legenda espera mais: quem manda foto ou áudio costuma escrever a
+ *  explicação logo depois, e os dois precisam cair no MESMO turno (a queixa
+ *  digitada é o que define a urgência). O texto seguinte puxa o turno para antes. */
+export const MEDIA_DEBOUNCE_MS = 45_000;
+
 /** Chamado no inbound: agenda (ou empurra) o turno da conversa. */
-export async function scheduleAiTurn(conversationId: string): Promise<void> {
+export async function scheduleAiTurn(conversationId: string, delayMs = DEBOUNCE_MS): Promise<void> {
   const db = unsafeGlobalDb();
   await db
     .update(schema.conversations)
-    .set({ aiTurnAfter: new Date(Date.now() + DEBOUNCE_MS) })
+    .set({ aiTurnAfter: new Date(Date.now() + delayMs) })
     .where(eq(schema.conversations.id, conversationId));
 }
 
@@ -106,21 +199,89 @@ export async function processAiTurns(logger: Logger): Promise<void> {
         { conversationId: id, err: err instanceof Error ? err.message : String(err) },
         "falha no turno da IA",
       );
-      // Turno com erro NÃO deixa a cliente no vácuo: reagenda a tentativa
-      // (só enquanto a conversa está quente — evita retry infinito)
-      const recent =
-        conversation.lastInboundAt &&
-        Date.now() - new Date(conversation.lastInboundAt).getTime() < 30 * 60_000;
-      if (recent) {
-        await db
-          .update(schema.conversations)
-          .set({ aiTurnAfter: new Date(Date.now() + 60_000) })
-          .where(
-            and(eq(schema.conversations.id, id), isNull(schema.conversations.aiTurnAfter)),
+      // Turno com erro NÃO deixa a cliente no vácuo. O relógio conta desde a
+      // PRIMEIRA mensagem dela ainda sem resposta (a cada mensagem nova o turno é
+      // reagendado, então "última mensagem" nunca envelheceria enquanto ela insiste)
+      try {
+        const pending = await unansweredSince(id);
+        const failingTooLong =
+          !pending.since || Date.now() - pending.since.getTime() >= 30 * 60_000;
+        if (pending.humanOnlyReason || pending.healthComplaint || failingTooLong) {
+          // Anexo que só uma pessoa resolve ou queixa de saúde: vai para a equipe já
+          // na 1ª falha. Texto comum: depois de ~30 min tentando. Cliente nenhuma
+          // fica sem resposta sem a equipe saber.
+          await escalateToTeam(
+            conversation.clinicId,
+            id,
+            conversation.customerId,
+            pending.humanOnlyReason
+              ? `a atendente está fora do ar por uma falha técnica e a cliente ${pending.humanOnlyReason} — responda pela equipe`
+              : "a atendente não conseguiu responder por uma falha técnica — responda pela equipe",
+            logger,
           );
+          await flagUrgentIfHealth(
+            conversation.clinicId,
+            id,
+            conversation.customerId,
+            logger,
+            pending.since ? { from: pending.since } : {},
+          );
+        } else {
+          await db
+            .update(schema.conversations)
+            .set({ aiTurnAfter: new Date(Date.now() + 60_000) })
+            .where(
+              and(eq(schema.conversations.id, id), isNull(schema.conversations.aiTurnAfter)),
+            );
+        }
+      } catch (e) {
+        logger.error({ conversationId: id, err: e instanceof Error ? e.message : String(e) }, "falha ao tratar o erro do turno");
       }
     }
   }
+}
+
+/** Mensagens da cliente desde a última fala da clínica (atendente ou equipe;
+ *  automação não conta como resposta): quando começou a espera, se há anexo
+ *  recente que só uma pessoa resolve e se há queixa de saúde. Figurinha e reação
+ *  não contam como espera. */
+async function unansweredSince(
+  conversationId: string,
+): Promise<{ since: Date | null; humanOnlyReason: string | null; healthComplaint: boolean }> {
+  const db = unsafeGlobalDb();
+  const rows = await db
+    .select({
+      direction: schema.messages.direction,
+      author: schema.messages.author,
+      type: schema.messages.type,
+      body: schema.messages.body,
+      createdAt: schema.messages.createdAt,
+    })
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.conversationId, conversationId),
+        inArray(schema.messages.status, ["received", "sent", "delivered", "read"]),
+      ),
+    )
+    .orderBy(desc(schema.messages.createdAt))
+    .limit(30);
+  let since: Date | null = null;
+  let humanOnlyReason: string | null = null;
+  let healthComplaint = false;
+  for (const m of rows) {
+    if (m.direction !== "inbound") {
+      if (m.author === "automation") continue; // lembrete no meio não é resposta
+      break;
+    }
+    if (!storedMessageTriggersTurn(m.type, m.body)) continue;
+    since = new Date(m.createdAt);
+    if (Date.now() - new Date(m.createdAt).getTime() < PENDING_MEDIA_WINDOW_MS) {
+      humanOnlyReason ??= storedHumanOnlyReason(m.type, m.body);
+    }
+    if (m.body && looksLikeHealthComplaint(m.body)) healthComplaint = true;
+  }
+  return { since, humanOnlyReason, healthComplaint };
 }
 
 type ConversationRow = typeof schema.conversations.$inferSelect;
@@ -240,7 +401,28 @@ async function runTurn(
   nudgeMinutes?: number,
 ): Promise<void> {
   const db = unsafeGlobalDb();
-  if (conversation.mode !== "ai" || !conversation.customerId) return;
+  if (!conversation.customerId) return;
+  const conversationCustomerId = conversation.customerId;
+  if (conversation.mode !== "ai") {
+    // Conversa já esperando a equipe: a atendente não fala, mas queixa de saúde
+    // que chegar agora (ex.: a explicação digitada depois da foto) vira URGENTE
+    if (conversation.mode === "waiting_human" && !nudgeMinutes) {
+      await flagUrgentIfHealth(conversation.clinicId, conversation.id, conversationCustomerId, logger);
+    }
+    return;
+  }
+  // Escalada que NÃO passa pela atendente (limite de gastos, cap, opt-out): a
+  // queixa de saúde que disparou o turno precisa ser triada mesmo assim
+  const flagPendingHealth = async () => {
+    const pending = await unansweredSince(conversation.id);
+    await flagUrgentIfHealth(
+      conversation.clinicId,
+      conversation.id,
+      conversationCustomerId,
+      logger,
+      pending.since ? { from: pending.since } : {},
+    );
+  };
 
   const clinic = (
     await db
@@ -257,12 +439,25 @@ async function runTurn(
   // clínica não liberou excedente → o turno vai para humano, sem gastar.
   const spend = await getSpendStatus(clinic);
   if (spend.blocked) {
+    // Toque de silêncio (a cliente não escreveu nada): só não cutuca — nada de
+    // mandar para a equipe uma conversa que não tem fala da cliente para responder
+    if (nudgeMinutes) return;
     logger.warn({ clinicId: conversation.clinicId, spent: spend.spentBrl }, "limite de gastos atingido — turno vai p/ humano");
     await db
       .update(schema.conversations)
       .set({ mode: "waiting_human" })
       .where(eq(schema.conversations.id, conversation.id));
+    // Motivo na própria conversa (o painel mostra por que ela está esperando)
+    await db.insert(schema.notifications).values({
+      clinicId: conversation.clinicId,
+      type: "conversation_needs_human",
+      title: "Atendente pausada: limite de gastos do mês atingido",
+      body: "Responda esta conversa pela equipe. Depois de ajustar o limite em Configurações → Gastos com API, clique em “Devolver para o automático” nesta conversa.",
+      refTable: "conversations",
+      refId: conversation.id,
+    });
     await notifySpendThresholds(clinic, logger);
+    await flagPendingHealth();
     return;
   }
 
@@ -285,6 +480,7 @@ async function runTurn(
       )
   )[0];
   if ((used?.total ?? 0) >= capTokens) {
+    if (nudgeMinutes) return; // toque de silêncio: só não cutuca
     logger.warn({ clinicId: conversation.clinicId }, "cap mensal de IA atingido — turno vai p/ humano");
     await db
       .update(schema.conversations)
@@ -298,6 +494,7 @@ async function runTurn(
       refTable: "conversations",
       refId: conversation.id,
     });
+    await flagPendingHealth();
     return;
   }
 
@@ -308,7 +505,37 @@ async function runTurn(
       .where(eq(schema.customers.id, conversation.customerId))
       .limit(1)
   )[0];
-  if (!customer || customer.optedOutAt) return;
+  if (!customer) return;
+  if (customer.optedOutAt) {
+    // Pediu para não receber mensagens automáticas, mas ESCREVEU: a atendente não
+    // responde — e a equipe precisa saber (nunca silêncio sem ninguém avisado).
+    // Só um "obrigada"/"ok"/🙏 depois da despedida não chama ninguém.
+    if (!nudgeMinutes) {
+      const ultima = (
+        await db
+          .select({ type: schema.messages.type, body: schema.messages.body })
+          .from(schema.messages)
+          .where(and(eq(schema.messages.conversationId, conversation.id), eq(schema.messages.direction, "inbound")))
+          .orderBy(desc(schema.messages.createdAt))
+          .limit(1)
+      )[0];
+      // Cortesia = texto curto ("obrigada") ou figurinha; foto, áudio etc. sempre chamam a equipe
+      const cortesia = ultima
+        ? (ultima.type === "text" || ultima.type === "sticker") && isCourtesyOnly(ultima.body)
+        : true;
+      if (!cortesia) {
+        const moved = await escalateToTeam(
+          clinic.id,
+          conversation.id,
+          customer.id,
+          "cliente que pediu para não receber mensagens automáticas escreveu — responda pela equipe",
+          logger,
+        );
+        if (moved) await flagPendingHealth();
+      }
+    }
+    return;
+  }
 
   const tz = clinic.timezone;
 
@@ -345,9 +572,33 @@ async function runTurn(
   if (upcoming) {
     const z = utcToZoned(new Date(upcoming.startsAt), tz);
     const [, m, d] = z.dateISO.split("-");
-    const procName =
-      procedures.find((p) => p.id === upcoming.procedureId)?.name ?? "atendimento";
-    upcomingLabel = `${procName}, ${d}/${m} às ${z.timeHHMM} — status ${
+    // Visita com vários serviços: o contexto mostra TODOS e a duração total — para
+    // remarcar, a atendente consulta com a lista certa (senão o horário não cabe)
+    const visita = upcoming.visitGroupId
+      ? await db
+          .select({
+            procedureId: schema.appointments.procedureId,
+            startsAt: schema.appointments.startsAt,
+            endsAt: schema.appointments.endsAt,
+          })
+          .from(schema.appointments)
+          .where(
+            and(
+              eq(schema.appointments.visitGroupId, upcoming.visitGroupId),
+              eq(schema.appointments.customerId, customer.id),
+              inArray(schema.appointments.status, ["scheduled", "confirmed"]),
+            ),
+          )
+          .orderBy(asc(schema.appointments.startsAt))
+      : [upcoming];
+    const procName = visita
+      .map((a) => procedures.find((p) => p.id === a.procedureId)?.name ?? "atendimento")
+      .join(" + ");
+    const visitaMin = visita.reduce(
+      (acc, a) => acc + Math.round((new Date(a.endsAt).getTime() - new Date(a.startsAt).getTime()) / 60_000),
+      0,
+    );
+    upcomingLabel = `${procName}${visita.length > 1 ? ` (${visitaMin} min, na mesma visita)` : ""}, ${dayName(z.dateISO)} às ${z.timeHHMM} — status ${
       upcoming.status === "confirmed" ? "confirmado" : "aguardando confirmação"
     } (id: ${upcoming.id})`;
     if (upcoming.status === "scheduled") {
@@ -391,6 +642,7 @@ async function runTurn(
       author: schema.messages.author,
       body: schema.messages.body,
       type: schema.messages.type,
+      createdAt: schema.messages.createdAt,
     })
     .from(schema.messages)
     .where(
@@ -401,14 +653,41 @@ async function runTurn(
     )
     .orderBy(desc(schema.messages.createdAt))
     .limit(30);
-  const history = historyRows
-    .reverse()
-    .filter((m) => m.body)
-    .map((m) => ({
-      role: m.direction === "inbound" ? ("customer" as const) : ("assistant" as const),
-      text: m.body!,
-    }));
+  // Anexos entram como marcador ("[áudio]", "[foto: legenda]"): a atendente sabe
+  // que existiram, mas que não pode ouvi-los nem vê-los (regra no prompt). O que a
+  // clínica mandou vira "[a clínica enviou uma foto]" — nunca um marcador que a
+  // atendente possa achar que é fala dela e repetir
+  const chronological = historyRows.reverse();
+  const history = chronological
+    .map((m) => {
+      const inbound = m.direction === "inbound";
+      const media = inbound ? MEDIA_MARKER[m.type] : OUTBOUND_MEDIA[m.type];
+      const text = media
+        ? inbound
+          ? `[${media}${m.body ? `: ${m.body}` : ""}]`
+          : `[a clínica enviou ${media}${m.body ? `: ${m.body}` : ""}]`
+        : m.body;
+      return {
+        role: inbound ? ("customer" as const) : ("assistant" as const),
+        text,
+      };
+    })
+    .filter((m): m is { role: "customer" | "assistant"; text: string } => Boolean(m.text));
   if (history.length === 0 || history[history.length - 1]!.role !== "customer") return;
+
+  // Rede de segurança: foto, áudio, vídeo, documento (ou algo que só aparece no
+  // celular) que a cliente mandou desde a última fala da clínica (recente) — se a
+  // atendente não passar a conversa para a equipe neste turno, o sistema passa
+  let pendingHumanReason: string | null = null;
+  for (let i = chronological.length - 1; i >= 0; i--) {
+    const m = chronological[i]!;
+    if (m.direction !== "inbound") break;
+    const reason = storedHumanOnlyReason(m.type, m.body);
+    if (reason && Date.now() - new Date(m.createdAt).getTime() < PENDING_MEDIA_WINDOW_MS) {
+      pendingHumanReason = reason;
+      break;
+    }
+  }
 
   const nowZ = utcToZoned(new Date(), tz);
   const weekdays = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
@@ -439,14 +718,32 @@ async function runTurn(
     clinic.phone?.replace(/^\+55(\d{2})(\d{4,5})(\d{4})$/, "($1) $2-$3") ?? null;
 
   // ── Executores das ferramentas ───────────────────────────────────
-  let escalationReason: string | null = null;
+  let urgentThisTurn = false;
+  // Foi ESTE turno que tirou a conversa do automático? Só ele manda a despedida
+  let movedByThisTurn = false;
   // Apelidos curtos de slot (H1, H2...) → id real. Modelo econômico erra ao
   // copiar ids longos (uuid+ISO); apelido de 2 letras é à prova de digitação.
-  const slotAliases = new Map<string, string>();
-  const resolveSlotId = (raw: string): string =>
-    slotAliases.get(raw.trim().toUpperCase()) ?? raw;
+  // Numeração ÚNICA no turno (nunca recomeça): duas consultas na mesma resposta
+  // (quinta e sexta, ou dia cheio + próximas opções) não podem dividir o "H3"
+  // Cada apelido guarda também a duração da consulta que o gerou: horário achado
+  // para 60 min não pode virar visita de 90 (passaria do fechamento ou de um bloqueio)
+  const slotAliases = new Map<string, { slotId: string; minutes: number }>();
+  let aliasSeq = 0;
+  const resolveSlot = (raw: string): { slotId: string; minutes: number | null } => {
+    const hit = slotAliases.get(raw.trim().toUpperCase());
+    return hit ? { slotId: hit.slotId, minutes: hit.minutes } : { slotId: raw, minutes: null };
+  };
+  const listSlots = (slots: FreeSlot[], minutes: number): string =>
+    slots
+      .map((s) => {
+        const alias = `H${++aliasSeq}`;
+        slotAliases.set(alias, { slotId: s.slotId, minutes });
+        return `- ${s.label} [slot_id: ${alias}]`;
+      })
+      .join("\n");
+  const hours = (clinic.businessHours ?? {}) as Record<string, [string, string][]>;
   const executors: AgentToolExecutors = {
-    async consultarHorarios(procedimentosNomes) {
+    async consultarHorarios(procedimentosNomes, filtro) {
       const procs = matchProcedures(procedures, procedimentosNomes);
       if (typeof procs === "string") return procs; // mensagem de "não encontrado"
       const totalMin = procs.reduce((acc, p) => acc + p.durationMinutes, 0);
@@ -457,20 +754,90 @@ async function runTurn(
           ? "Nenhuma profissional realiza TODOS esses procedimentos na mesma visita. Ofereça marcar em visitas separadas (consulte cada procedimento sozinho) ou escale para a equipe combinar."
           : "Nenhuma profissional ativa realiza esse procedimento — escale para a equipe.";
       }
-      const slots = await findSlots(db, clinic.id, tz, totalMin, 6, aptas);
-      if (slots.length === 0) {
-        return "Nenhum horário livre nos próximos 7 dias — ofereça passar para a equipe verificar outras opções.";
+      const turno = filtro?.turno ?? null;
+      const turnoLabel = turno === "manha" ? " de manhã" : turno === "tarde" ? " à tarde" : turno === "noite" ? " à noite" : "";
+      const hoje = todayISO(tz);
+      const limite = addDaysISO(hoje, MAX_SLOT_SEARCH_DAYS);
+      const [, limM, limD] = limite.split("-");
+      const data = filtro?.data ?? null;
+      if (data && !isRealDateISO(data)) {
+        return `Data "${data}" inválida: chame consultar_horarios de novo com uma data real no formato AAAA-MM-DD, copiada da lista PRÓXIMOS DIAS (hoje é ${hoje}). Se a cliente citou um dia que não existe, confirme com ela.`;
       }
-      slotAliases.clear();
+      if (data && data < hoje) {
+        return `A data ${data} já passou (hoje é ${hoje}). Confirme com a cliente qual dia ela quer.`;
+      }
+      if (data && data > limite) {
+        return `A agenda só está aberta até ${limD}/${limM}; ${data} ainda não pode ser marcado. Diga isso à cliente com naturalidade e ofereça uma data até ${limD}/${limM}, ou escale para a equipe.`;
+      }
       const nomes = procs.map((p) => p.name).join(" + ");
       const combo = procs.length > 1 ? ` (${totalMin} min no total, em sequência)` : "";
-      return `Horários livres para ${nomes}${combo}:\n${slots
-        .map((s, i) => {
-          const alias = `H${i + 1}`;
-          slotAliases.set(alias, s.slotId);
-          return `- ${s.label} [slot_id: ${alias}]`;
-        })
-        .join("\n")}`;
+
+      const outroDia = "pergunte qual outro dia ou turno serve, ou consulte-o antes de citar qualquer horário";
+
+      if (data) {
+        const dia = dayPhrase(data);
+        const faixas = (rs: [string, string][]) => rs.map(([a, b]) => `${a} às ${b}`).join(" e ");
+        // Clínica fechada nesse dia ou turno (ou sem espaço para essa duração):
+        // isso não é "lotado" nem caso para a equipe
+        const ranges = openRangesOn(hours, data);
+        if (ranges.length === 0) {
+          return `A clínica não atende ${dia} (horário de atendimento: ${businessHoursLabel}). Diga isso com naturalidade e ${outroDia}.`;
+        }
+        if (turno && !ranges.some((r) => rangeTouchesPeriod(r, turno))) {
+          return `A clínica não atende${turnoLabel} ${dia} (nesse dia: ${faixas(ranges)}). Diga isso com naturalidade e ${outroDia}.`;
+        }
+        if (!ranges.some((r) => rangeHasStart(r, turno, totalMin))) {
+          return `${dia.charAt(0).toUpperCase()}${dia.slice(1)}${turnoLabel} não cabe ${nomes} (${totalMin} min) no horário de atendimento (nesse dia: ${faixas(ranges)}). Diga isso com naturalidade e ${outroDia}.`;
+        }
+        // Dia pedido: a lista COMPLETA do dia (ou do turno) — nada de "não tenho às 17h" por corte
+        const slots = await findSlots(db, clinic.id, tz, totalMin, 48, aptas, {
+          fromDate: data,
+          onlyThatDay: true,
+          period: turno,
+        });
+        if (slots.length > 0) {
+          return `Horários livres para ${nomes}${combo} ${dia}${turnoLabel} (lista completa${turno ? " desse turno" : " do dia"}):\n${listSlots(slots, totalMin)}`;
+        }
+        // Sem horário: hoje já passou da hora (antecedência de 1h30) ou a agenda está cheia/bloqueada
+        const tarde =
+          data === hoje &&
+          !ranges.some((r) => rangeHasStart(r, turno, totalMin, earliestStartMinuteToday(tz, hoje)));
+        // Hoje: o turno/expediente já acabou, ou ainda não acabou mas não dá 1h30 de antecedência
+        const encerrado =
+          tarde && !ranges.some((r) => rangeHasStart(r, turno, totalMin, minuteOfTodayAhead(tz, hoje, 0)));
+        const motivo = encerrado
+          ? `hoje${turnoLabel} o atendimento já terminou`
+          : tarde
+            ? `hoje${turnoLabel} já não dá mais para marcar: é preciso pelo menos 1h30 de antecedência`
+            : "agenda cheia ou bloqueada";
+        // Próximas opções, sem passar da agenda aberta
+        const inicio = addDaysISO(data, 1);
+        if (inicio > limite) {
+          return `Não há horário livre ${dia}${turnoLabel} (${motivo}), e a agenda só está aberta até ${limD}/${limM}. Ofereça passar para a equipe verificar outras opções.`;
+        }
+        const dias = Math.min(14, daysBetweenISO(inicio, limite) + 1);
+        const depois = await findSlots(db, clinic.id, tz, totalMin, 6, aptas, {
+          fromDate: inicio,
+          period: turno,
+          perDay: 2,
+          days: dias,
+        });
+        if (depois.length === 0) {
+          return `Não há horário livre ${dia}${turnoLabel} (${motivo}) nem ${dias === 1 ? "no dia seguinte" : `nos ${dias} dias seguintes`} — ofereça passar para a equipe verificar outras opções.`;
+        }
+        return `Não há horário livre ${dia}${turnoLabel} (${motivo}). Próximas opções${turnoLabel} (os primeiros de cada dia):\n${listSlots(depois, totalMin)}`;
+      }
+
+      // Sem dia: espalha pelos próximos dias (3 por dia)
+      if (turno && !clinicServesPeriod(hours, turno, totalMin)) {
+        return `A clínica não atende${turnoLabel}${procs.length > 1 || totalMin > 60 ? ` (ou não cabe ${nomes}, ${totalMin} min, nesse turno)` : ""} — horário de atendimento: ${businessHoursLabel}. Diga isso com naturalidade e ${outroDia}.`;
+      }
+      const janela = turno ? 14 : 8;
+      const slots = await findSlots(db, clinic.id, tz, totalMin, 6, aptas, { period: turno, perDay: 3, days: janela });
+      if (slots.length === 0) {
+        return `Nenhum horário livre${turnoLabel} nos próximos ${janela} dias — ofereça passar para a equipe verificar outras opções.`;
+      }
+      return `Horários livres para ${nomes}${combo}${turnoLabel} (só os primeiros de cada dia; para ver um dia inteiro, consulte com data):\n${listSlots(slots, totalMin)}`;
     },
 
     async agendar(slotId, procedimentosNomes) {
@@ -489,10 +856,15 @@ async function runTurn(
       }
       const procs = matchProcedures(procedures, procedimentosNomes);
       if (typeof procs === "string") throw new Error(procs);
-      const parsed = parseSlotId(resolveSlotId(slotId));
+      const resolved = resolveSlot(slotId);
+      const parsed = parseSlotId(resolved.slotId);
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
       if (startsAt.getTime() < Date.now()) throw new Error("Esse horário já passou.");
+      const visitaMin = procs.reduce((acc, p) => acc + p.durationMinutes, 0);
+      if (resolved.minutes !== null && visitaMin > resolved.minutes) {
+        return `NÃO AGENDADO: esse horário veio de uma consulta para ${resolved.minutes} min, e a visita (${procs.map((p) => p.name).join(" + ")}) tem ${visitaMin} min. Chame consultar_horarios com esses mesmos procedimentos e use um slot_id da lista nova.`;
+      }
       // Trava: a profissional do slot precisa realizar todos os procedimentos
       const aptas = await eligibleProfessionalIds(db, clinic.id, procs.map((p) => p.id));
       if (!aptas.includes(parsed.professionalId)) {
@@ -567,8 +939,7 @@ async function runTurn(
           AND s.clinic_id = d.clinic_id AND s.name = 'Agendou avaliação'
       `);
       const z = utcToZoned(startsAt, tz);
-      const [, m2, d2] = z.dateISO.split("-");
-      return `Agendado com sucesso: ${nomes} em ${d2}/${m2} às ${z.timeHHMM}${procs.length > 1 ? " (em sequência, na mesma visita)" : ""} (id: ${createdIds[0]}).`;
+      return `Agendado com sucesso: ${nomes} ${dayPhrase(z.dateISO)} às ${z.timeHHMM}${procs.length > 1 ? " (em sequência, na mesma visita)" : ""} (id: ${createdIds[0]}).`;
     },
 
     async reagendar(agendamentoId, slotId) {
@@ -601,9 +972,42 @@ async function runTurn(
             )
             .orderBy(asc(schema.appointments.startsAt))
         : [original];
-      const parsed = parseSlotId(resolveSlotId(slotId));
+      const resolved = resolveSlot(slotId);
+      const parsed = parseSlotId(resolved.slotId);
       if (!parsed) throw new Error("slot_id inválido — consulte os horários de novo.");
       const startsAt = new Date(parsed.startISO);
+      if (startsAt.getTime() < Date.now()) throw new Error("Esse horário já passou.");
+      // A visita inteira precisa caber no horário escolhido: consulta feita só com o
+      // 1º serviço (60 min) não serve para remarcar uma visita de 90
+      const visitaMin = grupo.reduce(
+        (acc, a) => acc + Math.round((new Date(a.endsAt).getTime() - new Date(a.startsAt).getTime()) / 60_000),
+        0,
+      );
+      const nomesGrupo = grupo
+        .map((a) => procedures.find((p) => p.id === a.procedureId)?.name ?? "atendimento")
+        .join(" + ");
+      const procIdsGrupo = grupo.map((a) => a.procedureId).filter((x): x is string => Boolean(x));
+      const aptasGrupo = await eligibleProfessionalIds(db, clinic.id, procIdsGrupo);
+      // Horário achado para uma duração menor que a da visita (consulta só com o 1º
+      // serviço, ou serviço encurtado depois de marcar): confere a agenda DE VERDADE
+      // com a duração da visita. Cabe → segue. Não cabe → devolve os horários desse
+      // dia que cabem (já com a duração certa: o próximo reagendar passa direto)
+      if (
+        (resolved.minutes !== null && visitaMin > resolved.minutes) ||
+        !aptasGrupo.includes(parsed.professionalId)
+      ) {
+        const diaSlot = utcToZoned(startsAt, tz).dateISO;
+        const cabem = await findSlots(db, clinic.id, tz, visitaMin, 48, aptasGrupo, {
+          fromDate: diaSlot,
+          onlyThatDay: true,
+        });
+        if (!cabem.some((s) => s.slotId === resolved.slotId)) {
+          if (cabem.length === 0) {
+            return `NÃO REMARCADO: essa visita (${nomesGrupo}, ${visitaMin} min) não cabe nesse horário e não há outro livre ${dayPhrase(diaSlot)}. Pergunte outro dia à cliente e consulte esse dia.`;
+          }
+          return `NÃO REMARCADO: essa visita (${nomesGrupo}, ${visitaMin} min) não cabe nesse horário. Horários ${dayPhrase(diaSlot)} em que ela cabe (use um destes slot_id no reagendar):\n${listSlots(cabem, visitaMin)}`;
+        }
+      }
 
       const novoGrupo = grupo.length > 1 ? randomUUID() : null;
       let cursor = startsAt;
@@ -674,8 +1078,7 @@ async function runTurn(
       }
       await materializeRuns(clinic.id, firstCreatedId!, customer.id, startsAt);
       const z = utcToZoned(startsAt, tz);
-      const [, m2, d2] = z.dateISO.split("-");
-      return `Remarcado para ${d2}/${m2} às ${z.timeHHMM}${grupo.length > 1 ? " (a visita inteira, com todos os serviços)" : ""}.`;
+      return `Remarcado para ${dayName(z.dateISO)} às ${z.timeHHMM}${grupo.length > 1 ? " (a visita inteira, com todos os serviços)" : ""}.`;
     },
 
     async cancelar(agendamentoId, motivo) {
@@ -913,15 +1316,38 @@ async function runTurn(
     },
 
     async escalarParaHumano(motivo, urgencia) {
-      escalationReason = motivo;
-      await db
+      // Escalou duas vezes no mesmo turno? A urgência nunca cai (alta + normal = alta)
+      const raised = urgencia === "alta" && !urgentThisTurn;
+      urgentThisTurn ||= urgencia === "alta";
+      // Só tira do automático: se a equipe ASSUMIU no meio do turno (resposta pelo
+      // celular ou pelo painel), o takeover vale — nada de "precisa de você" por cima
+      const moved = await db
         .update(schema.conversations)
         .set({ mode: "waiting_human" })
-        .where(eq(schema.conversations.id, conversation.id));
+        .where(and(eq(schema.conversations.id, conversation.id), eq(schema.conversations.mode, "ai")))
+        .returning({ id: schema.conversations.id });
+      if (moved[0]) {
+        movedByThisTurn = true;
+      } else {
+        const atual = (
+          await db
+            .select({ mode: schema.conversations.mode })
+            .from(schema.conversations)
+            .where(eq(schema.conversations.id, conversation.id))
+            .limit(1)
+        )[0];
+        if (atual?.mode === "human") {
+          return "A equipe já assumiu esta conversa agora: não escreva nada para a cliente. Chame responder_cliente com um balão curto qualquer — ele NÃO será enviado.";
+        }
+        // Já esperando a equipe (escalada anterior deste turno ou outro caminho):
+        // só registra de novo se a urgência subiu
+        if (!raised) return "Conversa passada para a equipe. Diga à cliente que alguém da equipe já vai falar com ela.";
+      }
       await db.insert(schema.notifications).values({
         clinicId: clinic.id,
-        type: "conversation_needs_human",
-        title: `${customer.fullName} precisa de você no WhatsApp${urgencia === "alta" ? " (urgente)" : ""}`,
+        // Urgente tem tipo próprio: o painel destaca em vermelho e alerta no computador
+        type: urgentThisTurn ? "conversation_urgent" : "conversation_needs_human",
+        title: `${customer.fullName} precisa de você no WhatsApp${urgentThisTurn ? " (urgente)" : ""}`,
         body: motivo,
         refTable: "conversations",
         refId: conversation.id,
@@ -949,9 +1375,21 @@ async function runTurn(
     // Venda complementar: MESMAS regras do card "Sugerir também" da caixa de
     // Conversas — só o que a clínica marcou em "Oferecer junto" ou retorno
     // vencido do histórico dela; nunca inferência sobre a pessoa.
-    async sugerirComplementos(procedimentosNomes) {
+    async sugerirComplementos(procedimentosNomes, filtro) {
       const procs = matchProcedures(procedures, procedimentosNomes);
       if (typeof procs === "string") return "nenhuma";
+      // Mesmo dia/turno que a cliente pediu em consultar_horarios: oferta "na mesma
+      // visita" num outro dia desmontaria o pedido dela
+      const ofertaData = filtro?.data && isRealDateISO(filtro.data) && filtro.data >= todayISO(tz) ? filtro.data : null;
+      const ofertaTurno = filtro?.turno ?? null;
+      const ofertaOpts = ofertaData
+        ? { fromDate: ofertaData, onlyThatDay: true, period: ofertaTurno }
+        : ofertaTurno
+          ? { period: ofertaTurno, perDay: 1, days: 14 }
+          : {};
+      const semHorario = ofertaData
+        ? `  horários: nenhum livre ${dayPhrase(ofertaData)}${ofertaTurno ? ` (${ofertaTurno === "manha" ? "de manhã" : ofertaTurno === "tarde" ? "à tarde" : "à noite"})` : ""} — se oferecer, diga que a equipe confirma o horário`
+        : "  horários: nenhum livre nos próximos dias — se oferecer, diga que a equipe confirma o horário";
       const catalogRows = await db
         .select({
           id: schema.procedures.id,
@@ -1021,11 +1459,12 @@ async function runTurn(
           comboIds.reduce((acc, id) => acc + (durationOf.get(id) ?? 60), 0),
           3,
           pros,
+          ofertaOpts,
         );
         if (slots.length === 0 && combined) {
           combined = false;
           pros = await eligibleProfessionalIds(db, clinic.id, [s.procedure.id]);
-          slots = await findSlots(db, clinic.id, tz, durationOf.get(s.procedure.id) ?? 60, 3, pros);
+          slots = await findSlots(db, clinic.id, tz, durationOf.get(s.procedure.id) ?? 60, 3, pros, ofertaOpts);
         }
         if (pros.length === 0) continue;
         const promo = activePromo(s.procedure, todayISO(tz));
@@ -1038,7 +1477,7 @@ async function runTurn(
             s.procedure.offerNote ? `  como a clínica quer oferecer: "${s.procedure.offerNote}"` : null,
             promo ? `  promoção vigente: ${promo}` : null,
             slots.length === 0
-              ? "  horários: nenhum livre nos próximos 7 dias — se oferecer, diga que a equipe confirma o horário"
+              ? semHorario
               : `  horários ${combined ? "na MESMA visita que o pedido" : "(visita separada)"}: ${slots.map((x) => x.label).join("; ")}`,
           ]
             .filter(Boolean)
@@ -1083,6 +1522,7 @@ async function runTurn(
         packageSummary,
       },
       nowLabel: `${weekdays[nowZ.weekday]}, ${nd}/${nm}/${ny}, ${nowZ.timeHHMM} (horário de Brasília)`,
+      calendarLabel: upcomingCalendar(nowZ.dateISO),
       history,
       nudge: nudgeMinutes ? { minutes: nudgeMinutes } : undefined,
     },
@@ -1101,44 +1541,53 @@ async function runTurn(
     logger.warn({ err }, "aviso de gastos falhou"),
   );
 
-  // Interrupção: chegou mensagem nova durante o turno? Descarta os balões.
-  const fresh = (
-    await db
-      .select({ aiTurnAfter: schema.conversations.aiTurnAfter })
-      .from(schema.conversations)
-      .where(eq(schema.conversations.id, conversation.id))
-      .limit(1)
-  )[0];
-  if (fresh?.aiTurnAfter) {
-    logger.info({ conversationId: conversation.id }, "turno interrompido por mensagem nova");
-    return;
-  }
-
   // Releitura AO VIVO antes de falar: se uma humana assumiu a conversa (takeover)
   // ou a cliente mandou mensagem nova durante o turno, a resposta é descartada —
-  // a IA nunca fala por cima de ninguém
+  // a IA nunca fala por cima de ninguém, e o turno seguinte responde ao conjunto
   const live = (
     await db
       .select({
         mode: schema.conversations.mode,
         lastInboundAt: schema.conversations.lastInboundAt,
+        aiTurnAfter: schema.conversations.aiTurnAfter,
       })
       .from(schema.conversations)
       .where(eq(schema.conversations.id, conversation.id))
       .limit(1)
   )[0];
-  // Exceção: quando foi o PRÓPRIO turno que escalou (waiting_human), a
-  // despedida ("vou chamar alguém da equipe") PRECISA sair — sem ela a
-  // cliente fica no vácuo
+  // Mensagem nova que pede resposta (texto, anexo...) — figurinha e reação não
+  // descartam a resposta: elas não agendam turno, e a cliente ficaria sem nada
+  let newerNeedsTurn = Boolean(live?.aiTurnAfter);
+  if (!newerNeedsTurn && live?.lastInboundAt && conversation.lastInboundAt && live.lastInboundAt > conversation.lastInboundAt) {
+    const newer = await db
+      .select({ type: schema.messages.type, body: schema.messages.body })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.conversationId, conversation.id),
+          eq(schema.messages.direction, "inbound"),
+          gt(schema.messages.createdAt, conversation.lastInboundAt),
+        ),
+      )
+      .limit(20);
+    newerNeedsTurn = newer.some((m) => storedMessageTriggersTurn(m.type, m.body));
+  }
+  // Escalou sem urgência? O que chegou DURANTE o turno a atendente não leu — se é
+  // queixa de saúde (a explicação digitada depois da foto), a conversa vira urgente
+  if (reply.escalated && !urgentThisTurn) {
+    const lidaAte = chronological[chronological.length - 1]?.createdAt;
+    await flagUrgentIfHealth(clinic.id, conversation.id, customer.id, logger, {
+      after: lidaAte ? new Date(lidaAte) : undefined,
+    });
+  }
+
+  // Exceção: quando foi ESTE turno que tirou a conversa do automático, a despedida
+  // ("vou chamar alguém da equipe") PRECISA sair — a conversa já está com a equipe
+  // e nenhum turno seguinte vai falar com ela. Equipe que assumiu (human) ou outro
+  // turno que escalou antes: nada sai daqui
   const modeOk =
-    live?.mode === "ai" || (live?.mode === "waiting_human" && reply.escalated);
-  if (
-    !live ||
-    !modeOk ||
-    (live.lastInboundAt &&
-      conversation.lastInboundAt &&
-      live.lastInboundAt > conversation.lastInboundAt)
-  ) {
+    live?.mode === "ai" || (live?.mode === "waiting_human" && reply.escalated && movedByThisTurn);
+  if (!live || !modeOk || (newerNeedsTurn && !reply.escalated)) {
     logger.info(
       { conversationId: conversation.id, mode: live?.mode },
       "turno da IA descartado (takeover ou nova mensagem durante o turno)",
@@ -1172,12 +1621,20 @@ async function runTurn(
     .set({ lastMessageAt: new Date() })
     .where(eq(schema.conversations.id, conversation.id));
 
+  // Rede de segurança: foto, áudio, vídeo, documento (ou o que só aparece no
+  // celular) SEMPRE chega a uma pessoa. Se a atendente respondeu sem passar a
+  // conversa para a equipe, o sistema passa agora (os balões dela saem normalmente)
+  if (pendingHumanReason && !reply.escalated) {
+    await escalateToTeam(clinic.id, conversation.id, customer.id, pendingHumanReason, logger);
+  }
+
+  // Sem o motivo da escalada no log: ele pode trazer queixa de saúde (fica em notifications, sob RLS)
   logger.info(
     {
       conversationId: conversation.id,
       balloons: reply.balloons.length,
       escalated: reply.escalated,
-      reason: escalationReason,
+      urgent: urgentThisTurn,
       tokens: reply.usage,
       tools: reply.toolTrace,
     },
@@ -1201,21 +1658,30 @@ function matchProcedure(
   name: string | null,
 ) {
   if (!name) return procedures[0] ?? null;
-  const normalized = name
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "");
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const pedido = norm(name);
+  if (!pedido) return null;
+  const catalogo = procedures.map((p) => ({ p, n: norm(p.name) }));
+  // Nome exato primeiro — "Consulta" nunca pode virar "Consulta de retorno" (outra
+  // duração, outro serviço) só porque o catálogo veio em outra ordem
   return (
-    procedures.find((p) => {
-      const pn = p.name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
-      return pn === normalized || pn.includes(normalized) || normalized.includes(pn);
-    }) ?? null
+    catalogo.find((c) => c.n === pedido)?.p ??
+    catalogo.filter((c) => c.n.startsWith(pedido)).sort((a, b) => a.n.length - b.n.length)[0]?.p ??
+    catalogo.filter((c) => c.n.includes(pedido)).sort((a, b) => a.n.length - b.n.length)[0]?.p ??
+    catalogo.filter((c) => pedido.includes(c.n)).sort((a, b) => b.n.length - a.n.length)[0]?.p ??
+    null
   );
 }
 
 /** Uma OU várias na mesma visita. Lista vazia = primeiro do catálogo (compat).
  *  Nome desconhecido → devolve STRING com a mensagem de erro para o modelo. */
-function matchProcedures(
+export function matchProcedures(
   procedures: { id: string; name: string; price: string; durationMinutes: number }[],
   nomes: string[],
 ): { id: string; name: string; price: string; durationMinutes: number }[] | string {
@@ -1224,7 +1690,9 @@ function matchProcedures(
     return first ? [first] : "Catálogo vazio — escale para a equipe.";
   }
   const achados: { id: string; name: string; price: string; durationMinutes: number }[] = [];
-  for (const nome of nomes) {
+  // "Limpeza de Pele + Peeling" numa string só (copiado do contexto) = dois serviços
+  const separados = nomes.flatMap((n) => n.split(/\s*\+\s*/)).filter((n) => n.trim());
+  for (const nome of separados) {
     const proc = matchProcedure(procedures, nome);
     if (!proc) {
       return `Procedimento "${nome}" não encontrado no catálogo. Opções: ${procedures.map((p) => p.name).join(", ")}.`;

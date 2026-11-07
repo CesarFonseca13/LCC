@@ -12,9 +12,10 @@ import {
 } from "@clinicaos/whatsapp";
 import { SPEND_BLOCKED_MESSAGE } from "@clinicaos/core/spend";
 import { schema, unsafeGlobalDb, type Tx } from "@clinicaos/db";
-import { clinicHasAiEnabled, scheduleAiTurn } from "./ai-agent";
+import { clinicHasAiEnabled, MEDIA_DEBOUNCE_MS, scheduleAiTurn } from "./ai-agent";
 import { classifyInbound } from "./classify-inbound";
 import { handleCoexistenceEvent } from "./coexistence";
+import { escalateMediaToHuman, flagUrgentText, HUMAN_ONLY_MEDIA, mediaEscalationReason } from "./media-escalation";
 import { metaClientFor } from "./meta-client";
 import { getSpendStatus, notifySpendThresholds, recordMetaUsage } from "./spend";
 import { pauseReactivationOnReply } from "./reactivation";
@@ -157,6 +158,31 @@ async function handleEvent(event: WhatsappEventRow, logger: Logger): Promise<voi
                 AND m.created_at > d.created_at
             )
         `);
+      }
+
+      // Anexo ou mensagem que a Meta não entregou: nunca fica sem resposta.
+      // Atendente ligada → ela recebe o marcador ("[foto]", "[mensagem
+      // indisponível]"), resolve o texto que veio junto (ex.: "confirmo"),
+      // avalia urgência e passa para a equipe (rede de segurança no fim do turno).
+      // Sem atendente → direto para "precisa de você", com o motivo.
+      const mediaReason =
+        (inserted.rowCount ?? 0) > 0
+          ? mediaEscalationReason(normalized.messageType, normalized.rawType, normalized.body)
+          : null;
+      if (mediaReason) {
+        if (await clinicHasAiEnabled(event.clinicId)) {
+          // Foto/áudio/documento sem explicação: espera um pouco mais — a queixa
+          // digitada logo depois precisa cair no MESMO turno (é ela que define a urgência)
+          const waitForExplanation =
+            HUMAN_ONLY_MEDIA.has(normalized.messageType) &&
+            (!normalized.body || normalized.messageType === "document");
+          await scheduleAiTurn(conversationId, waitForExplanation ? MEDIA_DEBOUNCE_MS : undefined);
+        } else {
+          await escalateMediaToHuman(event.clinicId, conversationId, customerId, mediaReason, logger);
+          // Legenda com queixa de saúde ("inchou e está saindo pus"): urgente no painel
+          await flagUrgentText(event.clinicId, conversationId, customerId, normalized.body, logger);
+        }
+        return;
       }
 
       // Roteamento (só mensagens de texto novas; dedupe não reprocessa):

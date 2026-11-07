@@ -30,7 +30,30 @@ export interface NormalizedInbound {
   body: string | null;
   pushName: string | null;
   timestamp: number | null;
+  /** Tipo original quando "other" não basta: na API oficial o tipo da Meta
+   *  (contacts, reaction, "unsupported:<subtipo>"...); na Evolution, "gif". */
+  rawType?: string;
+  /** API oficial: código do erro que acompanha a mensagem (131060 = conteúdo indisponível). */
+  errorCode?: number | null;
 }
+
+/** Corpo gravado quando a Meta avisa que chegou mensagem, mas o conteúdo não
+ *  veio AGORA (erro 131060: 1ª mensagem de contato novo na coexistência). A
+ *  atendente cumprimenta / pede para mandar de novo. */
+export const UNAVAILABLE_MESSAGE_BODY = "[mensagem indisponível]";
+
+/** Corpo gravado para o que a API oficial NUNCA entrega (enquete, visualização
+ *  única, localização em tempo real, convite de grupo...): só a equipe vê, no
+ *  WhatsApp do celular da clínica. Pedir reenvio não adianta. */
+export const PHONE_ONLY_MESSAGE_BODY = "[mensagem que só aparece no celular da clínica]";
+
+/** Subtipos de "unsupported" que não pedem resposta (edição, fixar, voto, reação, GIF). */
+export const IGNORABLE_UNSUPPORTED = new Set(["edit", "pin", "keep_in_chat", "poll_update", "reaction", "gif"]);
+
+/** Desses, os que nem viram mensagem (não são algo que a cliente "mandou"). GIF e
+ *  reação viram balão (figurinha / "Reagiu a uma mensagem"): contam como resposta
+ *  dela — pausam a reativação e aparecem no painel — sem pedir turno. */
+const DROPPED_UNSUPPORTED = new Set(["edit", "pin", "keep_in_chat", "poll_update"]);
 
 export interface NormalizedStatusUpdate {
   kind: "status";
@@ -119,25 +142,72 @@ function normalizeMetaEvent(eventType: string, data: unknown): NormalizedEvent {
     if (!waMessageId || !from) return { kind: "ignored" };
     const type = str(get(message, ["type"])) ?? "other";
     const known = ["text", "image", "audio", "video", "document", "sticker", "location"] as const;
-    const messageType = (known as readonly string[]).includes(type)
-      ? (type as NormalizedInbound["messageType"])
-      : "other";
+    const isKnown = (known as readonly string[]).includes(type);
+    const errors = get(message, ["errors"]);
+    const firstError = Array.isArray(errors) ? (errors[0] as { code?: unknown } | undefined) : undefined;
+    const errorCode = typeof firstError?.code === "number" ? firstError.code : null;
+    // Mensagem que a API não entrega (edição, enquete, visualização única, 1ª
+    // mensagem de contato novo na coexistência — erro 131060): o subtipo decide
+    const unsupportedType = type === "unsupported" ? (str(get(message, ["unsupported", "type"])) ?? "") : null;
+    // Edição, fixar, guardar na conversa, voto em enquete: nada a responder nem a
+    // mostrar — e não pode derrubar um turno da atendente em andamento
+    if (unsupportedType !== null && DROPPED_UNSUPPORTED.has(unsupportedType)) return { kind: "ignored" };
+    const unavailableBody =
+      unsupportedType === null
+        ? null
+        : unsupportedType === "reaction"
+          ? "Reagiu a uma mensagem"
+          : unsupportedType === "gif"
+            ? null
+            : errorCode === 131060 || unsupportedType === "errors"
+              ? UNAVAILABLE_MESSAGE_BODY
+              : PHONE_ONLY_MESSAGE_BODY;
+    // Reação: o emoji vira texto do balão ("Reagiu com 👍"); reação removida não vira nada
+    const reactionEmoji = type === "reaction" ? str(get(message, ["reaction", "emoji"])) : null;
+    if (type === "reaction" && !reactionEmoji) return { kind: "ignored" };
+    const firstContact = get(message, ["contacts", "0"]);
+    const contactLabel =
+      type === "contacts"
+        ? [str(get(firstContact, ["name", "formatted_name"])), str(get(firstContact, ["phones", "0", "phone"]))]
+            .filter(Boolean)
+            .join(" ")
+        : "";
     const body =
       str(get(message, ["text", "body"])) ??
       str(get(message, [type, "caption"])) ??
       str(get(message, ["button", "text"])) ??
       str(get(message, ["interactive", "button_reply", "title"])) ??
+      str(get(message, ["interactive", "list_reply", "title"])) ??
+      // Documento sem legenda: o nome do arquivo ("exame.pdf") ajuda a equipe
+      (type === "document" ? str(get(message, ["document", "filename"])) : null) ??
+      (type === "location"
+        ? [str(get(message, ["location", "name"])), str(get(message, ["location", "address"]))].filter(Boolean).join(" — ") ||
+          null
+        : null) ??
+      (type === "contacts" ? `[contato${contactLabel ? `: ${contactLabel}` : ""}]` : null) ??
+      (reactionEmoji ? `Reagiu com ${reactionEmoji}` : null) ??
+      unavailableBody ??
       null;
+    // Só resposta de botão/lista vira texto; contato e mensagem indisponível continuam "other"
+    const textLike = type === "text" || type === "button" || type === "interactive";
     const ts = Number(get(message, ["timestamp"]));
     return {
       kind: "message",
       waMessageId,
       remoteJid: `${from.replace(/\D/g, "")}@s.whatsapp.net`,
       fromMe: false,
-      messageType: body && messageType === "other" ? "text" : messageType,
+      messageType: isKnown
+        ? (type as NormalizedInbound["messageType"])
+        : unsupportedType === "gif"
+          ? "sticker" // GIF é usado como figurinha
+          : textLike && body
+            ? "text"
+            : "other",
       body,
       pushName: str(get(data, ["contact", "profile", "name"])),
       timestamp: Number.isFinite(ts) ? ts : null,
+      rawType: unsupportedType !== null ? `unsupported:${unsupportedType}` : type,
+      errorCode,
     };
   }
   // Coexistência: mensagem enviada pela clínica no app do celular (eco) —
@@ -213,14 +283,25 @@ export function normalizeEvent(eventType: string, data: unknown): NormalizedEven
       const text =
         str(get(message, ["conversation"])) ??
         str(get(message, ["extendedTextMessage", "text"]));
+      // GIF chega como vídeo, mas é usado como figurinha (não pede resposta)
+      const isGif = get(message, ["videoMessage", "gifPlayback"]) === true;
       let messageType: NormalizedInbound["messageType"] = "other";
       if (text !== null) messageType = "text";
       else if (get(message, ["imageMessage"])) messageType = "image";
       else if (get(message, ["audioMessage"])) messageType = "audio";
-      else if (get(message, ["videoMessage"])) messageType = "video";
-      else if (get(message, ["documentMessage"])) messageType = "document";
+      else if (get(message, ["videoMessage"])) messageType = isGif ? "sticker" : "video";
+      else if (get(message, ["documentMessage"]) || get(message, ["documentWithCaptionMessage"])) messageType = "document";
       else if (get(message, ["stickerMessage"])) messageType = "sticker";
       else if (get(message, ["locationMessage"])) messageType = "location";
+      // Legenda do anexo (foto com "está doendo e inchado") e nome do arquivo:
+      // vão para o balão, para o aviso e para a atendente avaliar a urgência
+      const caption =
+        str(get(message, ["imageMessage", "caption"])) ??
+        str(get(message, ["videoMessage", "caption"])) ??
+        str(get(message, ["documentMessage", "caption"])) ??
+        str(get(message, ["documentWithCaptionMessage", "message", "documentMessage", "caption"])) ??
+        str(get(message, ["documentMessage", "fileName"])) ??
+        str(get(message, ["documentWithCaptionMessage", "message", "documentMessage", "fileName"]));
 
       const ts = get(data, ["messageTimestamp"]);
       return {
@@ -229,9 +310,10 @@ export function normalizeEvent(eventType: string, data: unknown): NormalizedEven
         remoteJid,
         fromMe: get(data, ["key", "fromMe"]) === true,
         messageType,
-        body: text,
+        body: text ?? (isGif ? null : caption),
         pushName: str(get(data, ["pushName"])),
         timestamp: typeof ts === "number" ? ts : null,
+        rawType: isGif ? "gif" : undefined,
       };
     }
 
