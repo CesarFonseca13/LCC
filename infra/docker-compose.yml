@@ -47,6 +47,8 @@ services:
       dockerfile: infra/Dockerfile
       target: worker
     restart: unless-stopped
+    # Deploy: tempo para terminar o turno de IA e os balões em andamento antes do SIGKILL
+    stop_grace_period: 30s
     env_file: .env
     environment:
       # Worker usa o role BYPASSRLS (re-escopa clinic_id em cada query);

@@ -10,7 +10,7 @@ import { evolutionFromEnv } from "@clinicaos/whatsapp";
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import pino from "pino";
-import { processAiTurns, processConversationNudges } from "./ai-agent";
+import { processAiTurns, processConversationNudges, stopAiClaims } from "./ai-agent";
 import { expireApprovals, processAutomationTick, processBirthdays } from "./automations";
 import { processPdfGeneration } from "./documents";
 import { processCampaignsSweep } from "./campaigns";
@@ -38,6 +38,9 @@ const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
 // BullMQ não aceita ":" em nomes de fila — padrão do projeto: prefixo "q-"
 const schedulerQueue = new Queue("q-scheduler", { connection });
+/** Turnos da atendente e toques de silêncio: chamadas de IA que levam segundos.
+ *  Fila e worker próprios — nunca seguram a entrada de mensagens nem os envios. */
+const aiQueue = new Queue("q-ai", { connection });
 
 async function main() {
   logger.info("Worker iniciando...");
@@ -51,8 +54,11 @@ async function main() {
   await schedulerQueue.upsertJobScheduler("automations-tick", { every: 15_000 });
   await schedulerQueue.upsertJobScheduler("approvals-expire", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("pdf-sweep", { every: 10_000 });
-  await schedulerQueue.upsertJobScheduler("ai-turns", { every: 3_000 });
-  await schedulerQueue.upsertJobScheduler("nudge-sweep", { every: 60_000 });
+  // Turnos da IA saíram da fila geral (versões antigas os registraram lá)
+  await schedulerQueue.removeJobScheduler("ai-turns").catch(() => false);
+  await schedulerQueue.removeJobScheduler("nudge-sweep").catch(() => false);
+  await aiQueue.upsertJobScheduler("ai-turns", { every: 3_000 });
+  await aiQueue.upsertJobScheduler("nudge-sweep", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("birthdays", { every: 60_000 });
   await schedulerQueue.upsertJobScheduler("scores-sweep", { every: 600_000 });
   await schedulerQueue.upsertJobScheduler("reactivation-sweep", { every: 60_000 });
@@ -88,12 +94,6 @@ async function main() {
         case "pdf-sweep":
           await processPdfGeneration(logger);
           break;
-        case "ai-turns":
-          await processAiTurns(logger);
-          break;
-        case "nudge-sweep":
-          await processConversationNudges(logger);
-          break;
         case "birthdays":
           await processBirthdays(logger);
           break;
@@ -118,12 +118,32 @@ async function main() {
     logger.error({ job: job?.name, err: err.message }, "job falhou");
   });
 
+  const aiWorker = new Worker(
+    "q-ai",
+    async (job) => {
+      switch (job.name) {
+        case "ai-turns":
+          await processAiTurns(logger);
+          break;
+        case "nudge-sweep":
+          await processConversationNudges(logger);
+          break;
+      }
+    },
+    { connection, concurrency: 2 },
+  );
+  aiWorker.on("failed", (job, err) => {
+    logger.error({ job: job?.name, err: err.message }, "job da IA falhou");
+  });
+
   logger.info("Worker pronto (sweeps: eventos 3s, envio 3s, reconciliação 60s).");
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Encerrando worker...");
-    await worker.close();
-    await schedulerQueue.close();
+    // Para de reivindicar turnos de IA já: o que não começou fica para o processo novo
+    stopAiClaims();
+    await Promise.all([worker.close(), aiWorker.close()]);
+    await Promise.all([schedulerQueue.close(), aiQueue.close()]);
     connection.disconnect();
     process.exit(0);
   };

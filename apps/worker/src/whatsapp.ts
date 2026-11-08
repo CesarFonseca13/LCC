@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import {
   brPhoneVariants,
@@ -518,6 +518,59 @@ export async function ensureConversation(
   return retry[0].id;
 }
 
+/** O toque de silêncio ("Está por aí?") ainda faz sentido AGORA? A cliente
+ *  continua calada desde que ele foi escrito (nem reação/figurinha), a conversa
+ *  segue no automático, o número está conectado e o toque é recente (preso na
+ *  fila por queda do número, ele sairia horas depois, fora de contexto). */
+async function nudgeStillValid(msg: {
+  clinicId: string;
+  conversationId: string;
+  createdAt: Date;
+}): Promise<boolean> {
+  const db = unsafeGlobalDb();
+  if (Date.now() - new Date(msg.createdAt).getTime() > 10 * 60_000) return false;
+  const conv = (
+    await db
+      .select({ mode: schema.conversations.mode, instanceId: schema.conversations.instanceId })
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, msg.conversationId))
+      .limit(1)
+  )[0];
+  if (!conv || conv.mode !== "ai") return false;
+  const inst = (
+    await db
+      .select({ status: schema.whatsappInstances.status })
+      .from(schema.whatsappInstances)
+      .where(eq(schema.whatsappInstances.id, conv.instanceId))
+      .limit(1)
+  )[0];
+  if (inst?.status !== "connected") return false;
+  const sinal = (
+    await db
+      .select({ id: schema.messages.id })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.clinicId, msg.clinicId),
+          eq(schema.messages.conversationId, msg.conversationId),
+          eq(schema.messages.direction, "inbound"),
+          gt(schema.messages.createdAt, msg.createdAt),
+        ),
+      )
+      .limit(1)
+  )[0];
+  return !sinal;
+}
+
+/** Toque que perdeu o sentido some (nunca vira "falha" no painel). */
+async function dropNudge(messageId: string, conversationId: string, logger: Logger): Promise<void> {
+  const db = unsafeGlobalDb();
+  await db
+    .delete(schema.messages)
+    .where(and(eq(schema.messages.id, messageId), eq(schema.messages.status, "sending")));
+  logger.info({ conversationId }, "toque de silêncio cancelado (a cliente respondeu, a equipe assumiu ou o número caiu)");
+}
+
 /**
  * Fila de envio (a verdade é o Postgres): pega mensagens 'queued' vencidas,
  * reivindica com update otimista e envia. Exactly-once:
@@ -558,6 +611,7 @@ export async function processOutbound(
         error: schema.messages.error,
         automationId: schema.messages.automationId,
         templateVars: schema.messages.templateVars,
+        createdAt: schema.messages.createdAt,
       });
     const msg = claimed[0];
     if (!msg?.body) continue;
@@ -567,12 +621,19 @@ export async function processOutbound(
         remoteJid: schema.conversations.remoteJid,
         instanceId: schema.conversations.instanceId,
         lastInboundAt: schema.conversations.lastInboundAt,
+        mode: schema.conversations.mode,
       })
       .from(schema.conversations)
       .where(eq(schema.conversations.id, msg.conversationId))
       .limit(1);
     const conv = convRows[0];
     if (!conv) continue;
+
+    // Toque de silêncio ("Está por aí?"): só sai se ainda fizer sentido AGORA
+    if (msg.automationId === "ai_nudge" && !(await nudgeStillValid(msg))) {
+      await dropNudge(msg.id, msg.conversationId, logger);
+      continue;
+    }
 
     const instRows = await db
       .select()
@@ -613,6 +674,12 @@ export async function processOutbound(
         .sendPresence(inst.name, conv.remoteJid, "composing", delayMs)
         .catch(() => {}); // presença é cosmética — nunca segura o envio
       await new Promise((r) => setTimeout(r, delayMs));
+      // Toque de silêncio: confere de novo depois do "digitando" (a cliente pode ter
+      // respondido nesses segundos)
+      if (msg.automationId === "ai_nudge" && !(await nudgeStillValid(msg))) {
+        await dropNudge(msg.id, msg.conversationId, logger);
+        continue;
+      }
       const result = await evolution.sendText(inst.name, conv.remoteJid, msg.body);
       await db
         .update(schema.messages)
@@ -679,6 +746,7 @@ async function sendViaMeta(
     error: string | null;
     automationId: string | null;
     templateVars: Record<string, string> | null;
+    createdAt?: Date;
   },
   conv: { id: string; remoteJid: string; lastInboundAt: Date | null },
   inst: typeof schema.whatsappInstances.$inferSelect,
@@ -729,6 +797,11 @@ async function sendViaMeta(
         await client.markReadTyping(lastInbound.waMessageId).catch(() => {});
       }
       await new Promise((r) => setTimeout(r, delayMs));
+      // Toque de silêncio: confere de novo depois do "digitando"
+      if (msg.automationId === "ai_nudge" && msg.createdAt && !(await nudgeStillValid({ ...msg, createdAt: msg.createdAt }))) {
+        await dropNudge(msg.id, msg.conversationId, logger);
+        return false;
+      }
       result = await client.sendText(to, msg.body);
     } else {
       const purpose = templatePurposeFor(msg.automationId);

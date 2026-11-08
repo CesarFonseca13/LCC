@@ -27,23 +27,41 @@ const CONFIRM_PATTERNS = [
   /\bconfirmad[oa]\b/,
   /\bestarei (ai|la)\b/,
   /\bvou sim\b/,
-  /\bpode ser\b/,
-  /\bcom certeza\b/,
-  /\bclaro\b/,
-  /\bcombinado\b/,
+  // Fracas só valem como mensagem inteira (com "sim"/"obrigada"/emoji em volta):
+  // "pode ser na quinta" é pedido de troca, "claro que não" é recusa
+  /^((sim|claro|ok) )?(pode ser|com certeza|claro|combinado|claro que sim)( (sim|obrigad[ao]|entao|ate amanha))*[\s!.👍✅❤️💛]*$/u,
   /^(sim|siim+|s)[\s!.]*$/,
   /^(ok|okay|blz|beleza|show|perfeito|otimo|top|fechado|fechou)[\s!.]*$/,
   /^👍|^✅/,
 ];
 
 const CANCEL_PATTERNS = [
-  /\b(nao|n) vou (conseguir|poder|dar)?/,
-  /\b(nao|n) (vou|irei|posso|poderei|consigo)\b/,
+  // "não vou faltar/perder/esquecer" é o contrário de cancelar
+  /\b(nao|n) vou (?!faltar|perder|esquecer)(conseguir|poder|dar)?/,
+  /\b(nao|n) (vou|irei|posso|poderei|consigo|estarei)\b(?! (faltar|perder|esquecer))/,
+  /\b(nao|n) (vai|vou) dar\b(?! (problema|pra perder|para perder|pra faltar|para faltar|pra chegar antes))/,
+  /\b(nao|n) da (pra|para)\b(?! (perder|faltar|esquecer))/,
+  /\b(nao|n) vai rolar\b/,
+  /(?<!\b(nao|n) )\bvou faltar\b(?! nao)/,
   /\bcancelar?\b/,
   /\bcancela\b/,
   /\bdesmarcar?\b/,
   /\bdesmarca\b/,
   /\bimprevisto\b/,
+];
+
+/** Adiamento ou dúvida ("depois te confirmo", "ainda não sei", "vou ver com meu
+ *  marido") não é confirmação: sem certeza, vai para a próxima camada / pessoa.
+ *  "Confirmo, depois mando o comprovante" continua sendo confirmação. */
+const POSTPONE_PATTERNS = [
+  /\bdepois (eu )?(te )?(confirmo|falo|aviso|vejo|respondo|retorno)\b/,
+  /\b(te )?(falo|aviso|respondo|retorno) depois\b/,
+  /\bte confirmo (depois|mais tarde|amanha|ja ja|em breve)\b/,
+  /\bconfirmo depois([\s!.]*$| (que|de|do|da)\b)/,
+  /\b(nao|n) confirmo\b/,
+  /\bainda (nao|n) sei\b/,
+  /\bsei se\b/,
+  /\bvou ver\b/,
 ];
 
 const RESCHEDULE_PATTERNS = [
@@ -66,6 +84,7 @@ export function classifyByKeywords(text: string): ReplyIntent | null {
   // pode virar confirmação por causa de um "pode" solto.
   if (RESCHEDULE_PATTERNS.some((p) => p.test(t))) return "reschedule";
   if (CANCEL_PATTERNS.some((p) => p.test(t))) return "cancel";
+  if (POSTPONE_PATTERNS.some((p) => p.test(t))) return null;
   if (CONFIRM_PATTERNS.some((p) => p.test(t))) return "confirm";
   if (/\?\s*$/.test(text.trim())) return "question";
   return null;

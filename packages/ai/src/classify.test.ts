@@ -51,6 +51,49 @@ describe("classifyByKeywords (pt-BR coloquial)", () => {
     }
   });
 
+  it("negação, adiamento e frase com 'pode ser' no meio nunca viram confirmação", () => {
+    for (const text of ["Não estarei aí amanhã", "não vai dar pra mim", "não dá pra mim amanhã", "vou faltar", "não vai rolar"]) {
+      expect(classifyByKeywords(text), text).toBe("cancel");
+    }
+    for (const text of [
+      "Depois te confirmo",
+      "Vou ver com meu marido e te confirmo",
+      "Ainda não sei se confirmo",
+      "Não confirmo ainda",
+      "Pode ser na quinta",
+      "pode ser de tarde",
+      "Com certeza está pior que ontem",
+      "está saindo um líquido claro",
+    ]) {
+      expect(classifyByKeywords(text), text).not.toBe("confirm");
+    }
+  });
+
+  it("confirmações com 'sim'/'obrigada'/emoji em volta continuam sendo confirmação", () => {
+    for (const text of [
+      "Sim, pode ser",
+      "Pode ser sim",
+      "Claro que sim",
+      "Combinado, obrigada",
+      "Combinado 👍",
+      "Com certeza 👍",
+      "Claro 💛",
+      "Combinado, até amanhã",
+      "Confirmo, depois mando o comprovante",
+      "Estarei aí, depois do trabalho",
+      "Te confirmo sim, estarei lá",
+      "Confirmo, mas ainda não paguei",
+    ]) {
+      expect(classifyByKeywords(text), text).toBe("confirm");
+    }
+  });
+
+  it("'não vou faltar' e 'vou faltar não' nunca viram cancelamento", () => {
+    for (const text of ["Vou faltar não", "Não vou faltar", "Estarei lá sim, não dá pra perder", "Confirmo! Não vai dar pra chegar antes das 10", "Sim, não vai dar problema"]) {
+      expect(classifyByKeywords(text), text).not.toBe("cancel");
+    }
+  });
+
   it("perguntas viram question", () => {
     expect(classifyByKeywords("quanto custa a limpeza?")).toBe("question");
     expect(classifyByKeywords("onde fica a clínica?")).toBe("question");

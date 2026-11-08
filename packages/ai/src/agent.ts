@@ -566,13 +566,22 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
 
   const toolTrace: string[] = [];
   let toolFailures = 0;
+  // Toque de silêncio: a cliente não escreveu nada — a atendente só pode mandar UM
+  // balão ou ficar em silêncio. Nenhuma outra ferramenta (agendar, cancelar,
+  // escalar...) e nenhuma mensagem de reserva: qualquer saída inválida = silêncio.
+  const nudgeMode = Boolean(input.nudge);
   for (let i = 0; i < maxIterations; i++) {
     const response = await client.chat({
       model,
       maxTokens: 700,
       system,
       messages,
-      tools: input.clinic.offersEnabled ? TOOLS : TOOLS.filter((t) => t.name !== "sugerir_complementos"),
+      tools: nudgeMode
+        ? TOOLS.filter((t) => t.name === "responder_cliente")
+        : input.clinic.offersEnabled
+          ? TOOLS
+          : TOOLS.filter((t) => t.name !== "sugerir_complementos"),
+      ...(nudgeMode ? { forceTool: "responder_cliente" } : {}),
     });
     usage.inputTokens += response.usage.inputTokens;
     usage.outputTokens += response.usage.outputTokens;
@@ -580,6 +589,22 @@ ${input.customer.activeGoal ? `CONTEXTO: esta conversa tem um objetivo ativo —
     usage.cacheReadTokens += response.usage.cacheReadTokens ?? 0;
     usage.calls += 1;
     toolTrace.push(response.toolCalls.map((c) => c.name).join("+") || "(texto)");
+
+    if (nudgeMode) {
+      const call = response.toolCalls.find((t) => t.name === "responder_cliente");
+      const raw = call?.input as { balloons?: unknown } | undefined;
+      const balloons = Array.isArray(raw?.balloons)
+        ? raw.balloons.filter((b): b is string => typeof b === "string" && b.trim().length > 0)
+        : [];
+      return {
+        balloons: finalize(balloons).slice(0, 1),
+        internalNote: null,
+        confidence: "media",
+        escalated: false,
+        usage,
+        toolTrace,
+      };
+    }
 
     // Resposta final?
     const responder = response.toolCalls.find((t) => t.name === "responder_cliente");

@@ -1,11 +1,11 @@
-import { and, asc, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import type { Logger } from "pino";
-import { classifyReply } from "@clinicaos/ai/classify";
+import { classifyByKeywords, classifyReply } from "@clinicaos/ai/classify";
 import { parseClinicAiProvider, resolveClinicAiConfig } from "@clinicaos/ai/provider";
 import { renderTemplate } from "@clinicaos/core/template-render";
 import { utcToZoned } from "@clinicaos/core/timezone";
 import { schema, unsafeGlobalDb } from "@clinicaos/db";
-import { flagUrgentIfHealth } from "./media-escalation";
+import { flagUrgentIfHealth, isCourtesyOnly, storedMessageTriggersTurn } from "./media-escalation";
 import { getSpendStatus, recordAiUsage } from "./spend";
 
 /**
@@ -32,10 +32,14 @@ export async function classifyInbound(
   )[0];
   if (!conversation) return;
   // Só classifica quando o atendimento automático está no controle. Conversa já
-  // esperando a equipe: queixa de saúde que chegar agora vira URGENTE no painel
+  // esperando a equipe: "confirmo" em resposta ao lembrete confirma (com travas) e
+  // queixa de saúde que chegar agora vira URGENTE no painel
   if (conversation.mode !== "ai") {
     if (conversation.mode === "waiting_human") {
       await flagUrgentIfHealth(clinicId, conversationId, customerId, logger);
+      await confirmReminderReplyWhileWaiting(clinicId, conversationId, customerId, logger).catch((err) =>
+        logger.warn({ conversationId, err: err instanceof Error ? err.message : String(err) }, "confirmação pelo lembrete falhou"),
+      );
     }
     return;
   }
@@ -150,6 +154,244 @@ export async function classifyInbound(
   });
 }
 
+/** Lembretes que pedem confirmação de presença. */
+const CONFIRMATION_REMINDERS = ["reminder_24h", "confirm_2h"];
+
+/** Texto sem acento, minúsculas, pontuação vira espaço (mantém 👍 e ✅). */
+function plain(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9\s👍✅]/gu, " ")
+    .replace(/👍|✅/gu, (e) => ` ${e} `)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Confirmação FORTE como mensagem INTEIRA ("Sim, confirmo!", "Confirmo minha
+ *  presença 👍"). Nunca trecho de frase: "depois te confirmo", "não confirmo
+ *  ainda" e "não estarei aí" não podem confirmar. */
+const STRONG_CONFIRM_RE =
+  /^(s+i+m+ )?(confirmo|confirmad[oa]|pode confirmar|estarei (ai|la)|vou sim|presenca confirmada|confirmo (a )?(minha )?presenca)( (sim|obrigad[ao]))*( (👍|✅))*$/u;
+/** Confirmação FRACA ("sim", "ok", 👍): só vale como resposta direta ao lembrete. */
+const WEAK_CONFIRM_RE =
+  /^(s+i+m+|s|ok|okay|blz|beleza|perfeito|fechado|combinado|claro|com certeza|pode ser|certo|isso|👍|✅)( (sim|obrigad[ao]|👍|✅))*$/u;
+/** Cumprimento solto, que não muda nada. */
+const GREETING_RE = /^(oi+|ola|bom dia|boa tarde|boa noite)( tudo bem)?$/;
+
+/**
+ * Decide, só com o que a cliente escreveu, se dá para confirmar sozinho com
+ * segurança. Regras: TODA mensagem dela desde o lembrete é confirmação, cortesia
+ * ("obrigada") ou cumprimento — qualquer outra coisa (recusa sem palavra-chave,
+ * "não vai dar", dúvida, queixa, pedido) deixa com a equipe; entre as mensagens
+ * que chegaram depois da última fala da clínica há uma confirmação; e, se a
+ * clínica falou depois do lembrete, essa confirmação precisa ser explícita
+ * ("ok" pode ser resposta à atendente). Puro: testável sem banco.
+ */
+export function reminderReplyConfirms(
+  windowTexts: string[],
+  candidateTexts: string[],
+  clinicSpokeAfterReminder: boolean,
+): boolean {
+  if (windowTexts.length === 0 || candidateTexts.length === 0) return false;
+  const kind = (t: string): "strong" | "weak" | "neutral" | "other" => {
+    if (t.includes("?")) return "other"; // pergunta nunca é confirmação ("pode confirmar?")
+    const p = plain(t);
+    if (STRONG_CONFIRM_RE.test(p)) return "strong";
+    if (WEAK_CONFIRM_RE.test(p)) return "weak";
+    if (GREETING_RE.test(p) || isCourtesyOnly(t)) return "neutral";
+    return "other";
+  };
+  if (windowTexts.some((t) => kind(t) === "other")) return false;
+  const kinds = candidateTexts.map(kind);
+  return clinicSpokeAfterReminder ? kinds.includes("strong") : kinds.some((k) => k === "strong" || k === "weak");
+}
+
+/** Saída que a cliente vê ou vai ver (aprovação pendente, recusada, expirada ou
+ *  falha não contam como "a clínica falou"). */
+const VISIBLE_OUTBOUND = new Set(["queued", "sending", "sent", "delivered", "read"]);
+
+/** Texto da cliente pedindo para cancelar/remarcar (mesmas palavras do classificador). */
+export function asksToChangeAppointment(text: string): boolean {
+  const intent = classifyByKeywords(text);
+  return intent === "cancel" || intent === "reschedule";
+}
+
+/** O motivo da espera (aviso da equipe) é cancelar/remarcar? Lê palavra-chave, o
+ *  motivo livre que a atendente escreve ("quer trocar o horário", "pediu para
+ *  adiar", "não poderá comparecer") e a legenda citada no aviso. */
+export function noticeIsAboutChangingAppointment(body: string): boolean {
+  const p = plain(body);
+  if (/remarc|reagend|cancel|desmarc/.test(p)) return true;
+  if (/\bnao (vai|pode|podera|consegue|conseguira) (ir|comparecer|vir)\b|\bfalt(ar|ara)\b/.test(p)) return true;
+  return asksToChangeAppointment(body);
+}
+
+/**
+ * Conversa esperando a equipe ("precisa de você" — a cliente mandou um anexo, por
+ * exemplo) e a cliente responde ao LEMBRETE com "confirmo": confirma o agendamento
+ * DAQUELE lembrete, em silêncio (a equipe responde junto com o assunto pendente).
+ * Travas: lembrete de confirmação ENVIADO nas últimas 48 h; ninguém da equipe
+ * escreveu depois dele; o motivo da espera não é cancelar/remarcar; toda mensagem
+ * dela desde o lembrete é confirmação/cortesia/cumprimento (reminderReplyConfirms);
+ * agendamento ainda "agendado" e no futuro. Vale com e sem atendente virtual.
+ * Devolve true se confirmou.
+ */
+export async function confirmReminderReplyWhileWaiting(
+  clinicId: string,
+  conversationId: string,
+  customerId: string,
+  logger: Logger,
+): Promise<boolean> {
+  const db = unsafeGlobalDb();
+  // Hora em que o lembrete SAIU (com Aprovações, ele pode ter sido criado bem antes)
+  const sentAtExpr = sql`COALESCE(${schema.messages.sentAt}, ${schema.messages.createdAt})`;
+  const reminder = (
+    await db
+      .select({
+        createdAt: schema.messages.createdAt,
+        sentAt: schema.messages.sentAt,
+        automationRunId: schema.messages.automationRunId,
+      })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.clinicId, clinicId),
+          eq(schema.messages.conversationId, conversationId),
+          eq(schema.messages.direction, "outbound"),
+          inArray(schema.messages.automationId, CONFIRMATION_REMINDERS),
+          inArray(schema.messages.status, ["sent", "delivered", "read"]),
+          sql`${sentAtExpr} > now() - interval '48 hours'`,
+          isNotNull(schema.messages.automationRunId),
+        ),
+      )
+      .orderBy(sql`${sentAtExpr} DESC`)
+      .limit(1)
+  )[0];
+  if (!reminder?.automationRunId) return false;
+  const reminderAt = new Date(reminder.sentAt ?? reminder.createdAt);
+
+  // Motivo atual da espera é cancelar/remarcar (palavra-chave, motivo livre da
+  // atendente como "quer trocar o horário"/"pediu para adiar", ou "não poderá
+  // comparecer"): a equipe está tratando disso
+  const notice = (
+    await db
+      .select({ body: schema.notifications.body })
+      .from(schema.notifications)
+      .where(
+        and(
+          eq(schema.notifications.clinicId, clinicId),
+          eq(schema.notifications.refTable, "conversations"),
+          eq(schema.notifications.refId, conversationId),
+          inArray(schema.notifications.type, ["conversation_needs_human", "conversation_urgent"]),
+        ),
+      )
+      .orderBy(desc(schema.notifications.createdAt))
+      .limit(1)
+  )[0];
+  if (notice?.body && noticeIsAboutChangingAppointment(notice.body)) return false;
+
+  // Pedido de cancelar/remarcar nas 72 h ANTES do lembrete (ex.: com a conversa já
+  // esperando a equipe, que não classifica nada): a equipe ainda vai tratar
+  const before = await db
+    .select({ body: schema.messages.body })
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.clinicId, clinicId),
+        eq(schema.messages.conversationId, conversationId),
+        eq(schema.messages.direction, "inbound"),
+        isNotNull(schema.messages.body),
+        gt(schema.messages.createdAt, new Date(reminderAt.getTime() - 72 * 3_600_000)),
+        lte(schema.messages.createdAt, reminderAt),
+      ),
+    )
+    .orderBy(desc(schema.messages.createdAt))
+    .limit(50);
+  if (before.some((m) => m.body && asksToChangeAppointment(m.body))) return false;
+
+  // Tudo desde o lembrete, das mais NOVAS para trás (conversa longa não esconde o fim)
+  const after = (
+    await db
+      .select({
+        direction: schema.messages.direction,
+        author: schema.messages.author,
+        type: schema.messages.type,
+        body: schema.messages.body,
+        status: schema.messages.status,
+      })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.clinicId, clinicId),
+          eq(schema.messages.conversationId, conversationId),
+          gt(schema.messages.createdAt, reminderAt),
+        ),
+      )
+      .orderBy(desc(schema.messages.createdAt))
+      .limit(100)
+  ).reverse();
+  const visibleOut = (m: (typeof after)[number]) => m.direction === "outbound" && VISIBLE_OUTBOUND.has(m.status);
+  // Uma pessoa da equipe escreveu depois do lembrete: ela está conduzindo
+  if (after.some((m) => visibleOut(m) && m.author === "human")) return false;
+  const clinicSpoke = after.some(visibleOut);
+  const isText = (m: (typeof after)[number]) => m.direction === "inbound" && m.type === "text" && Boolean(m.body);
+  // Janela de bloqueio: TODA mensagem dela que pede resposta — áudio, foto,
+  // documento etc. entram como "[anexo]" (uma recusa por áudio ou na legenda não
+  // pode virar confirmação por causa de um "ok" depois). Reação/figurinha não contam.
+  const windowTexts = after
+    .filter((m) => m.direction === "inbound" && storedMessageTriggersTurn(m.type, m.body))
+    .map((m) => (m.type === "text" ? (m.body as string) : "[anexo]"));
+  // Candidatas: só o que chegou depois da última fala da clínica (o resto a atendente já leu)
+  let lastOut = -1;
+  after.forEach((m, i) => {
+    if (visibleOut(m)) lastOut = i;
+  });
+  const candidateTexts = after.slice(lastOut + 1).filter(isText).map((m) => m.body as string);
+  if (!reminderReplyConfirms(windowTexts, candidateTexts, clinicSpoke)) return false;
+
+  const run = (
+    await db
+      .select({ appointmentId: schema.automationRuns.appointmentId })
+      .from(schema.automationRuns)
+      .where(eq(schema.automationRuns.id, reminder.automationRunId))
+      .limit(1)
+  )[0];
+  if (!run?.appointmentId) return false;
+  const appointment = (
+    await db
+      .select({
+        id: schema.appointments.id,
+        status: schema.appointments.status,
+        startsAt: schema.appointments.startsAt,
+        customerId: schema.appointments.customerId,
+      })
+      .from(schema.appointments)
+      .where(eq(schema.appointments.id, run.appointmentId))
+      .limit(1)
+  )[0];
+  if (
+    !appointment ||
+    appointment.customerId !== customerId ||
+    appointment.status !== "scheduled" ||
+    new Date(appointment.startsAt).getTime() <= Date.now()
+  ) {
+    return false;
+  }
+  const tz =
+    (
+      await db
+        .select({ timezone: schema.clinics.timezone })
+        .from(schema.clinics)
+        .where(eq(schema.clinics.id, clinicId))
+        .limit(1)
+    )[0]?.timezone ?? "America/Sao_Paulo";
+  await confirmAppointment(clinicId, conversationId, customerId, appointment.id, tz, logger, { reply: false });
+  logger.info({ conversationId, appointmentId: appointment.id }, "resposta ao lembrete confirmou presença (conversa com a equipe)");
+  return true;
+}
+
 /**
  * Nota de 0 a 10 respondendo à coleta de feedback:
  * ≥9 → agradece + convite para avaliar no Google (se configurado);
@@ -247,17 +489,18 @@ async function maybeHandleFeedbackRating(
   return true;
 }
 
-async function confirmAppointment(
+/** Confirma a presença: o agendamento e os outros serviços da MESMA visita
+ *  (visit_group_id) que ainda estão "agendado", com histórico e fim da cadência de
+ *  cada um. Devolve o agendamento confirmado (null se ele já não estava "agendado"). */
+export async function confirmVisit(
   clinicId: string,
-  conversationId: string,
   customerId: string,
   appointmentId: string,
-  tz: string,
-  logger: Logger,
-): Promise<void> {
+  source: "customer_whatsapp" | "ai_agent",
+  stopReason: string,
+): Promise<typeof schema.appointments.$inferSelect | null> {
   const db = unsafeGlobalDb();
-
-  // FSM: scheduled → confirmed, com fonte auditável "customer_whatsapp"
+  // FSM: scheduled → confirmed, com fonte auditável
   const updated = await db
     .update(schema.appointments)
     .set({ status: "confirmed", statusChangedAt: new Date() })
@@ -266,31 +509,70 @@ async function confirmAppointment(
     )
     .returning();
   const appointment = updated[0];
-  if (!appointment) return;
-
-  await db.insert(schema.appointmentStatusHistory).values({
-    clinicId,
-    appointmentId,
-    fromStatus: "scheduled",
-    toStatus: "confirmed",
-    source: "customer_whatsapp",
-  });
-
-  // Cadência de confirmação: objetivo atingido (a cobrança de 2h morre aqui)
+  if (!appointment) return null;
+  const others = appointment.visitGroupId
+    ? await db
+        .update(schema.appointments)
+        .set({ status: "confirmed", statusChangedAt: new Date() })
+        .where(
+          and(
+            eq(schema.appointments.visitGroupId, appointment.visitGroupId),
+            eq(schema.appointments.customerId, customerId),
+            eq(schema.appointments.status, "scheduled"),
+          ),
+        )
+        .returning({ id: schema.appointments.id })
+    : [];
+  const ids = [appointment.id, ...others.map((o) => o.id)];
+  await db.insert(schema.appointmentStatusHistory).values(
+    ids.map((id) => ({
+      clinicId,
+      appointmentId: id,
+      fromStatus: "scheduled" as const,
+      toStatus: "confirmed" as const,
+      source,
+    })),
+  );
+  // Cadência de CONFIRMAÇÃO: objetivo atingido (a cobrança de 2h morre aqui). O
+  // lembrete de 45 min e os pré-cuidados continuam: eles valem para quem confirmou
   await db
     .update(schema.automationRuns)
-    .set({
-      status: "goal_reached",
-      stopReason: "cliente confirmou pelo WhatsApp",
-      nextRunAt: null,
-      finishedAt: new Date(),
-    })
+    .set({ status: "goal_reached", stopReason, nextRunAt: null, finishedAt: new Date() })
     .where(
       and(
-        eq(schema.automationRuns.appointmentId, appointmentId),
+        inArray(schema.automationRuns.appointmentId, ids),
         eq(schema.automationRuns.status, "active"),
+        inArray(schema.automationRuns.automationId, CONFIRMATION_REMINDERS),
       ),
     );
+  return appointment;
+}
+
+async function confirmAppointment(
+  clinicId: string,
+  conversationId: string,
+  customerId: string,
+  appointmentId: string,
+  tz: string,
+  logger: Logger,
+  opts: { reply?: boolean } = {},
+): Promise<void> {
+  const db = unsafeGlobalDb();
+
+  const appointment = await confirmVisit(
+    clinicId,
+    customerId,
+    appointmentId,
+    "customer_whatsapp",
+    "cliente confirmou pelo WhatsApp",
+  );
+  if (!appointment) return;
+  // Conversa que espera a equipe: confirma em silêncio (a equipe responde junto
+  // com o assunto pendente — nada de "qualquer coisa é só me chamar" por cima)
+  if (opts.reply === false) {
+    logger.info({ appointmentId }, "confirmado via WhatsApp (sem resposta automática: conversa com a equipe)");
+    return;
+  }
 
   // Resposta simpática (reativa = direct-send, nunca passa por aprovação)
   const setting = (
@@ -328,28 +610,55 @@ async function confirmAppointment(
   )[0];
   if (!definition || !customer) return;
 
-  const zoned = utcToZoned(new Date(appointment.startsAt), tz);
-  const [y, m, d] = zoned.dateISO.split("-");
-  const body = renderTemplate(
-    setting?.messageTemplate ?? definition.defaultTemplate,
-    {
-      nome: customer.fullName.split(" ")[0] ?? customer.fullName,
-      data: `${d}/${m}/${y}`,
-      hora: zoned.timeHHMM,
-    },
-    { html: false },
-  );
+  // A confirmação já está gravada: falha ao montar/enfileirar a resposta não pode
+  // derrubar o resto do processamento da mensagem
+  try {
+    const extras = (
+      await db
+        .select({
+          clinica: schema.clinics.name,
+          procedimento: schema.procedures.name,
+          profissional: schema.professionals.name,
+        })
+        .from(schema.appointments)
+        .innerJoin(schema.clinics, eq(schema.clinics.id, schema.appointments.clinicId))
+        .leftJoin(schema.procedures, eq(schema.procedures.id, schema.appointments.procedureId))
+        .leftJoin(schema.professionals, eq(schema.professionals.id, schema.appointments.professionalId))
+        .where(eq(schema.appointments.id, appointment.id))
+        .limit(1)
+    )[0];
+    const zoned = utcToZoned(new Date(appointment.startsAt), tz);
+    const [y, m, d] = zoned.dateISO.split("-");
+    // Mesmas variáveis que a tela de Automações oferece (sem elas o texto não renderiza)
+    const body = renderTemplate(
+      setting?.messageTemplate ?? definition.defaultTemplate,
+      {
+        nome: customer.fullName.split(" ")[0] ?? customer.fullName,
+        data: `${d}/${m}/${y}`,
+        hora: zoned.timeHHMM,
+        clinica: extras?.clinica ?? "",
+        procedimento: extras?.procedimento ?? "seu atendimento",
+        profissional: extras?.profissional ?? "nossa equipe",
+      },
+      { html: false },
+    );
 
-  await db.insert(schema.messages).values({
-    clinicId,
-    conversationId,
-    direction: "outbound",
-    author: "automation",
-    body,
-    status: "queued",
-    automationId: "reply_on_confirm",
-    // Resposta rápida, mas nunca instantânea demais (3–10s)
-    scheduledFor: new Date(Date.now() + 3_000 + Math.floor(Math.random() * 7_000)),
-  });
-  logger.info({ appointmentId }, "confirmado via WhatsApp + resposta enviada");
+    await db.insert(schema.messages).values({
+      clinicId,
+      conversationId,
+      direction: "outbound",
+      author: "automation",
+      body,
+      status: "queued",
+      automationId: "reply_on_confirm",
+      // Resposta rápida, mas nunca instantânea demais (3–10s)
+      scheduledFor: new Date(Date.now() + 3_000 + Math.floor(Math.random() * 7_000)),
+    });
+    logger.info({ appointmentId }, "confirmado via WhatsApp + resposta enviada");
+  } catch (err) {
+    logger.warn(
+      { appointmentId, err: err instanceof Error ? err.message : String(err) },
+      "confirmado via WhatsApp, mas a resposta automática não pôde ser montada",
+    );
+  }
 }

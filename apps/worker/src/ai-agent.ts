@@ -32,6 +32,7 @@ import {
   storedHumanOnlyReason,
   storedMessageTriggersTurn,
 } from "./media-escalation";
+import { confirmReminderReplyWhileWaiting, confirmVisit } from "./classify-inbound";
 import { getSpendStatus, notifySpendThresholds, recordAiUsage } from "./spend";
 
 /**
@@ -115,6 +116,12 @@ function minuteOfTodayAhead(tz: string, todayISODate: string, aheadMs: number): 
   return (h ?? 0) * 60 + (m ?? 0);
 }
 
+/** Hora local entre 08:00 e 20:59 (janela do toque de silêncio). */
+export function withinNudgeHours(tz: string, now: Date = new Date()): boolean {
+  const hhmm = utcToZoned(now, tz).timeHHMM;
+  return hhmm >= "08:00" && hhmm < "21:00";
+}
+
 /** Primeiro minuto em que ainda dá para começar uma visita hoje (antecedência de 1h30, igual à busca). */
 function earliestStartMinuteToday(tz: string, todayISODate: string): number {
   return minuteOfTodayAhead(tz, todayISODate, 90 * 60_000);
@@ -177,6 +184,9 @@ export async function processAiTurns(logger: Logger): Promise<void> {
     .limit(5);
 
   for (const { id } of due) {
+    // Desligando (deploy): não reivindica turno novo — o marcador fica para o
+    // processo novo, em vez de morrer no meio da chamada de IA
+    if (aiClaimsStopped) break;
     // Claim: zera o marcador; se chegar mensagem nova durante o turno, ele volta
     const claimed = await db
       .update(schema.conversations)
@@ -315,8 +325,52 @@ export function knowledgeFactsText(settings: unknown): string | null {
  *  verdade faria. No máximo um toque por rodada de silêncio (o marcador
  *  fica para trás quando a cliente responde), e nunca em conversa fria
  *  (janela de 45 min). O modelo ainda pode vetar com [SEM_MENSAGEM]. */
+/** Varredura de toque em andamento neste processo (nunca duas ao mesmo tempo). */
+let nudgeSweepRunning = false;
+
+/** Desligamento em curso: nenhum turno novo é reivindicado (ver stopAiClaims). */
+let aiClaimsStopped = false;
+
+/** Chamado no início do desligamento do worker (deploy): turnos ainda não
+ *  reivindicados ficam no banco para o processo novo, em vez de morrer no meio. */
+export function stopAiClaims(): void {
+  aiClaimsStopped = true;
+}
+/** Orçamento de tempo de uma varredura (cada toque é uma chamada de IA). */
+const NUDGE_SWEEP_BUDGET_MS = 25_000;
+
+/** Pergunta de cortesia no fim ("posso ajudar em algo mais?", "tá?") não pede
+ *  cutucada — nem gasta uma chamada de IA para o modelo decidir isso. */
+export function isCourtesyQuestion(text: string): boolean {
+  const t = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9?\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /(algo mais|mais alguma (coisa|duvida)|posso (te )?ajudar (em )?(mais )?(alguma coisa|algo)|ajudo em (algo|mais alguma coisa)|\bta|\bok|\bcerto ne)\s*\?\s*$/.test(t);
+}
+
 export async function processConversationNudges(logger: Logger): Promise<void> {
+  if (nudgeSweepRunning) return;
+  nudgeSweepRunning = true;
+  try {
+    await nudgeSweep(logger);
+  } finally {
+    nudgeSweepRunning = false;
+  }
+}
+
+async function nudgeSweep(logger: Logger): Promise<void> {
   const db = unsafeGlobalDb();
+  const startedAt = Date.now();
+  // Os filtros caros ficam no SQL: só entra conversa que PODE ser cutucada — nada
+  // saindo, a última fala é uma pergunta da atendente que CHEGOU no celular dela
+  // (entregue ou lida, não só aceita pelo servidor) e nenhum toque nas últimas 12 h
+  // (quem responde devagar não leva um "está por aí?" a cada pergunta). Sem isso, as
+  // mesmas conversas inelegíveis voltariam a cada varredura e as outras nunca
+  // seriam vistas. Subconsultas com clinic_id: usam o índice de mensagens.
   const candidates = await db
     .select()
     .from(schema.conversations)
@@ -328,18 +382,64 @@ export async function processConversationNudges(logger: Logger): Promise<void> {
         sql`${schema.conversations.lastMessageAt} > ${schema.conversations.lastInboundAt}`,
         sql`${schema.conversations.lastMessageAt} BETWEEN now() - interval '45 minutes' AND now() - interval '5 minutes'`,
         sql`(${schema.conversations.nudgeSentAt} IS NULL OR ${schema.conversations.nudgeSentAt} < ${schema.conversations.lastInboundAt})`,
+        sql`NOT EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.clinic_id = ${schema.conversations.clinicId}
+            AND m.conversation_id = ${schema.conversations.id}
+            AND m.status IN ('queued', 'sending')
+        )`,
+        sql`NOT EXISTS (
+          SELECT 1 FROM messages n
+          WHERE n.clinic_id = ${schema.conversations.clinicId}
+            AND n.conversation_id = ${schema.conversations.id}
+            AND n.automation_id = 'ai_nudge'
+            AND n.status IN ('queued', 'sending', 'sent', 'delivered', 'read')
+            AND n.created_at > now() - interval '12 hours'
+        )`,
+        // Número fora do ar: nem gasta a chamada de IA (o toque não sairia)
+        sql`EXISTS (
+          SELECT 1 FROM whatsapp_instances w
+          WHERE w.id = ${schema.conversations.instanceId} AND w.status = 'connected'
+        )`,
+        sql`EXISTS (
+          SELECT 1 FROM (
+            SELECT m.direction, m.author, m.status, m.body FROM messages m
+            WHERE m.clinic_id = ${schema.conversations.clinicId}
+              AND m.conversation_id = ${schema.conversations.id}
+            ORDER BY m.created_at DESC
+            LIMIT 1
+          ) ultima
+          WHERE ultima.direction = 'outbound' AND ultima.author = 'ai'
+            AND ultima.status IN ('delivered', 'read') AND ultima.body LIKE '%?%'
+        )`,
       ),
     )
     .limit(5);
 
+  // Avaliada e descartada nesta rodada de silêncio: não volta até a cliente escrever
+  const markEvaluated = (id: string) =>
+    db
+      .update(schema.conversations)
+      .set({ nudgeSentAt: new Date() })
+      .where(
+        and(
+          eq(schema.conversations.id, id),
+          sql`(${schema.conversations.nudgeSentAt} IS NULL OR ${schema.conversations.nudgeSentAt} < ${schema.conversations.lastInboundAt})`,
+        ),
+      );
+
   for (const conversation of candidates) {
-    // Nada no meio do caminho: balão ainda saindo = não é silêncio da cliente
+    // Cada toque é uma chamada de IA: a varredura tem orçamento de tempo
+    if (aiClaimsStopped || Date.now() - startedAt > NUDGE_SWEEP_BUDGET_MS) break;
+    // Revalida AGORA (os toques anteriores desta varredura levaram segundos):
+    // nada no meio do caminho — balão ainda saindo não é silêncio da cliente
     const pending = (
       await db
         .select({ id: schema.messages.id })
         .from(schema.messages)
         .where(
           and(
+            eq(schema.messages.clinicId, conversation.clinicId),
             eq(schema.messages.conversationId, conversation.id),
             inArray(schema.messages.status, ["queued", "sending"]),
           ),
@@ -348,7 +448,7 @@ export async function processConversationNudges(logger: Logger): Promise<void> {
     )[0];
     if (pending) continue;
 
-    // A última fala precisa ser da Ana, entregue, com pergunta em aberto
+    // A última fala precisa ser da Ana, entregue no celular, com pergunta em aberto
     const last = (
       await db
         .select({
@@ -358,14 +458,17 @@ export async function processConversationNudges(logger: Logger): Promise<void> {
           body: schema.messages.body,
         })
         .from(schema.messages)
-        .where(eq(schema.messages.conversationId, conversation.id))
+        .where(and(eq(schema.messages.clinicId, conversation.clinicId), eq(schema.messages.conversationId, conversation.id)))
         .orderBy(desc(schema.messages.createdAt))
         .limit(1)
     )[0];
     if (!last || last.direction !== "outbound" || last.author !== "ai") continue;
-    if (!["sent", "delivered", "read"].includes(last.status)) continue;
+    if (!["delivered", "read"].includes(last.status)) continue;
     if (!last.body?.includes("?")) continue;
-    if (!(await clinicHasAiEnabled(conversation.clinicId))) continue;
+    if (isCourtesyQuestion(last.body) || !(await clinicHasAiEnabled(conversation.clinicId))) {
+      await markEvaluated(conversation.id);
+      continue;
+    }
 
     // Claim: um toque por rodada, mesmo com dois workers ou crash no meio
     const claimed = await db
@@ -408,6 +511,14 @@ async function runTurn(
     // que chegar agora (ex.: a explicação digitada depois da foto) vira URGENTE
     if (conversation.mode === "waiting_human" && !nudgeMinutes) {
       await flagUrgentIfHealth(conversation.clinicId, conversation.id, conversationCustomerId, logger);
+      // "confirmo" em resposta ao lembrete confirma mesmo com a conversa na equipe (com travas, em silêncio)
+      await confirmReminderReplyWhileWaiting(conversation.clinicId, conversation.id, conversationCustomerId, logger).catch(
+        (err) =>
+          logger.warn(
+            { conversationId: conversation.id, err: err instanceof Error ? err.message : String(err) },
+            "confirmação pelo lembrete falhou",
+          ),
+      );
     }
     return;
   }
@@ -434,6 +545,9 @@ async function runTurn(
   if (!clinic) return;
   const aiSettings = parseAiSettings(clinic.settings);
   if (!aiSettings.enabled) return;
+  // Toque de silêncio só em horário comercial (8h às 21h no fuso da clínica):
+  // cutucar alguém tarde da noite é cara de robô
+  if (nudgeMinutes && !withinNudgeHours(clinic.timezone)) return;
 
   // Limite mensal de gastos em reais (Configurações → Gastos com API). Passou e a
   // clínica não liberou excedente → o turno vai para humano, sem gastar.
@@ -673,7 +787,11 @@ async function runTurn(
       };
     })
     .filter((m): m is { role: "customer" | "assistant"; text: string } => Boolean(m.text));
-  if (history.length === 0 || history[history.length - 1]!.role !== "customer") return;
+  // Turno normal responde à cliente (a última fala é dela). Toque de silêncio é o
+  // contrário: a última fala é a pergunta da atendente que ficou sem resposta
+  if (history.length === 0) return;
+  const lastRole = history[history.length - 1]!.role;
+  if (nudgeMinutes ? lastRole !== "assistant" : lastRole !== "customer") return;
 
   // Rede de segurança: foto, áudio, vídeo, documento (ou algo que só aparece no
   // celular) que a cliente mandou desde a última fala da clínica (recente) — se a
@@ -1258,35 +1376,23 @@ async function runTurn(
     },
 
     async confirmarPresenca(agendamentoId) {
-      const updated = await db
-        .update(schema.appointments)
-        .set({ status: "confirmed", statusChangedAt: new Date() })
-        .where(
-          and(
-            eq(schema.appointments.id, agendamentoId),
-            eq(schema.appointments.customerId, customer.id),
-            eq(schema.appointments.status, "scheduled"),
-          ),
-        )
-        .returning({ id: schema.appointments.id });
-      if (!updated[0]) return "Esse agendamento já está confirmado.";
-      await db.insert(schema.appointmentStatusHistory).values({
-        clinicId: clinic.id,
-        appointmentId: agendamentoId,
-        fromStatus: "scheduled",
-        toStatus: "confirmed",
-        source: "customer_whatsapp",
-      });
-      await db
-        .update(schema.automationRuns)
-        .set({ status: "goal_reached", stopReason: "confirmado via assistente", nextRunAt: null, finishedAt: new Date() })
-        .where(
-          and(
-            eq(schema.automationRuns.appointmentId, agendamentoId),
-            eq(schema.automationRuns.status, "active"),
-          ),
-        );
-      return "Presença confirmada.";
+      // Só agendamento DESTA cliente; visita com vários serviços confirma todos os blocos
+      const dono = (
+        await db
+          .select({ customerId: schema.appointments.customerId })
+          .from(schema.appointments)
+          .where(eq(schema.appointments.id, agendamentoId))
+          .limit(1)
+      )[0];
+      if (!dono || dono.customerId !== customer.id) return "Agendamento não encontrado para esta cliente.";
+      const confirmado = await confirmVisit(
+        clinic.id,
+        customer.id,
+        agendamentoId,
+        "customer_whatsapp",
+        "confirmado via assistente",
+      );
+      return confirmado ? "Presença confirmada." : "Esse agendamento já está confirmado.";
     },
 
     async consultarPacote() {
@@ -1587,7 +1693,14 @@ async function runTurn(
   // turno que escalou antes: nada sai daqui
   const modeOk =
     live?.mode === "ai" || (live?.mode === "waiting_human" && reply.escalated && movedByThisTurn);
-  if (!live || !modeOk || (newerNeedsTurn && !reply.escalated)) {
+  // Toque de silêncio: QUALQUER sinal da cliente durante o turno (até reação ou
+  // figurinha) cancela a cutucada — ela já não está calada
+  const nudgeObsolete =
+    Boolean(nudgeMinutes) &&
+    (live?.mode !== "ai" ||
+      reply.escalated ||
+      Boolean(live?.lastInboundAt && conversation.lastInboundAt && live.lastInboundAt > conversation.lastInboundAt));
+  if (!live || !modeOk || nudgeObsolete || (newerNeedsTurn && !reply.escalated)) {
     logger.info(
       { conversationId: conversation.id, mode: live?.mode },
       "turno da IA descartado (takeover ou nova mensagem durante o turno)",
@@ -1601,6 +1714,37 @@ async function runTurn(
     return;
   }
 
+  // Toque: durante a chamada de IA pode ter entrado outra mensagem da clínica na
+  // fila (lembrete, aprovação liberada). A última fala tem que continuar sendo a
+  // MESMA pergunta da atendente, sem nada saindo — senão o toque fica sem sentido
+  if (nudgeMinutes) {
+    const saindo = (
+      await db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.clinicId, clinic.id),
+            eq(schema.messages.conversationId, conversation.id),
+            inArray(schema.messages.status, ["queued", "sending"]),
+          ),
+        )
+        .limit(1)
+    )[0];
+    const ultima = (
+      await db
+        .select({ direction: schema.messages.direction, author: schema.messages.author })
+        .from(schema.messages)
+        .where(and(eq(schema.messages.clinicId, clinic.id), eq(schema.messages.conversationId, conversation.id)))
+        .orderBy(desc(schema.messages.createdAt))
+        .limit(1)
+    )[0];
+    if (saindo || !ultima || ultima.direction !== "outbound" || ultima.author !== "ai") {
+      logger.info({ conversationId: conversation.id }, "toque descartado: a conversa andou durante o turno");
+      return;
+    }
+  }
+
   // Balões: espaçados 2.5–5s entre si (nunca rajada)
   let offset = 2_000 + Math.floor(Math.random() * 3_000);
   for (const balloon of reply.balloons) {
@@ -1611,7 +1755,9 @@ async function runTurn(
       author: "ai",
       body: balloon,
       status: "queued",
-      automationId: "ai_agent",
+      // O toque tem marca própria: limite de 1 a cada 12 h por conversa e
+      // cancelamento no envio se a cliente der sinal antes de ele sair
+      automationId: nudgeMinutes ? "ai_nudge" : "ai_agent",
       scheduledFor: new Date(Date.now() + offset),
     });
     offset += 2_500 + Math.floor(Math.random() * 2_500);

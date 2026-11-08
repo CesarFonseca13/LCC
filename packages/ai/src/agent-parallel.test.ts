@@ -54,6 +54,23 @@ beforeAll(async () => {
         );
         return;
       }
+      // Toque de silêncio: o último "user" é a instrução do sistema
+      if (lastUser.includes("a cliente NÃO escreveu nada")) {
+        if (body.messages.some((m) => m.role === "assistant" && (m.content ?? "").includes("cenario-toque-acao"))) {
+          // Modelo desobediente tenta cancelar num toque: nada pode acontecer
+          res.end(JSON.stringify(calls([{ name: "cancelar", args: { agendamento_id: "x" }, id: "c1" }])));
+          return;
+        }
+        const silencio = body.messages.some((m) => m.role === "assistant" && (m.content ?? "").includes("cenario-toque-silencio"));
+        res.end(
+          JSON.stringify(
+            calls([
+              { name: "responder_cliente", args: { balloons: [silencio ? "[SEM_MENSAGEM]" : "Está por aí? 😊"] }, id: "n1" },
+            ]),
+          ),
+        );
+        return;
+      }
       if (lastUser.includes("cenario-agendar")) {
         if (!hasToolResult) {
           res.end(
@@ -140,6 +157,44 @@ function executors(log: string[]): AgentToolExecutors {
     sugerirComplementos: async () => "nenhuma",
   };
 }
+
+describe("toque de silêncio", () => {
+  const nudgeInput = (lastAssistant: string): AgentTurnInput => ({
+    ...input("oi"),
+    history: [
+      { role: "customer", text: "quero marcar uma consulta" },
+      { role: "assistant", text: lastAssistant },
+    ],
+    nudge: { minutes: 12 },
+  });
+
+  it("cutuca com UM balão curto quando a pergunta ficou sem resposta", async () => {
+    const reply = await runAgentTurn(nudgeInput("Tenho quinta às 10h, pode ser?"), executors([]), { config: config() });
+    expect(reply.balloons).toEqual(["Está por aí? 😊"]);
+  });
+
+  it("[SEM_MENSAGEM] = nada sai para a cliente", async () => {
+    const reply = await runAgentTurn(nudgeInput("cenario-toque-silencio: posso ajudar em algo mais?"), executors([]), {
+      config: config(),
+    });
+    expect(reply.balloons).toEqual([]);
+  });
+
+  it("no toque só existe responder_cliente (forçado); qualquer outra coisa = silêncio, sem ação e sem escalar", async () => {
+    const log: string[] = [];
+    const before = requests.length;
+    const reply = await runAgentTurn(nudgeInput("cenario-toque-acao: quer que eu cancele a de quinta?"), executors(log), {
+      config: config(),
+    });
+    expect(reply.balloons).toEqual([]);
+    expect(reply.escalated).toBe(false);
+    expect(log).toEqual([]);
+    expect(requests.length - before).toBe(1);
+    const req = requests[requests.length - 1] as unknown as { tools?: { function?: { name?: string } }[]; tool_choice?: unknown };
+    expect((req.tools ?? []).map((t) => t.function?.name)).toEqual(["responder_cliente"]);
+    expect(JSON.stringify(req.tool_choice)).toContain("responder_cliente");
+  });
+});
 
 describe("resposta junto com outra ferramenta na mesma vez", () => {
   it("escalar + responder: escala de verdade e a resposta sai", async () => {

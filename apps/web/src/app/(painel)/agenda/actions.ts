@@ -470,6 +470,12 @@ async function stopConfirmationRuns(
       and(
         eq(schema.automationRuns.appointmentId, appointmentId),
         eq(schema.automationRuns.status, "active"),
+        // Confirmou: só a cobrança de confirmação para. O lembrete de 45 min e os
+        // pré-cuidados continuam (valem para quem confirmou). Cancelou/faltou/
+        // remarcou: para tudo.
+        outcome === "goal_reached"
+          ? inArray(schema.automationRuns.automationId, ["reminder_24h", "confirm_2h"])
+          : undefined,
       ),
     );
 }

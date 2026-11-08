@@ -209,7 +209,7 @@ function looksLikeFileName(body: string): boolean {
   return /^\S+\.[a-z0-9]{2,5}$/i.test(body.trim());
 }
 
-async function latestNotice(conversationId: string) {
+async function latestNotice(clinicId: string, conversationId: string) {
   const db = unsafeGlobalDb();
   return (
     await db
@@ -221,6 +221,7 @@ async function latestNotice(conversationId: string) {
       .from(schema.notifications)
       .where(
         and(
+          eq(schema.notifications.clinicId, clinicId),
           eq(schema.notifications.refTable, "conversations"),
           eq(schema.notifications.refId, conversationId),
           inArray(schema.notifications.type, ["conversation_needs_human", "conversation_urgent"]),
@@ -271,7 +272,7 @@ export async function flagUrgentText(
   logger: Logger,
 ): Promise<void> {
   if (!text || looksLikeFileName(text) || !looksLikeHealthComplaint(text)) return;
-  const last = await latestNotice(conversationId);
+  const last = await latestNotice(clinicId, conversationId);
   if (last?.type === "conversation_urgent") return;
   await insertUrgent(clinicId, conversationId, customerId, text, last?.body ?? null, logger);
 }
@@ -293,7 +294,7 @@ export async function flagUrgentIfHealth(
   window: { after?: Date; from?: Date } = {},
 ): Promise<void> {
   const db = unsafeGlobalDb();
-  const last = await latestNotice(conversationId);
+  const last = await latestNotice(clinicId, conversationId);
   if (last?.type === "conversation_urgent") return;
 
   const lowerBound = window.from
@@ -308,6 +309,7 @@ export async function flagUrgentIfHealth(
     .from(schema.messages)
     .where(
       and(
+        eq(schema.messages.clinicId, clinicId),
         eq(schema.messages.conversationId, conversationId),
         eq(schema.messages.direction, "inbound"),
         isNotNull(schema.messages.body),
